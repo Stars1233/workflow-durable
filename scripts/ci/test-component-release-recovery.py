@@ -947,8 +947,12 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
             }
         }
         component = self.recovery.COMPONENTS["workflow"]
-        selected = {"tag": "release-plan/current", "lifecycle": "actionable"}
-        authority = {"authority_snapshot": [selected]}
+        selected = {
+            "tag": "release-plan/current",
+            "plan": candidate,
+            "lifecycle": "actionable",
+        }
+        authority = {**selected, "authority_snapshot": [selected]}
         continuity = mock.Mock(
             side_effect=[
                 {
@@ -2169,7 +2173,12 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
             "registry_lifecycle_snapshot": self.recovery.json_authority_snapshot(
                 [selected]
             ),
-            "continuity_snapshot": continuity_snapshot,
+            "continuity_snapshots": [
+                {
+                    "plan_tag": tag,
+                    "authority": continuity_snapshot,
+                }
+            ],
         }
         source_tag = mock.Mock()
         release = mock.Mock()
@@ -2228,6 +2237,359 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
                 self.recovery.explicit_publication_authority_handoff(),
             )
         self.assertEqual("publish", exact_outputs["action"])
+
+    def test_late_plan_after_first_boundary_enumeration_blocks_every_handoff(
+        self,
+    ) -> None:
+        candidate = lifecycle_plan(self.recovery)
+        newer_plan = json.loads(json.dumps(candidate))
+        newer_plan["plan"] = "newer-boundary-plan"
+        preparation = {
+            "components": {
+                "workflow": {
+                    "release_notes": {
+                        "release_date": "2026-07-23",
+                        "sha256": "c" * 64,
+                        "source": {},
+                    }
+                }
+            }
+        }
+        tag = f"{self.recovery.PLAN_TAG_PREFIX}{candidate['plan']}"
+        newer_tag = f"{self.recovery.PLAN_TAG_PREFIX}{newer_plan['plan']}"
+        selected = {
+            "tag": tag,
+            "commit": "a" * 40,
+            "recorded_at": dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
+            "plan": candidate,
+            "preparation": preparation,
+            "lifecycle": "actionable",
+            "successor": None,
+        }
+        newer = {
+            **selected,
+            "tag": newer_tag,
+            "commit": "b" * 40,
+            "recorded_at": dt.datetime(2026, 7, 24, tzinfo=dt.UTC),
+            "plan": newer_plan,
+        }
+        continuity = {
+            "accepted": {
+                "tag": f"{self.recovery.CONTINUITY_TAG_PREFIX}{candidate['plan']}/accepted",
+                "commit": None,
+            },
+            "resumed": {
+                "tag": f"{self.recovery.CONTINUITY_TAG_PREFIX}{candidate['plan']}/resumed",
+                "commit": None,
+            },
+        }
+        authority_handoff = {
+            "schema": self.recovery.PUBLICATION_AUTHORITY_HANDOFF_SCHEMA,
+            "selection": "implicit",
+            "selected_authority": self.recovery.json_authority_snapshot(selected),
+            "registry_lifecycle_snapshot": self.recovery.json_authority_snapshot(
+                [selected]
+            ),
+            "continuity_snapshots": [
+                {
+                    "plan_tag": tag,
+                    "authority": continuity,
+                }
+            ],
+        }
+        enumerations = 0
+
+        def enumerate_tags(_client) -> list[str]:
+            nonlocal enumerations
+            enumerations += 1
+            return [tag] if enumerations == 1 else [tag, newer_tag]
+
+        plans = {tag: candidate, newer_tag: newer_plan}
+        commits = {tag: selected["commit"], newer_tag: newer["commit"]}
+        recorded_at = {
+            selected["commit"]: selected["recorded_at"],
+            newer["commit"]: newer["recorded_at"],
+        }
+        source_tag = mock.Mock()
+        release = mock.Mock()
+        registry_wait = mock.Mock()
+        publication_handoff = mock.Mock()
+        outputs = None
+        exit_code = 1
+        with (
+            mock.patch.object(self.recovery, "validate_release_preparation"),
+            mock.patch.object(
+                self.recovery,
+                "list_release_plan_tags",
+                side_effect=enumerate_tags,
+            ),
+            mock.patch.object(
+                self.recovery,
+                "resolve_tag",
+                side_effect=lambda _client, _repository, plan_tag: commits.get(
+                    plan_tag
+                ),
+            ),
+            mock.patch.object(
+                self.recovery,
+                "read_plan_authority",
+                side_effect=lambda _client, plan_tag, _commit: (
+                    plans[plan_tag],
+                    preparation,
+                ),
+            ),
+            mock.patch.object(
+                self.recovery,
+                "direct_plan_lifecycle",
+                return_value=("actionable", None),
+            ),
+            mock.patch.object(
+                self.recovery,
+                "immutable_plan_recorded_at",
+                side_effect=lambda _client, commit: recorded_at[commit],
+            ),
+            mock.patch.object(
+                self.recovery,
+                "accepted_continuity_supersession",
+                return_value=None,
+            ),
+            mock.patch.object(
+                self.recovery,
+                "continuity_authority_snapshot",
+                return_value=continuity,
+            ),
+            self.assertRaisesRegex(
+                self.recovery.RecoveryError,
+                "implicit publication authority changed after discovery",
+            ),
+        ):
+            _state, outputs = self.recovery.authorize_publication(
+                mock.Mock(),
+                "workflow",
+                tag,
+                selected["commit"],
+                candidate,
+                preparation,
+                authority_handoff,
+            )
+            exit_code = 0
+
+        self.assertEqual(2, enumerations)
+        if publication_credentials_are_eligible(exit_code, outputs):
+            source_tag()
+            release()
+            registry_wait()
+            publication_handoff()
+        source_tag.assert_not_called()
+        release.assert_not_called()
+        registry_wait.assert_not_called()
+        publication_handoff.assert_not_called()
+
+    def test_boundary_converges_complete_nonselected_continuity_authority(
+        self,
+    ) -> None:
+        candidate = lifecycle_plan(self.recovery)
+        preparation = {
+            "components": {
+                "workflow": {
+                    "release_notes": {
+                        "release_date": "2026-07-23",
+                        "sha256": "c" * 64,
+                        "source": {},
+                    }
+                }
+            }
+        }
+        tag = f"{self.recovery.PLAN_TAG_PREFIX}{candidate['plan']}"
+        selected = {
+            "tag": tag,
+            "commit": "a" * 40,
+            "recorded_at": dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
+            "plan": candidate,
+            "preparation": preparation,
+            "lifecycle": "actionable",
+            "successor": None,
+        }
+        older = {
+            **selected,
+            "tag": "release-plan/completed-older",
+            "commit": "b" * 40,
+            "recorded_at": dt.datetime(2026, 7, 22, tzinfo=dt.UTC),
+            "lifecycle": "completed",
+        }
+        stable_older_continuity = {
+            "accepted": {
+                "tag": "beta-continuity/completed-older/accepted",
+                "commit": "c" * 40,
+            },
+            "resumed": {
+                "tag": "beta-continuity/completed-older/resumed",
+                "commit": "d" * 40,
+            },
+        }
+        changing_older_continuity = json.loads(json.dumps(stable_older_continuity))
+        changing_older_continuity["resumed"]["commit"] = None
+        selected_continuity = {
+            "accepted": {
+                "tag": f"beta-continuity/{candidate['plan']}/accepted",
+                "commit": None,
+            },
+            "resumed": {
+                "tag": f"beta-continuity/{candidate['plan']}/resumed",
+                "commit": None,
+            },
+        }
+        stable_snapshot = {
+            "selected_authority": self.recovery.json_authority_snapshot(selected),
+            "registry_lifecycle_snapshot": self.recovery.json_authority_snapshot(
+                [older, selected]
+            ),
+            "continuity_snapshots": [
+                {
+                    "plan_tag": older["tag"],
+                    "authority": stable_older_continuity,
+                },
+                {
+                    "plan_tag": tag,
+                    "authority": selected_continuity,
+                },
+            ],
+        }
+        classify_registry = mock.Mock(return_value=(selected, [older, selected]))
+        classify_continuity = mock.Mock(
+            side_effect=[
+                changing_older_continuity,
+                selected_continuity,
+                stable_older_continuity,
+                selected_continuity,
+                stable_older_continuity,
+                selected_continuity,
+            ]
+        )
+        authority_handoff = {
+            "schema": self.recovery.PUBLICATION_AUTHORITY_HANDOFF_SCHEMA,
+            "selection": "implicit",
+            **stable_snapshot,
+        }
+        with (
+            mock.patch.object(self.recovery, "validate_release_preparation"),
+            mock.patch.object(
+                self.recovery,
+                "classify_implicit_plan_authority",
+                classify_registry,
+            ),
+            mock.patch.object(
+                self.recovery,
+                "continuity_authority_snapshot",
+                classify_continuity,
+            ),
+        ):
+            _state, outputs = self.recovery.authorize_publication(
+                mock.Mock(),
+                "workflow",
+                tag,
+                selected["commit"],
+                candidate,
+                preparation,
+                authority_handoff,
+            )
+
+        self.assertEqual(3, classify_registry.call_count)
+        self.assertEqual(6, classify_continuity.call_count)
+        self.assertEqual("publish", outputs["action"])
+
+    def test_nonconverging_boundary_exhausts_strict_scan_bound(
+        self,
+    ) -> None:
+        candidate = lifecycle_plan(self.recovery)
+        preparation = {
+            "components": {
+                "workflow": {
+                    "release_notes": {
+                        "release_date": "2026-07-23",
+                        "sha256": "c" * 64,
+                        "source": {},
+                    }
+                }
+            }
+        }
+        tag = f"{self.recovery.PLAN_TAG_PREFIX}{candidate['plan']}"
+        selected = {
+            "tag": tag,
+            "commit": "a" * 40,
+            "recorded_at": dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
+            "plan": candidate,
+            "preparation": preparation,
+            "lifecycle": "actionable",
+            "successor": None,
+        }
+        first_snapshot = {
+            "selected_authority": self.recovery.json_authority_snapshot(selected),
+            "registry_lifecycle_snapshot": self.recovery.json_authority_snapshot(
+                [selected]
+            ),
+            "continuity_snapshots": [
+                {
+                    "plan_tag": tag,
+                    "authority": {
+                        "accepted": {
+                            "tag": f"beta-continuity/{candidate['plan']}/accepted",
+                            "commit": None,
+                        },
+                        "resumed": {
+                            "tag": f"beta-continuity/{candidate['plan']}/resumed",
+                            "commit": None,
+                        },
+                    },
+                }
+            ],
+        }
+        second_snapshot = json.loads(json.dumps(first_snapshot))
+        second_snapshot["continuity_snapshots"][0]["authority"]["accepted"][
+            "commit"
+        ] = "b" * 40
+        classify = mock.Mock(
+            side_effect=[
+                (selected, first_snapshot),
+                (selected, second_snapshot),
+                (selected, first_snapshot),
+            ]
+        )
+        authority_handoff = {
+            "schema": self.recovery.PUBLICATION_AUTHORITY_HANDOFF_SCHEMA,
+            "selection": "implicit",
+            **first_snapshot,
+        }
+        outputs = None
+        exit_code = 1
+        with (
+            mock.patch.object(self.recovery, "validate_release_preparation"),
+            mock.patch.object(
+                self.recovery,
+                "classify_implicit_publication_authority",
+                classify,
+            ),
+            self.assertRaisesRegex(
+                self.recovery.RecoveryError,
+                "did not converge after 3 complete scans",
+            ),
+        ):
+            _state, outputs = self.recovery.authorize_publication(
+                mock.Mock(),
+                "workflow",
+                tag,
+                selected["commit"],
+                candidate,
+                preparation,
+                authority_handoff,
+            )
+            exit_code = 0
+
+        self.assertEqual(
+            self.recovery.IMPLICIT_AUTHORITY_MAX_ATTEMPTS,
+            classify.call_count,
+        )
+        self.assertFalse(publication_credentials_are_eligible(exit_code, outputs))
 
 
 class ProtectedPublicationWorkflowContractTest(unittest.TestCase):

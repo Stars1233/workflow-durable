@@ -38,7 +38,7 @@ SCHEMA = "durable-workflow.release-plan/v1"
 PREPARATION_SCHEMA = "durable-workflow.release-preparation/v1"
 STATE_SCHEMA = "durable-workflow.component-release-recovery/v1"
 PUBLICATION_AUTHORITY_HANDOFF_SCHEMA = (
-    "durable-workflow.release-plan-publication-authority/v1"
+    "durable-workflow.release-plan-publication-authority/v2"
 )
 CONTROL_REPOSITORY = "durable-workflow/.github"
 PLAN_TAG_PREFIX = "release-plan/"
@@ -2295,24 +2295,37 @@ def implicit_publication_authority_handoff(
             "plan-discovery",
         )
     revalidate_implicit_plan_authority(client, implicit_authority)
-    continuity_snapshot = continuity_authority_snapshot(client, plan)
-    if continuity_pause_from_snapshot(continuity_snapshot) is not None:
-        raise RecoveryError(
-            "continuity pause authority changed during component preflight; "
-            "refusing a stale recovery action",
-            "continuity-gate",
-        )
     selected_authority = {
         key: value
         for key, value in implicit_authority.items()
         if key not in {"authority_snapshot", "selection"}
     }
+    complete_snapshot = implicit_publication_authority_snapshot(
+        client,
+        selected_authority,
+        authority_snapshot,
+    )
+    selected_continuity = next(
+        (
+            item["authority"]
+            for item in complete_snapshot["continuity_snapshots"]
+            if item["plan_tag"] == selected_authority["tag"]
+        ),
+        None,
+    )
+    if (
+        selected_continuity is None
+        or continuity_pause_from_snapshot(selected_continuity) is not None
+    ):
+        raise RecoveryError(
+            "continuity pause authority changed during component preflight; "
+            "refusing a stale recovery action",
+            "continuity-gate",
+        )
     return {
         "schema": PUBLICATION_AUTHORITY_HANDOFF_SCHEMA,
         "selection": "implicit",
-        "selected_authority": json_authority_snapshot(selected_authority),
-        "registry_lifecycle_snapshot": json_authority_snapshot(authority_snapshot),
-        "continuity_snapshot": continuity_snapshot,
+        **complete_snapshot,
     }
 
 
@@ -2323,11 +2336,66 @@ def explicit_publication_authority_handoff() -> dict[str, str]:
     }
 
 
+def implicit_publication_authority_snapshot(
+    client: PublicClient,
+    selected_authority: dict[str, Any],
+    registry_lifecycle_snapshot: list[dict[str, Any]],
+) -> dict[str, Any]:
+    continuity_snapshots: list[dict[str, Any]] = []
+    for authority in registry_lifecycle_snapshot:
+        plan = authority.get("plan")
+        if not isinstance(plan, dict):
+            raise RecoveryError(
+                f"release plan {authority.get('tag')} lacks continuity authority",
+                "publication-authority",
+            )
+        continuity_snapshots.append(
+            {
+                "plan_tag": authority["tag"],
+                "authority": continuity_authority_snapshot(client, plan),
+            }
+        )
+    return {
+        "selected_authority": json_authority_snapshot(selected_authority),
+        "registry_lifecycle_snapshot": json_authority_snapshot(
+            registry_lifecycle_snapshot
+        ),
+        "continuity_snapshots": continuity_snapshots,
+    }
+
+
+def classify_implicit_publication_authority(
+    client: PublicClient,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    selected, registry_lifecycle_snapshot = classify_implicit_plan_authority(client)
+    return selected, implicit_publication_authority_snapshot(
+        client,
+        selected,
+        registry_lifecycle_snapshot,
+    )
+
+
+def converged_implicit_publication_authority(
+    client: PublicClient,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    previous_snapshot: dict[str, Any] | None = None
+    for _attempt in range(IMPLICIT_AUTHORITY_MAX_ATTEMPTS):
+        selected, current_snapshot = classify_implicit_publication_authority(client)
+        if current_snapshot == previous_snapshot:
+            return selected, current_snapshot
+        previous_snapshot = current_snapshot
+    raise RecoveryError(
+        "implicit publication registry, lifecycle, successor, or continuity "
+        "authority did not converge after "
+        f"{IMPLICIT_AUTHORITY_MAX_ATTEMPTS} complete scans",
+        "publication-authority",
+    )
+
+
 def validate_publication_authority_handoff(
     client: PublicClient,
     authority_handoff: dict[str, Any],
     tag: str,
-    plan: dict[str, Any],
 ) -> dict[str, Any]:
     if (
         not isinstance(authority_handoff, dict)
@@ -2361,28 +2429,37 @@ def validate_publication_authority_handoff(
         "selection",
         "selected_authority",
         "registry_lifecycle_snapshot",
-        "continuity_snapshot",
+        "continuity_snapshots",
     }:
         raise RecoveryError(
             "implicit publication handoff has malformed selection provenance",
             "publication-authority",
         )
     try:
-        current, current_snapshot = classify_implicit_plan_authority(client)
-        continuity_snapshot = continuity_authority_snapshot(client, plan)
+        current, complete_snapshot = converged_implicit_publication_authority(client)
     except RecoveryError as error:
         raise RecoveryError(
             f"implicit publication authority changed after discovery: {error}",
             "publication-authority",
         ) from error
+    selected_continuity = next(
+        (
+            item["authority"]
+            for item in complete_snapshot["continuity_snapshots"]
+            if item["plan_tag"] == current["tag"]
+        ),
+        None,
+    )
     if (
         current["tag"] != tag
-        or json_authority_snapshot(current)
-        != authority_handoff["selected_authority"]
-        or json_authority_snapshot(current_snapshot)
-        != authority_handoff["registry_lifecycle_snapshot"]
-        or continuity_snapshot != authority_handoff["continuity_snapshot"]
-        or continuity_pause_from_snapshot(continuity_snapshot) is not None
+        or complete_snapshot
+        != {
+            key: value
+            for key, value in authority_handoff.items()
+            if key not in {"schema", "selection"}
+        }
+        or selected_continuity is None
+        or continuity_pause_from_snapshot(selected_continuity) is not None
     ):
         raise RecoveryError(
             "implicit release plan registry, lifecycle, or continuity authority "
@@ -2427,7 +2504,6 @@ def authorize_publication(
             else explicit_publication_authority_handoff()
         ),
         tag,
-        plan,
     )
     if (
         current["commit"] != record_commit
