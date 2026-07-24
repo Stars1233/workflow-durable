@@ -2261,6 +2261,95 @@ def revalidate_explicit_plan_authority(
         )
 
 
+def authorize_publication(
+    client: PublicClient,
+    component_name: str,
+    tag: str,
+    record_commit: str,
+    plan: dict[str, Any],
+    preparation: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    if component_name not in COMPONENTS:
+        raise RecoveryError(
+            f"unknown release component: {component_name}",
+            "publication-authority",
+        )
+    validate_plan(plan)
+    validate_release_preparation(preparation, plan)
+    if tag != f"{PLAN_TAG_PREFIX}{plan['plan']}":
+        raise RecoveryError(
+            "publication handoff plan tag and document identity differ",
+            "publication-authority",
+        )
+    if not COMMIT_PATTERN.fullmatch(record_commit):
+        raise RecoveryError(
+            "publication handoff plan record commit is invalid",
+            "publication-authority",
+        )
+
+    matches = [
+        authority
+        for authority in classify_plan_authorities(client)
+        if authority["tag"] == tag
+    ]
+    if len(matches) != 1:
+        raise RecoveryError(
+            f"publication handoff {tag} lacks exact lifecycle authority",
+            "publication-authority",
+        )
+    current = matches[0]
+    if (
+        current["commit"] != record_commit
+        or current["plan"] != plan
+        or current["preparation"] != preparation
+    ):
+        raise RecoveryError(
+            f"publication handoff {tag} no longer matches exact plan authority",
+            "publication-authority",
+        )
+
+    lifecycle = current["lifecycle"]
+    if lifecycle == "superseded":
+        raise RecoveryError(
+            f"publication handoff {tag} is terminally superseded",
+            "publication-authority",
+        )
+    if lifecycle == "completed":
+        action = "verify"
+    elif lifecycle in {"actionable", "interrupted"}:
+        action = "publish"
+    else:
+        raise RecoveryError(
+            f"publication handoff {tag} has unsupported lifecycle authority",
+            "publication-authority",
+        )
+
+    identity = plan["components"][component_name]
+    state = base_state(component_name, tag, plan)
+    state.update(
+        {
+            "phase": "publication-authority",
+            "outcome": "authorized",
+            "action": action,
+            "lifecycle": lifecycle,
+            "plan_record_commit": record_commit,
+            "declared_identity": identity,
+            "resume_action": (
+                f"Publish {component_name} from the revalidated exact plan"
+                if action == "publish"
+                else f"Verify the completed {component_name} release"
+            ),
+        }
+    )
+    return state, {
+        "action": action,
+        "plan_tag": tag,
+        "plan_record_commit": record_commit,
+        "version": str(identity["version"]),
+        "commit": str(identity["commit"]),
+    }
+
+
 def discover_plan(
     client: PublicClient, requested_tag: str | None, component_name: str
 ) -> tuple[
@@ -3313,6 +3402,19 @@ def main() -> int:
     verify.add_argument("--registry-only", action="store_true")
     verify.add_argument("--evidence", required=True, type=Path)
 
+    publication = subparsers.add_parser("authorize-publication")
+    publication.add_argument(
+        "--component",
+        required=True,
+        choices=sorted(COMPONENTS),
+    )
+    publication.add_argument("--plan-tag", required=True)
+    publication.add_argument("--plan-record-commit", required=True)
+    publication.add_argument("--plan", required=True, type=Path)
+    publication.add_argument("--preparation", required=True, type=Path)
+    publication.add_argument("--evidence", required=True, type=Path)
+    publication.add_argument("--github-output", type=Path)
+
     select_run = subparsers.add_parser("select-publication-run")
     select_run.add_argument("--release-tag", required=True)
     select_run.add_argument("--release-commit", required=True)
@@ -3338,6 +3440,47 @@ def main() -> int:
                     for field in ("action", "run_id", "status", "conclusion")
                 )
             )
+        elif args.command == "authorize-publication":
+            plan: dict[str, Any] | None = None
+            try:
+                try:
+                    plan = json.loads(args.plan.read_bytes())
+                    preparation = json.loads(args.preparation.read_bytes())
+                except (OSError, json.JSONDecodeError) as error:
+                    raise RecoveryError(
+                        f"cannot read publication authority handoff: {error}",
+                        "publication-authority",
+                    ) from error
+                state, outputs = authorize_publication(
+                    client,
+                    args.component,
+                    args.plan_tag,
+                    args.plan_record_commit,
+                    plan,
+                    preparation,
+                )
+                args.evidence.write_bytes(canonical_json(state))
+                write_output(args.github_output, outputs)
+            except RecoveryError as error:
+                failure = base_state(
+                    args.component,
+                    args.plan_tag,
+                    plan if isinstance(plan, dict) else None,
+                )
+                failure.update(
+                    {
+                        "phase": error.phase,
+                        "outcome": "failed",
+                        "reason": str(error),
+                        "plan_record_commit": args.plan_record_commit,
+                        "resume_action": (
+                            "Rerun release recovery so discovery and protected publication "
+                            "use current lifecycle authority"
+                        ),
+                    }
+                )
+                args.evidence.write_bytes(canonical_json(failure))
+                raise
         elif args.command == "resolve":
             tag: str | None = args.plan_tag
             record_commit: str | None = None

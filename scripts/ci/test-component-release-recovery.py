@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,10 @@ from recovery_workflow_authority import (
 )
 
 RECOVERY_SCRIPT = Path(__file__).with_name("component-release-recovery.py")
+WORKFLOW_RECOVERY_WORKFLOW = (
+    Path(__file__).resolve().parents[2]
+    / ".github/workflows/release-plan-recovery.yml"
+)
 RUST_WORKFLOW_FIXTURE = Path(__file__).with_name(
     "sdk-rust-release-plan-recovery.fixture.yml"
 )
@@ -61,6 +66,24 @@ def publication_credentials_are_eligible(
         and outputs is not None
         and outputs.get("action") == "publish"
     )
+
+
+def workflow_job_source(source: str, name: str) -> str:
+    marker = f"  {name}:\n"
+    if marker not in source:
+        raise AssertionError(f"workflow does not define the {name} job")
+    job = source.split(marker, 1)[1]
+    next_job = re.search(r"(?m)^  [a-z][a-z0-9-]*:\s*$", job)
+    return job if next_job is None else job[: next_job.start()]
+
+
+def workflow_step_source(source: str, name: str) -> str:
+    marker = f"      - name: {name}\n"
+    if marker not in source:
+        raise AssertionError(f"workflow does not define the {name} step")
+    step = source.split(marker, 1)[1]
+    next_step = re.search(r"(?m)^      - (?:name|uses):", step)
+    return step if next_step is None else step[: next_step.start()]
 
 
 def load_recovery_module():
@@ -1141,6 +1164,161 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
         self.assertEqual("publication", state["phase"])
         self.assertTrue(publication_credentials_are_eligible(0, outputs))
 
+    def test_publication_boundary_preserves_supported_nonterminal_and_completed_actions(
+        self,
+    ) -> None:
+        candidate = lifecycle_plan(self.recovery)
+        preparation = {
+            "components": {
+                "workflow": {
+                    "release_notes": {
+                        "release_date": "2026-07-23",
+                        "sha256": "c" * 64,
+                        "source": {},
+                    }
+                }
+            }
+        }
+        tag = f"{self.recovery.PLAN_TAG_PREFIX}{candidate['plan']}"
+        commit = "a" * 40
+        authority = {
+            "tag": tag,
+            "commit": commit,
+            "recorded_at": dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
+            "plan": candidate,
+            "preparation": preparation,
+            "lifecycle": "actionable",
+            "successor": None,
+        }
+        with (
+            mock.patch.object(self.recovery, "validate_release_preparation"),
+            mock.patch.object(
+                self.recovery,
+                "classify_plan_authorities",
+                return_value=[authority],
+            ),
+        ):
+            for lifecycle, expected_action in (
+                ("actionable", "publish"),
+                ("interrupted", "publish"),
+                ("completed", "verify"),
+            ):
+                with self.subTest(lifecycle=lifecycle):
+                    authority["lifecycle"] = lifecycle
+                    state, outputs = self.recovery.authorize_publication(
+                        mock.Mock(),
+                        "workflow",
+                        tag,
+                        commit,
+                        candidate,
+                        preparation,
+                    )
+                    self.assertEqual(expected_action, outputs["action"])
+                    self.assertEqual("publication-authority", state["phase"])
+                    self.assertEqual(lifecycle, state["lifecycle"])
+
+    def test_publication_boundary_fails_closed_on_missing_or_mismatched_authority(
+        self,
+    ) -> None:
+        candidate = lifecycle_plan(self.recovery)
+        preparation = {
+            "components": {
+                "workflow": {
+                    "release_notes": {
+                        "release_date": "2026-07-23",
+                        "sha256": "c" * 64,
+                        "source": {},
+                    }
+                }
+            }
+        }
+        tag = f"{self.recovery.PLAN_TAG_PREFIX}{candidate['plan']}"
+        commit = "a" * 40
+        current = {
+            "tag": tag,
+            "commit": commit,
+            "recorded_at": dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
+            "plan": candidate,
+            "preparation": preparation,
+            "lifecycle": "actionable",
+            "successor": None,
+        }
+        cases = {
+            "absent exact plan": [],
+            "different plan record commit": [{**current, "commit": "b" * 40}],
+            "different plan document": [
+                {
+                    **current,
+                    "plan": {
+                        **candidate,
+                        "plan": "different-plan",
+                    },
+                }
+            ],
+            "different preparation": [
+                {
+                    **current,
+                    "preparation": {
+                        **preparation,
+                        "components": {},
+                    },
+                }
+            ],
+            "terminal lifecycle": [
+                {
+                    **current,
+                    "lifecycle": "superseded",
+                    "successor": {
+                        "tag": "release-plan/successor",
+                        "sha256": "b" * 64,
+                        "plan": {"plan": "successor"},
+                    },
+                }
+            ],
+        }
+        with mock.patch.object(self.recovery, "validate_release_preparation"):
+            for label, authorities in cases.items():
+                with (
+                    self.subTest(label=label),
+                    mock.patch.object(
+                        self.recovery,
+                        "classify_plan_authorities",
+                        return_value=authorities,
+                    ),
+                    self.assertRaises(self.recovery.RecoveryError),
+                ):
+                    self.recovery.authorize_publication(
+                        mock.Mock(),
+                        "workflow",
+                        tag,
+                        commit,
+                        candidate,
+                        preparation,
+                    )
+
+            with (
+                mock.patch.object(
+                    self.recovery,
+                    "classify_plan_authorities",
+                    side_effect=self.recovery.RecoveryError(
+                        "malformed terminal authority",
+                        "plan-discovery",
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    self.recovery.RecoveryError,
+                    "malformed terminal authority",
+                ),
+            ):
+                self.recovery.authorize_publication(
+                    mock.Mock(),
+                    "workflow",
+                    tag,
+                    commit,
+                    candidate,
+                    preparation,
+                )
+
     def test_interrupted_plan_rejects_multiple_continuity_successors(self) -> None:
         interrupted = lifecycle_plan(self.recovery)
         interrupted["plan"] = "interrupted-plan"
@@ -1743,6 +1921,234 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
         self,
     ) -> None:
         self.assert_explicit_terminal_record_cannot_publish("accepted-continuity")
+
+    def assert_post_discovery_terminal_record_blocks_publication(
+        self,
+        shape: str,
+    ) -> None:
+        registry = ExplicitTerminalLifecycleRegistry(
+            self.recovery,
+            shape,
+            visible_from_round=3,
+        )
+        component = self.recovery.COMPONENTS["workflow"]
+        source_tag = mock.Mock()
+        release = mock.Mock()
+        registry_wait = mock.Mock()
+        publication_handoff = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan_output = root / "release-plan.json"
+            preparation_output = root / "release-preparation.json"
+            discovery_evidence = root / "discovery-evidence.json"
+            discovery_output = root / "discovery-output"
+            boundary_evidence = root / "publication-authority-evidence.json"
+            boundary_output = root / "publication-output"
+            discovery_argv = [
+                str(RECOVERY_SCRIPT),
+                "resolve",
+                "--component",
+                "workflow",
+                "--plan-tag",
+                registry.failed_tag,
+                "--plan-output",
+                str(plan_output),
+                "--preparation-output",
+                str(preparation_output),
+                "--evidence",
+                str(discovery_evidence),
+                "--github-output",
+                str(discovery_output),
+            ]
+            boundary_argv = [
+                str(RECOVERY_SCRIPT),
+                "authorize-publication",
+                "--component",
+                "workflow",
+                "--plan-tag",
+                registry.failed_tag,
+                "--plan-record-commit",
+                registry.failed_commit,
+                "--plan",
+                str(plan_output),
+                "--preparation",
+                str(preparation_output),
+                "--evidence",
+                str(boundary_evidence),
+                "--github-output",
+                str(boundary_output),
+            ]
+            with (
+                mock.patch.object(
+                    self.recovery,
+                    "PublicClient",
+                    return_value=registry.client,
+                ),
+                mock.patch.object(
+                    self.recovery,
+                    "list_release_plan_tags",
+                    side_effect=registry.list_release_plan_tags,
+                ),
+                mock.patch.object(
+                    self.recovery,
+                    "resolve_tag",
+                    side_effect=registry.resolve_tag,
+                ),
+                mock.patch.object(
+                    self.recovery,
+                    "read_plan_authority",
+                    side_effect=registry.read_plan_authority,
+                ),
+                mock.patch.object(
+                    self.recovery,
+                    "read_record",
+                    side_effect=registry.read_record,
+                ),
+                mock.patch.object(
+                    self.recovery,
+                    "immutable_plan_recorded_at",
+                    side_effect=registry.immutable_plan_recorded_at,
+                ),
+                mock.patch.object(self.recovery, "validate_release_mirrors"),
+                mock.patch.object(
+                    self.recovery,
+                    "verify_plan_authority",
+                    return_value=({}, {}),
+                ),
+                mock.patch.object(
+                    self.recovery,
+                    "validate_release_preparation",
+                ),
+                mock.patch.dict(
+                    self.recovery.VERIFIERS,
+                    {component.distribution: registry.artifact_verifier},
+                ),
+                mock.patch.object(
+                    self.recovery.sys,
+                    "stderr",
+                    io.StringIO(),
+                ),
+            ):
+                with mock.patch.object(
+                    self.recovery.sys,
+                    "argv",
+                    discovery_argv,
+                ):
+                    discovery_exit_code = self.recovery.main()
+                discovery_outputs = dict(
+                    line.split("=", 1)
+                    for line in discovery_output.read_text().splitlines()
+                )
+                self.assertEqual(0, discovery_exit_code)
+                self.assertEqual("publish", discovery_outputs["action"])
+
+                with mock.patch.object(
+                    self.recovery.sys,
+                    "argv",
+                    boundary_argv,
+                ):
+                    boundary_exit_code = self.recovery.main()
+
+            boundary = json.loads(boundary_evidence.read_bytes())
+            self.assertEqual(1, boundary_exit_code)
+            self.assertEqual("failed", boundary["outcome"])
+            self.assertIn("terminally superseded", boundary["reason"])
+            self.assertFalse(boundary_output.exists())
+
+            if (
+                boundary_exit_code == 0
+                and boundary_output.exists()
+                and "action=publish" in boundary_output.read_text()
+            ):
+                source_tag()
+                release()
+                registry_wait()
+                publication_handoff()
+            source_tag.assert_not_called()
+            release.assert_not_called()
+            registry_wait.assert_not_called()
+            publication_handoff.assert_not_called()
+
+    def test_post_discovery_failure_record_blocks_every_publication_handoff(
+        self,
+    ) -> None:
+        self.assert_post_discovery_terminal_record_blocks_publication(
+            "terminal-failure"
+        )
+
+    def test_post_discovery_continuity_supersession_blocks_every_publication_handoff(
+        self,
+    ) -> None:
+        self.assert_post_discovery_terminal_record_blocks_publication(
+            "accepted-continuity"
+        )
+
+
+class ProtectedPublicationWorkflowContractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.workflow = WORKFLOW_RECOVERY_WORKFLOW.read_text()
+
+    def test_publication_revalidates_exact_handoff_before_every_handoff(
+        self,
+    ) -> None:
+        discover = workflow_job_source(self.workflow, "discover")
+        publish = workflow_job_source(self.workflow, "publish")
+        self.assertIn(
+            "plan-record-commit: ${{ steps.recovery.outputs.plan_record_commit }}",
+            discover,
+        )
+        boundary = "Revalidate exact lifecycle authority at the publication boundary"
+        self.assertIn(boundary, publish)
+        before_boundary, after_boundary = publish.split(boundary, 1)
+        self.assertNotIn("gh api --method POST", before_boundary)
+        self.assertNotIn("gh release create", before_boundary)
+        self.assertNotIn("component-release-recovery.py verify", before_boundary)
+        self.assertIn(
+            "component-release-recovery.py authorize-publication",
+            after_boundary,
+        )
+        for binding in (
+            "PLAN_RECORD_COMMIT: ${{ needs.discover.outputs.plan-record-commit }}",
+            "PLAN_TAG: ${{ needs.discover.outputs.plan_tag }}",
+            "--plan recovery-input/release-plan.json",
+            "--preparation recovery-input/release-preparation.json",
+            '--github-output "$GITHUB_OUTPUT"',
+        ):
+            self.assertIn(binding, after_boundary)
+
+        publish_guard = "if: steps.publication-authority.outputs.action == 'publish'"
+        for step_name in (
+            "Create the exact source tag",
+            "Wait for Packagist source identity",
+            "Create the source GitHub Release",
+        ):
+            with self.subTest(step=step_name):
+                self.assertIn(
+                    publish_guard,
+                    workflow_step_source(publish, step_name),
+                )
+        verification = workflow_step_source(
+            publish,
+            "Verify completed public release",
+        )
+        self.assertIn(
+            "steps.publication-authority.outputs.action == 'publish'",
+            verification,
+        )
+        self.assertIn(
+            "steps.publication-authority.outputs.action == 'verify'",
+            verification,
+        )
+        tag_step = workflow_step_source(publish, "Create the exact source tag")
+        self.assertIn(
+            "RELEASE_TAG: ${{ steps.publication-authority.outputs.version }}",
+            tag_step,
+        )
+        self.assertIn(
+            "RELEASE_COMMIT: ${{ steps.publication-authority.outputs.commit }}",
+            tag_step,
+        )
 
 
 class ReleasePreparationRecoveryTest(unittest.TestCase):
