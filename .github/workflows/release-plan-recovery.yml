@@ -79,23 +79,18 @@ jobs:
           if-no-files-found: warn
 
       - name: Package the privileged publication handoff as one immutable file
-        if: steps.recovery.outputs.action == 'publish'
         run: |
-          handoff=(
-            release-plan.json
-            release-preparation.json
-            release-recovery-evidence.json
-          )
-          for file in "${handoff[@]}"; do
-            if [ ! -f "$file" ]; then
-              printf 'release recovery handoff is missing %s\n' "$file" >&2
-              exit 1
-            fi
+          handoff=()
+          for file in release-plan.json release-preparation.json release-recovery-evidence.json; do
+            [ ! -f "$file" ] || handoff+=("$file")
           done
+          if [ "${#handoff[@]}" -eq 0 ]; then
+            printf 'release recovery produced no handoff evidence\n' >&2
+            exit 1
+          fi
           tar -cf release-recovery-handoff.tar "${handoff[@]}"
 
       - name: Bind the privileged publication handoff identity and digest
-        if: steps.recovery.outputs.action == 'publish'
         id: privileged-handoff
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:

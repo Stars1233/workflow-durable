@@ -2235,6 +2235,28 @@ class ProtectedPublicationWorkflowContractTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.workflow = WORKFLOW_RECOVERY_WORKFLOW.read_text()
 
+    def test_discovery_always_produces_the_immutable_publication_handoff(
+        self,
+    ) -> None:
+        discover = workflow_job_source(self.workflow, "discover")
+        package_handoff = workflow_step_source(
+            discover,
+            "Package the privileged publication handoff as one immutable file",
+        )
+        upload_handoff = workflow_step_source(
+            discover,
+            "Bind the privileged publication handoff identity and digest",
+        )
+        self.assertNotIn("\n        if:", package_handoff)
+        self.assertIn("handoff=()", package_handoff)
+        self.assertIn('[ ! -f "$file" ] || handoff+=("$file")', package_handoff)
+        self.assertIn('if [ "${#handoff[@]}" -eq 0 ]; then', package_handoff)
+        self.assertNotIn("\n        if:", upload_handoff)
+        self.assertIn("id: privileged-handoff", upload_handoff)
+        self.assertIn("archive: false", upload_handoff)
+        self.assertIn("if-no-files-found: error", upload_handoff)
+        self.assertIn("path: release-recovery-handoff.tar", upload_handoff)
+
     def test_publication_revalidates_exact_handoff_before_every_handoff(
         self,
     ) -> None:
