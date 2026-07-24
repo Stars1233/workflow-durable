@@ -37,6 +37,9 @@ from recovery_workflow_authority import (
 SCHEMA = "durable-workflow.release-plan/v1"
 PREPARATION_SCHEMA = "durable-workflow.release-preparation/v1"
 STATE_SCHEMA = "durable-workflow.component-release-recovery/v1"
+PUBLICATION_AUTHORITY_HANDOFF_SCHEMA = (
+    "durable-workflow.release-plan-publication-authority/v1"
+)
 CONTROL_REPOSITORY = "durable-workflow/.github"
 PLAN_TAG_PREFIX = "release-plan/"
 COMPLETION_TAG_PREFIX = "release-candidate/"
@@ -231,6 +234,21 @@ def canonical_json(value: Any) -> bytes:
     return (
         json.dumps(value, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
     ).encode()
+
+
+def json_authority_snapshot(value: Any) -> Any:
+    if isinstance(value, dt.datetime):
+        return (
+            value.astimezone(dt.UTC)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    if isinstance(value, dict):
+        return {str(key): json_authority_snapshot(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_authority_snapshot(item) for item in value]
+    return value
 
 
 class PublicClient:
@@ -2161,7 +2179,11 @@ def select_implicit_plan_authority(client: PublicClient) -> dict[str, Any]:
     for _attempt in range(IMPLICIT_AUTHORITY_MAX_ATTEMPTS):
         selected, authority_snapshot = classify_implicit_plan_authority(client)
         if implicit_plan_authority_converged(client, authority_snapshot):
-            return {**selected, "authority_snapshot": authority_snapshot}
+            return {
+                **selected,
+                "selection": "implicit",
+                "authority_snapshot": authority_snapshot,
+            }
     raise RecoveryError(
         "release plan registry or lifecycle authority did not converge "
         f"after {IMPLICIT_AUTHORITY_MAX_ATTEMPTS} attempts",
@@ -2261,6 +2283,115 @@ def revalidate_explicit_plan_authority(
         )
 
 
+def implicit_publication_authority_handoff(
+    client: PublicClient,
+    implicit_authority: dict[str, Any],
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    authority_snapshot = implicit_authority.get("authority_snapshot")
+    if not isinstance(authority_snapshot, list):
+        raise RecoveryError(
+            "implicit release plan authority is missing its converged registry snapshot",
+            "plan-discovery",
+        )
+    revalidate_implicit_plan_authority(client, implicit_authority)
+    continuity_snapshot = continuity_authority_snapshot(client, plan)
+    if continuity_pause_from_snapshot(continuity_snapshot) is not None:
+        raise RecoveryError(
+            "continuity pause authority changed during component preflight; "
+            "refusing a stale recovery action",
+            "continuity-gate",
+        )
+    selected_authority = {
+        key: value
+        for key, value in implicit_authority.items()
+        if key not in {"authority_snapshot", "selection"}
+    }
+    return {
+        "schema": PUBLICATION_AUTHORITY_HANDOFF_SCHEMA,
+        "selection": "implicit",
+        "selected_authority": json_authority_snapshot(selected_authority),
+        "registry_lifecycle_snapshot": json_authority_snapshot(authority_snapshot),
+        "continuity_snapshot": continuity_snapshot,
+    }
+
+
+def explicit_publication_authority_handoff() -> dict[str, str]:
+    return {
+        "schema": PUBLICATION_AUTHORITY_HANDOFF_SCHEMA,
+        "selection": "explicit",
+    }
+
+
+def validate_publication_authority_handoff(
+    client: PublicClient,
+    authority_handoff: dict[str, Any],
+    tag: str,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    if (
+        not isinstance(authority_handoff, dict)
+        or authority_handoff.get("schema")
+        != PUBLICATION_AUTHORITY_HANDOFF_SCHEMA
+    ):
+        raise RecoveryError(
+            "publication handoff lacks valid release plan selection provenance",
+            "publication-authority",
+        )
+    selection = authority_handoff.get("selection")
+    if selection == "explicit":
+        if set(authority_handoff) != {"schema", "selection"}:
+            raise RecoveryError(
+                "explicit publication handoff has malformed selection provenance",
+                "publication-authority",
+            )
+        matches = [
+            authority
+            for authority in classify_plan_authorities(client)
+            if authority["tag"] == tag
+        ]
+        if len(matches) != 1:
+            raise RecoveryError(
+                f"publication handoff {tag} lacks exact lifecycle authority",
+                "publication-authority",
+            )
+        return matches[0]
+    if selection != "implicit" or set(authority_handoff) != {
+        "schema",
+        "selection",
+        "selected_authority",
+        "registry_lifecycle_snapshot",
+        "continuity_snapshot",
+    }:
+        raise RecoveryError(
+            "implicit publication handoff has malformed selection provenance",
+            "publication-authority",
+        )
+    try:
+        current, current_snapshot = classify_implicit_plan_authority(client)
+        continuity_snapshot = continuity_authority_snapshot(client, plan)
+    except RecoveryError as error:
+        raise RecoveryError(
+            f"implicit publication authority changed after discovery: {error}",
+            "publication-authority",
+        ) from error
+    if (
+        current["tag"] != tag
+        or json_authority_snapshot(current)
+        != authority_handoff["selected_authority"]
+        or json_authority_snapshot(current_snapshot)
+        != authority_handoff["registry_lifecycle_snapshot"]
+        or continuity_snapshot != authority_handoff["continuity_snapshot"]
+        or continuity_pause_from_snapshot(continuity_snapshot) is not None
+    ):
+        raise RecoveryError(
+            "implicit release plan registry, lifecycle, or continuity authority "
+            "changed after discovery; refusing publication",
+            "publication-authority",
+        )
+    return current
+
+
 def authorize_publication(
     client: PublicClient,
     component_name: str,
@@ -2268,6 +2399,7 @@ def authorize_publication(
     record_commit: str,
     plan: dict[str, Any],
     preparation: dict[str, Any],
+    authority_handoff: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     if component_name not in COMPONENTS:
         raise RecoveryError(
@@ -2287,17 +2419,16 @@ def authorize_publication(
             "publication-authority",
         )
 
-    matches = [
-        authority
-        for authority in classify_plan_authorities(client)
-        if authority["tag"] == tag
-    ]
-    if len(matches) != 1:
-        raise RecoveryError(
-            f"publication handoff {tag} lacks exact lifecycle authority",
-            "publication-authority",
-        )
-    current = matches[0]
+    current = validate_publication_authority_handoff(
+        client,
+        (
+            authority_handoff
+            if authority_handoff is not None
+            else explicit_publication_authority_handoff()
+        ),
+        tag,
+        plan,
+    )
     if (
         current["commit"] != record_commit
         or current["plan"] != plan
@@ -3138,36 +3269,49 @@ def base_state(
 def scheduled_continuity_pause(
     client: PublicClient, plan: dict[str, Any]
 ) -> dict[str, str] | None:
+    return continuity_pause_from_snapshot(continuity_authority_snapshot(client, plan))
+
+
+def continuity_authority_snapshot(
+    client: PublicClient, plan: dict[str, Any]
+) -> dict[str, dict[str, str | None]]:
     accepted_tag = f"{CONTINUITY_TAG_PREFIX}{plan['plan']}/accepted"
     accepted_commit = resolve_tag(client, CONTROL_REPOSITORY, accepted_tag)
-    if accepted_commit is None:
-        return None
-    accepted_plan = read_record(
-        client, accepted_tag, accepted_commit, "release-plan.json"
-    )
-    validate_plan(accepted_plan)
-    if canonical_json(accepted_plan) != canonical_json(plan):
-        raise RecoveryError(
-            "continuity acceptance record names a different release plan",
-            "continuity-gate",
-        )
     resumed_tag = f"{CONTINUITY_TAG_PREFIX}{plan['plan']}/resumed"
     resumed_commit = resolve_tag(client, CONTROL_REPOSITORY, resumed_tag)
-    if resumed_commit is not None:
-        resumed_plan = read_record(
-            client, resumed_tag, resumed_commit, "release-plan.json"
+    for phase, tag, commit in (
+        ("acceptance", accepted_tag, accepted_commit),
+        ("resume", resumed_tag, resumed_commit),
+    ):
+        if commit is None:
+            continue
+        authority_plan = read_record(
+            client, tag, commit, "release-plan.json"
         )
-        validate_plan(resumed_plan)
-        if canonical_json(resumed_plan) != canonical_json(plan):
+        validate_plan(authority_plan)
+        if canonical_json(authority_plan) != canonical_json(plan):
             raise RecoveryError(
-                "continuity resume record names a different release plan",
+                f"continuity {phase} record names a different release plan",
                 "continuity-gate",
             )
+    return {
+        "accepted": {"tag": accepted_tag, "commit": accepted_commit},
+        "resumed": {"tag": resumed_tag, "commit": resumed_commit},
+    }
+
+
+def continuity_pause_from_snapshot(
+    snapshot: dict[str, dict[str, str | None]],
+) -> dict[str, str] | None:
+    accepted = snapshot["accepted"]
+    resumed = snapshot["resumed"]
+    accepted_commit = accepted["commit"]
+    if accepted_commit is None or resumed["commit"] is not None:
         return None
     return {
-        "accepted_tag": accepted_tag,
+        "accepted_tag": str(accepted["tag"]),
         "accepted_commit": accepted_commit,
-        "resumed_tag": resumed_tag,
+        "resumed_tag": str(resumed["tag"]),
     }
 
 
@@ -3288,16 +3432,16 @@ def resolve_component(
         and component_name in SOURCE_PRODUCT_TRAINS
     ):
         source_train = source_product_train_evidence(client, component_name, identity)
+    publication_authority = None
     if plan_authority is not None and plan_authority.get("selection") == "explicit":
         revalidate_explicit_plan_authority(client, plan_authority, action)
+        publication_authority = explicit_publication_authority_handoff()
     elif plan_authority is not None:
-        revalidate_implicit_plan_authority(client, plan_authority)
-        if scheduled_continuity_pause(client, plan) is not None:
-            raise RecoveryError(
-                "continuity pause authority changed during component preflight; "
-                "refusing a stale recovery action",
-                "continuity-gate",
-            )
+        publication_authority = implicit_publication_authority_handoff(
+            client,
+            plan_authority,
+            plan,
+        )
     state = base_state(component_name, tag, plan)
     state.update(
         {
@@ -3333,6 +3477,8 @@ def resolve_component(
         }
     if source_train is not None:
         state["source_product_train"] = source_train
+    if publication_authority is not None:
+        state["publication_authority"] = publication_authority
     outputs = {
         "action": action,
         "plan": str(plan["plan"]),
@@ -3412,6 +3558,7 @@ def main() -> int:
     publication.add_argument("--plan-record-commit", required=True)
     publication.add_argument("--plan", required=True, type=Path)
     publication.add_argument("--preparation", required=True, type=Path)
+    publication.add_argument("--discovery-evidence", required=True, type=Path)
     publication.add_argument("--evidence", required=True, type=Path)
     publication.add_argument("--github-output", type=Path)
 
@@ -3446,11 +3593,24 @@ def main() -> int:
                 try:
                     plan = json.loads(args.plan.read_bytes())
                     preparation = json.loads(args.preparation.read_bytes())
+                    discovery_evidence = json.loads(
+                        args.discovery_evidence.read_bytes()
+                    )
                 except (OSError, json.JSONDecodeError) as error:
                     raise RecoveryError(
                         f"cannot read publication authority handoff: {error}",
                         "publication-authority",
                     ) from error
+                authority_handoff = (
+                    discovery_evidence.get("publication_authority")
+                    if isinstance(discovery_evidence, dict)
+                    else None
+                )
+                if not isinstance(authority_handoff, dict):
+                    raise RecoveryError(
+                        "discovery evidence lacks publication authority provenance",
+                        "publication-authority",
+                    )
                 state, outputs = authorize_publication(
                     client,
                     args.component,
@@ -3458,6 +3618,7 @@ def main() -> int:
                     args.plan_record_commit,
                     plan,
                     preparation,
+                    authority_handoff,
                 )
                 args.evidence.write_bytes(canonical_json(state))
                 write_output(args.github_output, outputs)

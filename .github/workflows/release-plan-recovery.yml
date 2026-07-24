@@ -178,7 +178,7 @@ jobs:
           mkdir recovery-input
           tar -xf isolated-release-recovery/release-recovery-handoff.tar -C recovery-input
 
-      - name: Revalidate exact lifecycle authority at the publication boundary
+      - name: Revalidate immutable discovery authority at the publication boundary
         id: publication-authority
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -191,6 +191,7 @@ jobs:
             --plan-record-commit "$PLAN_RECORD_COMMIT" \
             --plan recovery-input/release-plan.json \
             --preparation recovery-input/release-preparation.json \
+            --discovery-evidence recovery-input/release-recovery-evidence.json \
             --evidence publication-authority-evidence.json \
             --github-output "$GITHUB_OUTPUT"
 

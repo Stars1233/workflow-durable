@@ -951,11 +951,25 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
         authority = {"authority_snapshot": [selected]}
         continuity = mock.Mock(
             side_effect=[
-                None,
                 {
-                    "accepted_tag": f"beta-continuity/{candidate['plan']}/accepted",
-                    "accepted_commit": "b" * 40,
-                    "resumed_tag": f"beta-continuity/{candidate['plan']}/resumed",
+                    "accepted": {
+                        "tag": f"beta-continuity/{candidate['plan']}/accepted",
+                        "commit": None,
+                    },
+                    "resumed": {
+                        "tag": f"beta-continuity/{candidate['plan']}/resumed",
+                        "commit": None,
+                    },
+                },
+                {
+                    "accepted": {
+                        "tag": f"beta-continuity/{candidate['plan']}/accepted",
+                        "commit": "b" * 40,
+                    },
+                    "resumed": {
+                        "tag": f"beta-continuity/{candidate['plan']}/resumed",
+                        "commit": None,
+                    },
                 },
             ]
         )
@@ -974,7 +988,7 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
             ),
             mock.patch.object(
                 self.recovery,
-                "scheduled_continuity_pause",
+                "continuity_authority_snapshot",
                 continuity,
             ),
             mock.patch.dict(
@@ -982,7 +996,11 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
                 {component.distribution: publication_preflight},
             ),
         ):
-            self.assertIsNone(continuity(mock.Mock(), candidate))
+            self.assertIsNone(
+                self.recovery.continuity_pause_from_snapshot(
+                    continuity(mock.Mock(), candidate)
+                )
+            )
             with self.assertRaisesRegex(
                 self.recovery.RecoveryError,
                 "continuity pause authority changed during component preflight",
@@ -1139,8 +1157,17 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
             ),
             mock.patch.object(
                 self.recovery,
-                "scheduled_continuity_pause",
-                return_value=None,
+                "continuity_authority_snapshot",
+                return_value={
+                    "accepted": {
+                        "tag": f"beta-continuity/{candidate['plan']}/accepted",
+                        "commit": None,
+                    },
+                    "resumed": {
+                        "tag": f"beta-continuity/{candidate['plan']}/resumed",
+                        "commit": None,
+                    },
+                },
             ),
             mock.patch.dict(
                 self.recovery.VERIFIERS,
@@ -1162,6 +1189,14 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
             )
 
         self.assertEqual("publication", state["phase"])
+        self.assertEqual(
+            "implicit",
+            state["publication_authority"]["selection"],
+        )
+        self.assertEqual(
+            self.recovery.json_authority_snapshot([selected]),
+            state["publication_authority"]["registry_lifecycle_snapshot"],
+        )
         self.assertTrue(publication_credentials_are_eligible(0, outputs))
 
     def test_publication_boundary_preserves_supported_nonterminal_and_completed_actions(
@@ -1973,6 +2008,8 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
                 str(plan_output),
                 "--preparation",
                 str(preparation_output),
+                "--discovery-evidence",
+                str(discovery_evidence),
                 "--evidence",
                 str(boundary_evidence),
                 "--github-output",
@@ -2083,6 +2120,115 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
             "accepted-continuity"
         )
 
+    def test_post_discovery_newer_plan_blocks_implicit_handoffs_but_not_exact(
+        self,
+    ) -> None:
+        candidate = lifecycle_plan(self.recovery)
+        preparation = {
+            "components": {
+                "workflow": {
+                    "release_notes": {
+                        "release_date": "2026-07-23",
+                        "sha256": "c" * 64,
+                        "source": {},
+                    }
+                }
+            }
+        }
+        tag = f"{self.recovery.PLAN_TAG_PREFIX}{candidate['plan']}"
+        selected = {
+            "tag": tag,
+            "commit": "a" * 40,
+            "recorded_at": dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
+            "plan": candidate,
+            "preparation": preparation,
+            "lifecycle": "actionable",
+            "successor": None,
+        }
+        newer = {
+            **selected,
+            "tag": "release-plan/newer",
+            "commit": "b" * 40,
+            "recorded_at": dt.datetime(2026, 7, 24, tzinfo=dt.UTC),
+            "plan": {**candidate, "plan": "newer"},
+        }
+        continuity_snapshot = {
+            "accepted": {
+                "tag": f"beta-continuity/{candidate['plan']}/accepted",
+                "commit": None,
+            },
+            "resumed": {
+                "tag": f"beta-continuity/{candidate['plan']}/resumed",
+                "commit": None,
+            },
+        }
+        authority_handoff = {
+            "schema": self.recovery.PUBLICATION_AUTHORITY_HANDOFF_SCHEMA,
+            "selection": "implicit",
+            "selected_authority": self.recovery.json_authority_snapshot(selected),
+            "registry_lifecycle_snapshot": self.recovery.json_authority_snapshot(
+                [selected]
+            ),
+            "continuity_snapshot": continuity_snapshot,
+        }
+        source_tag = mock.Mock()
+        release = mock.Mock()
+        registry_wait = mock.Mock()
+        publication_handoff = mock.Mock()
+        outputs = None
+        exit_code = 1
+        with (
+            mock.patch.object(self.recovery, "validate_release_preparation"),
+            mock.patch.object(
+                self.recovery,
+                "classify_plan_authorities",
+                return_value=[selected, newer],
+            ),
+            self.assertRaisesRegex(
+                self.recovery.RecoveryError,
+                "implicit publication authority changed after discovery",
+            ),
+        ):
+            _state, outputs = self.recovery.authorize_publication(
+                mock.Mock(),
+                "workflow",
+                tag,
+                selected["commit"],
+                candidate,
+                preparation,
+                authority_handoff,
+            )
+            exit_code = 0
+
+        if publication_credentials_are_eligible(exit_code, outputs):
+            source_tag()
+            release()
+            registry_wait()
+            publication_handoff()
+        source_tag.assert_not_called()
+        release.assert_not_called()
+        registry_wait.assert_not_called()
+        publication_handoff.assert_not_called()
+
+        with (
+            mock.patch.object(self.recovery, "validate_release_preparation"),
+            mock.patch.object(
+                self.recovery,
+                "classify_plan_authorities",
+                return_value=[selected, newer],
+            ),
+        ):
+            _state, exact_outputs = self.recovery.authorize_publication(
+                mock.Mock(),
+                "workflow",
+                tag,
+                selected["commit"],
+                candidate,
+                preparation,
+                self.recovery.explicit_publication_authority_handoff(),
+            )
+        self.assertEqual("publish", exact_outputs["action"])
+
 
 class ProtectedPublicationWorkflowContractTest(unittest.TestCase):
     @classmethod
@@ -2098,7 +2244,9 @@ class ProtectedPublicationWorkflowContractTest(unittest.TestCase):
             "plan-record-commit: ${{ steps.recovery.outputs.plan_record_commit }}",
             discover,
         )
-        boundary = "Revalidate exact lifecycle authority at the publication boundary"
+        boundary = (
+            "Revalidate immutable discovery authority at the publication boundary"
+        )
         self.assertIn(boundary, publish)
         before_boundary, after_boundary = publish.split(boundary, 1)
         self.assertNotIn("gh api --method POST", before_boundary)
@@ -2113,6 +2261,7 @@ class ProtectedPublicationWorkflowContractTest(unittest.TestCase):
             "PLAN_TAG: ${{ needs.discover.outputs.plan_tag }}",
             "--plan recovery-input/release-plan.json",
             "--preparation recovery-input/release-preparation.json",
+            "--discovery-evidence recovery-input/release-recovery-evidence.json",
             '--github-output "$GITHUB_OUTPUT"',
         ):
             self.assertIn(binding, after_boundary)
