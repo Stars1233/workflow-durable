@@ -19,6 +19,15 @@ RECOVERY_WORKFLOW = ROOT / ".github/workflows/release-plan-recovery.yml"
 RELEASE_AUDIT_WORKFLOW = ROOT / ".github/workflows/release-docs-audit.yml"
 
 
+def workflow_job_source(source: str, name: str) -> str:
+    marker = f"  {name}:\n"
+    if marker not in source:
+        raise AssertionError(f"workflow does not define the {name} job")
+    job = source.split(marker, 1)[1]
+    next_job = re.search(r"(?m)^  [a-z][a-z0-9-]*:\s*$", job)
+    return job if next_job is None else job[: next_job.start()]
+
+
 class QualificationClassificationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -172,12 +181,56 @@ class QualificationWorkflowTrustTest(unittest.TestCase):
             self.assertNotIn("pull_request", trigger)
 
         self.assertIn("if: github.ref == 'refs/heads/v2'", self.recovery)
-        self.assertIn("environment: packagist", self.recovery)
-        self.assertIn("\n      contents: write\n", self.recovery)
 
-    def test_no_workflow_consumes_artifacts_from_an_untrusted_run(self) -> None:
-        for source in self.workflow_sources:
-            self.assertNotIn("actions/download-artifact@", source)
+    def test_recovery_discovery_has_no_publication_authority(self) -> None:
+        discover = workflow_job_source(self.recovery, "discover")
+        self.assertIn("contents: read", discover)
+        self.assertNotIn("contents: write", discover)
+        self.assertNotIn("environment:", discover)
+        self.assertIn("component-release-recovery.py", discover)
+        self.assertIn(
+            "action: ${{ steps.recovery.outputs.action }}",
+            discover,
+        )
+
+    def test_recovery_publication_authority_requires_the_immutable_publish_decision(
+        self,
+    ) -> None:
+        publish = workflow_job_source(self.recovery, "publish")
+        self.assertIn("needs: discover", publish)
+        self.assertIn(
+            "needs.discover.outputs.action == 'publish'",
+            publish,
+        )
+        self.assertIn("environment: packagist", publish)
+        self.assertIn("contents: write", publish)
+        self.assertNotIn('component-release-recovery.py "${arguments[@]}"', publish)
+        self.assertEqual(1, self.recovery.count("environment: packagist"))
+        self.assertEqual(1, self.recovery.count("contents: write"))
+
+    def test_recovery_publication_consumes_only_the_exact_same_run_handoff(
+        self,
+    ) -> None:
+        discover = workflow_job_source(self.recovery, "discover")
+        publish = workflow_job_source(self.recovery, "publish")
+        for output in (
+            "artifact-digest: ${{ steps.privileged-handoff.outputs.artifact-digest }}",
+            "artifact-id: ${{ steps.privileged-handoff.outputs.artifact-id }}",
+            "source-run-attempt: ${{ github.run_attempt }}",
+            "source-run-id: ${{ github.run_id }}",
+        ):
+            self.assertIn(output, discover)
+        for binding in (
+            "artifact-ids: ${{ needs.discover.outputs.artifact-id }}",
+            "digest-mismatch: error",
+            "github-token: ${{ github.token }}",
+            "repository: ${{ github.repository }}",
+            "run-id: ${{ needs.discover.outputs.source-run-id }}",
+        ):
+            self.assertIn(binding, publish)
+        self.assertIn("EXPECTED_ARTIFACT_DIGEST:", publish)
+        self.assertIn("EXPECTED_SOURCE_RUN_ATTEMPT:", publish)
+        self.assertIn("EXPECTED_SOURCE_RUN_ID:", publish)
 
     def test_broad_jobs_require_the_full_class(self) -> None:
         for job in (
@@ -197,11 +250,7 @@ class QualificationWorkflowTrustTest(unittest.TestCase):
         self.assertIn("Report qualification class and elapsed time", build_job)
 
     def job_source(self, name: str) -> str:
-        marker = f"  {name}:\n"
-        self.assertIn(marker, self.build)
-        source = self.build.split(marker, 1)[1]
-        next_job = re.search(r"(?m)^  [a-z][a-z0-9-]*:\s*$", source)
-        return source if next_job is None else source[: next_job.start()]
+        return workflow_job_source(self.build, name)
 
 
 if __name__ == "__main__":

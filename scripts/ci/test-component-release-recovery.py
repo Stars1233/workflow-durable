@@ -52,6 +52,17 @@ CURRENT_PUBLIC_WORKFLOW_SHA256 = {
 }
 
 
+def publication_credentials_are_eligible(
+    resolver_exit_code: int,
+    outputs: dict[str, str] | None,
+) -> bool:
+    return (
+        resolver_exit_code == 0
+        and outputs is not None
+        and outputs.get("action") == "publish"
+    )
+
+
 def load_recovery_module():
     spec = importlib.util.spec_from_file_location(
         "component_release_recovery_test", RECOVERY_SCRIPT
@@ -1058,10 +1069,77 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
                     )
                     self.assertEqual("publish", outputs["action"])
                     self.assertEqual("publication", state["phase"])
+                    self.assertTrue(publication_credentials_are_eligible(0, outputs))
 
         self.assertEqual(1, classify.call_count)
         self.assertEqual(2, classify_explicit.call_count)
         self.assertEqual(3, publication_preflight.call_count)
+
+    def test_implicit_actionable_plan_reaches_the_publish_credential_gate(
+        self,
+    ) -> None:
+        candidate = lifecycle_plan(self.recovery)
+        preparation = {
+            "components": {
+                "workflow": {
+                    "release_notes": {
+                        "release_date": "2026-07-23",
+                        "sha256": "c" * 64,
+                        "source": {},
+                    }
+                }
+            }
+        }
+        component = self.recovery.COMPONENTS["workflow"]
+        selected = {
+            "tag": "release-plan/current",
+            "commit": "a" * 40,
+            "recorded_at": dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
+            "plan": candidate,
+            "preparation": preparation,
+            "lifecycle": "actionable",
+            "successor": None,
+        }
+        authority = {**selected, "authority_snapshot": [selected]}
+        with (
+            mock.patch.object(
+                self.recovery,
+                "verify_plan_authority",
+                return_value=({}, {}),
+            ),
+            mock.patch.object(self.recovery, "validate_release_preparation"),
+            mock.patch.object(self.recovery, "resolve_tag", return_value=None),
+            mock.patch.object(
+                self.recovery,
+                "classify_implicit_plan_authority",
+                return_value=(selected, [selected]),
+            ),
+            mock.patch.object(
+                self.recovery,
+                "scheduled_continuity_pause",
+                return_value=None,
+            ),
+            mock.patch.dict(
+                self.recovery.VERIFIERS,
+                {
+                    component.distribution: mock.Mock(
+                        side_effect=self.recovery.NotFound("not published")
+                    )
+                },
+            ),
+        ):
+            state, outputs = self.recovery.resolve_component(
+                mock.Mock(),
+                "workflow",
+                selected["tag"],
+                selected["commit"],
+                candidate,
+                preparation,
+                authority,
+            )
+
+        self.assertEqual("publication", state["phase"])
+        self.assertTrue(publication_credentials_are_eligible(0, outputs))
 
     def test_interrupted_plan_rejects_multiple_continuity_successors(self) -> None:
         interrupted = lifecycle_plan(self.recovery)
@@ -1652,6 +1730,9 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
                     )
                     self.assertFalse(github_output.exists())
                     handoff.assert_not_called()
+                    self.assertFalse(
+                        publication_credentials_are_eligible(exit_code, None)
+                    )
 
     def test_terminal_failure_record_blocks_explicit_absent_artifact_handoff(
         self,
@@ -1815,6 +1896,7 @@ class ReleasePreparationRecoveryTest(unittest.TestCase):
         self.assertEqual("skip", outputs["action"])
         self.assertEqual("complete", state["phase"])
         self.assertNotIn("release_preparation", state)
+        self.assertFalse(publication_credentials_are_eligible(0, outputs))
 
 
 class RecoveryWorkflowSourceTest(unittest.TestCase):
