@@ -2,11 +2,15 @@
 
 ## Unreleased
 
-- Joined Workflow to the synchronized Durable Workflow `2.0.0-beta.10`
+- Joined Workflow to the synchronized Durable Workflow `2.0.0-beta.11`
   product train. This is the only supported 2.0 prerelease baseline; earlier
   alphas and beta tuples remain historical and receive no compatibility shim.
-- Platform conformance Rust signal/query scenarios now install the exact
-  `durable-workflow =2.0.0-beta.10` crates.io artifact from that train.
+- Removed the package-owned hosted control-plane and runtime-target contract.
+  Embedded Laravel, independent self-hosted Server, and managed Cloud remain
+  separate deployment choices; Cloud placement stays behind the namespace
+  endpoint.
+- Platform conformance Rust signal/query scenarios continue to install the
+  exact compatible `durable-workflow =2.0.0-beta.10` crates.io artifact.
 
 - Release-plan recovery now consumes immutable, exact-version release-note
   preparation authority before publishing a newly recorded plan.

@@ -45,7 +45,7 @@ It does not cover:
 - engine architecture or durable-kernel contracts (see
   [`docs/workflow/plan.md`](../workflow/plan.md) and the architecture
   documents next to it);
-- managed-cloud readiness (see the readiness section of
+- managed service implementation details (see the deployment choices in
   [`docs/workflow/plan.md`](../workflow/plan.md));
 - the standalone server's polyglot worker examples, which live with the
   server documentation.
@@ -316,6 +316,6 @@ and leave this document alone.
 ## See Also
 
 - [`docs/workflow/plan.md`](../workflow/plan.md) — workflow package
-  plan, durable kernel feature mapping, and managed-cloud readiness.
+  plan, durable kernel feature mapping, and deployment choices.
 - [`docs/api-stability.md`](../api-stability.md) — stable API and
   history-event surface that the sample app is allowed to depend on.

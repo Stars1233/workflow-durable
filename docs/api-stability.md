@@ -117,7 +117,6 @@ is either promoted to a `Contracts\*` interface or removed:
 - `Workflow\V2\Support\EmbeddedV2HistoryImport`
 - `Workflow\V2\Support\EmbeddedV2ImportContract`
 - `Workflow\V2\Support\HistoryPayloadCompression`
-- `Workflow\V2\Support\HostedControlPlaneContract`
 - `Workflow\V2\Support\OperatorQueueVisibility`
 - `Workflow\V2\Support\PayloadEnvelopeResolver`
 - `Workflow\V2\Support\PlatformProtocolSpecs`

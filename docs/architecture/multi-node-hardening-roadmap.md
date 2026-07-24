@@ -38,7 +38,7 @@ cache plus identical nodes as the final architecture.
 | 1 | Phase 1: execution guarantees and idempotency contract | `docs/architecture/execution-guarantees.md` | none | operational liveness and transport repair, testing strategy, documentation plan |
 | 2 | Phase 2: mixed-version compatibility and worker routing | `docs/architecture/worker-compatibility.md` | Phase 1 | deployment modes, routing precedence and inheritance |
 | 3 | Phase 3: dedicated task matching and dispatch | `docs/architecture/task-matching.md` | Phases 1 and 2 | operational liveness and transport repair, operating envelope and hosting guidance |
-| 4 | Phase 4: control-plane and execution-plane role split | `docs/architecture/control-plane-split.md` | Phases 1, 2, and 3 | deployment modes, hosted control-plane and data-plane split |
+| 4 | Phase 4: control-plane and execution-plane role split | `docs/architecture/control-plane-split.md` | Phases 1, 2, and 3 | deployment modes, engine control-plane and execution-plane role split |
 | 5 | Phase 5: remove shared cache from scheduler correctness | `docs/architecture/scheduler-correctness.md` | Phases 1 through 4 | operational liveness and transport repair, operating envelope and hosting guidance |
 | 6 | Phase 6: rollout safety enforcement and coordination health | `docs/architecture/rollout-safety.md` | Phases 1 through 5 | operating envelope and hosting guidance |
 
@@ -91,8 +91,9 @@ The phase-linked adjacent contracts are inputs, not duplicates:
 - The operating envelope and hosting guidance contract owns hosting guidance,
   scheduler behavior, and unsupported topologies. Phases 3, 5, and 6 consume
   it.
-- The hosted control-plane and data-plane split contract owns managed
-  topology decisions. Phase 4 consumes it.
+- The engine control-plane and execution-plane role split contract owns
+  package and standalone Server role topology. Managed Cloud placement
+  remains outside the workflow package contract.
 
 When adjacent work changes a shared term, the phase contract that owns that term
 must be updated in the same change. This roadmap should not be expanded into a
@@ -100,9 +101,10 @@ second copy of the adjacent contracts.
 
 ## Cross-Repo Coordination
 
-The workflow package owns the normative contracts. Server, SDK, CLI, cloud, and
-Waterline consume those contracts through API manifests, deployment docs,
-operator metrics, diagnostics, and compatibility checks.
+The workflow package owns the normative engine contracts. Server, SDK, CLI,
+Cloud, and Waterline consume those contracts through API manifests, deployment
+docs, operator metrics, diagnostics, and compatibility checks. Cloud owns its
+managed placement and recovery topology separately.
 
 Cross-repo changes must follow the dependency order above. For example, a server
 change that exposes rollout-safety health must preserve Phase 1 idempotency,

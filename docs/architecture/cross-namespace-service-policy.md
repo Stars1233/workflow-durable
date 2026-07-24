@@ -192,13 +192,13 @@ The contract authorities are:
   `Workflow\V2\Enums\ServiceCallOutcome`; new outcomes are a protocol
   change.
 - **`workflow_service_calls.resolved_binding_kind`** — the durable
-  column recording the runtime target kind the boundary resolved for
+  column recording the runtime binding kind the boundary resolved for
   the call. The value is normalized from the operation row's
   `handler_binding_kind` into
   `Workflow\V2\Enums\ServiceCallBindingKind`, so handler adapter
   aliases such as `start_workflow` snapshot as runtime values such as
   `workflow_run`. This column is required even on rejections; for
-  boundary rejections it carries the runtime target kind derived from
+  boundary rejections it carries the runtime binding kind derived from
   the operation row at the time of rejection (or `unresolved` when
   the operation or binding kind failed to resolve).
 - **`PayloadEnvelopeResolver`** — the existing payload codec

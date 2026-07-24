@@ -15,8 +15,9 @@ contracted fields and named surfaces.
 
 The guarantees below apply to the `durable-workflow/workflow` package at
 v2, to embedded Laravel hosts, to the standalone server that embeds the
-package, to Waterline when installed into a host app, and to hosted
-control-plane products that place namespaces onto runtime targets.
+package, and to Waterline when installed into a host app. Managed
+services consume the package's namespace and worker-protocol semantics
+without making their placement topology part of this package contract.
 
 ## Scope
 
@@ -42,9 +43,9 @@ The contract covers:
 - **release posture** — the data-handling, encryption, compliance,
   audit-log, and support statements public release docs must make
   honestly for each distribution shape.
-- **hosted control-plane boundary** — how Cloud identity sits above
-  organizations, projects, environments, and namespaces while runtime
-  targets remain authoritative for execution facts.
+- **managed service boundary** — how a managed service can preserve
+  namespace-scoped command facts without exposing its internal
+  placement or recovery topology through the package.
 - **codec-server boundary** — why customer-managed payload decode is a
   separate trust boundary from Durable Workflow command authorization.
 - **cross-namespace service authorization** — how caller, endpoint,
@@ -74,7 +75,7 @@ It does not cover:
   request metadata where available.
 - **Service identity** — a non-human actor such as a scheduler,
   maintenance command, worker, Cloud service account, bridge adapter, or
-  runtime target. Service identities are actors for authorization and
+  managed service. Service identities are actors for authorization and
   audit purposes.
 - **Capability** — a stable dotted permission string such as
   `workflow.signal` or `schedule.pause`. Capabilities are the contract
@@ -91,7 +92,7 @@ It does not cover:
   in every projection.
 - **Audit record** — durable evidence written to `workflow_commands`,
   `workflow_history_events`, `workflow_schedule_history_events`,
-  `workflow_service_calls`, or a hosted control-plane audit log.
+  `workflow_service_calls`, or a Cloud audit log.
 - **Trust boundary** — a place where Durable Workflow changes which
   system is trusted for identity, authorization, payload decode, network
   authentication, or storage confidentiality.
@@ -215,9 +216,9 @@ Authorization is evaluated at the boundary that receives the command:
   boundary when they need a shorter label for the same delegation point.
   Waterline must not be the only place where operator identity is known.
 - **Cloud** authenticates organization/project/environment principals
-  above namespaces, then maps authorized operations to runtime-target
-  credentials and namespace-scoped requests. Cloud identity is not a
-  replacement for the runtime target's worker protocol auth.
+  above namespaces, then sends authorized operations to the managed
+  namespace endpoint. Cloud identity does not replace namespace-scoped
+  command authorization or worker-protocol authentication.
 - **Cross-namespace service calls** authorize the caller namespace and
   caller identity against endpoint, service, and operation policy before
   handler dispatch.
@@ -256,10 +257,10 @@ Durable audit data is split by mutation family:
   authorization completes, including caller identity, caller namespace,
   target namespace, endpoint, service, operation, boundary policy,
   binding kind, outcome, and failure detail.
-- **Hosted control planes** keep a control-plane audit log for Cloud-only
-  actions such as organization membership, API key management, runtime
-  target assignment, namespace provisioning, and namespace reassignment.
-  Runtime workflow facts still live on the runtime target.
+- **Managed services** keep a service audit log for service-owned actions
+  such as organization membership, API key management, and namespace
+  lifecycle. Namespace command and history facts retain the
+  package-defined shapes consumed behind the namespace endpoint.
 
 Audit data may include customer workflow metadata, target names, payload
 previews, error messages, and request fingerprints. Public docs and
@@ -347,7 +348,7 @@ posture in plain terms:
 - **Encryption posture.** Durable Workflow expects TLS for network
   transport in production. The at-rest encryption boundary is provided by the
   operator's database, object storage, filesystem, queue, cache, secret
-  manager, or hosted control-plane provider. The workflow package does
+  manager, or managed-service provider. The workflow package does
   not automatically encrypt every application payload field.
 - **Compliance posture.** The open-source package and self-hosted
   server provide controls and audit surfaces, not a compliance
@@ -366,7 +367,7 @@ Release notes MUST NOT claim stronger security, encryption, compliance,
 audit retention, support, or hosted identity guarantees than the shipped
 software and docs actually provide.
 
-## Cloud Hosted Identity Boundary
+## Managed Cloud Identity Boundary
 
 Cloud identity sits above namespaces:
 
@@ -374,27 +375,27 @@ Cloud identity sits above namespaces:
 Cloud organization
   project
     environment
-      namespace  ---> runtime target
+      namespace  ---> stable namespace endpoint
 ```
 
 Cloud owns hosted users, service accounts, organization membership,
 project/environment roles, API keys, namespace provisioning, namespace
-assignment, runtime-target inventory, and Cloud audit logs. A Cloud
-principal is the hosted actor summary for this boundary; each Cloud
-principal may be authorized to administer one namespace while having no
-rights to another namespace in the same organization.
+lifecycle, internal placement, recovery, and Cloud audit logs. Those
+service internals remain behind the namespace endpoint and are not
+package discovery fields. A Cloud principal is the hosted actor summary
+for this boundary; each Cloud principal may be authorized to administer
+one namespace while having no rights to another namespace in the same
+organization.
 
-The runtime target remains authoritative for workflow execution facts:
-worker registration, worker polling, workflow starts, signals, updates,
-cancels, terminates, schedules, history, visibility, task queues, and
-payload decode. Cloud may cache or summarize runtime facts, but it does
-not become the workflow history authority unless a future contract
-explicitly moves that boundary.
+SDK clients and workers use the namespace endpoint for workflow starts,
+signals, updates, polling, heartbeat, completion, and failure. When
+Cloud initiates a namespace command, it preserves an actor or service
+identity summary, the capability, target namespace, auth outcome,
+request fingerprint or Cloud audit id, and command outcome.
 
-When Cloud forwards or initiates a runtime command, it must preserve an
-actor or service identity summary, the capability, target namespace,
-auth outcome, request fingerprint or Cloud audit id, and runtime command
-outcome.
+Self-hosted Server remains a separate deployment choice. Its clients and
+workers connect to that Server directly, and the Server is never
+registered with or used as the service behind a Cloud namespace.
 
 ## Codec-Server Trust Boundary
 
@@ -448,8 +449,8 @@ The following public docs must stay aligned with this contract:
   and secret rotation.
 - Release and support docs describe data handling, encryption,
   compliance, audit-log, and support posture without overclaiming.
-- Cloud docs describe hosted identity above namespaces and runtime
-  targets as the data-plane authority.
+- Cloud docs describe hosted identity above namespaces while keeping
+  managed placement and recovery behind the namespace endpoint.
 - Codec and payload docs describe customer-managed decode as its own
   trust boundary.
 - Cross-namespace service docs describe caller, endpoint, service, and

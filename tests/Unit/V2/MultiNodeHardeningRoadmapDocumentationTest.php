@@ -42,7 +42,6 @@ final class MultiNodeHardeningRoadmapDocumentationTest extends TestCase
         'deployment modes',
         'routing precedence and inheritance',
         'operating envelope and hosting guidance',
-        'hosted control-plane and data-plane split',
     ];
 
     public function testRoadmapDocumentExistsAndDeclaresRequiredSections(): void
