@@ -10,6 +10,9 @@
 
 - Release-plan recovery now consumes immutable, exact-version release-note
   preparation authority before publishing a newly recorded plan.
+- Explicit release recovery rejects terminally superseded plans before and
+  after publication preflight while keeping completed-plan verification
+  idempotent.
 - Standalone workers now receive accepted declared signals even when the host
   has no embedded workflow definition or local wait projection. Signal tasks
   retain command order ahead of queued updates, and QueueFake update completion
