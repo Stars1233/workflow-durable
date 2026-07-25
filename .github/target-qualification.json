@@ -20,6 +20,9 @@
         "recovery-contract": [
             "scripts/ci/cli-release-plan-recovery.fixture.yml",
             "scripts/ci/cli_release_verifier_contract.py",
+            "scripts/ci/release-recovery-consumer-adapter.json",
+            "scripts/ci/release-recovery-consumer-contract.json",
+            "scripts/ci/release_recovery_consumer_conformance.py",
             "scripts/ci/sdk-python-release-plan-recovery.fixture.yml",
             "scripts/ci/sdk-rust-release-plan-recovery.fixture.yml",
             "scripts/ci/server-release-plan-recovery.fixture.yml",

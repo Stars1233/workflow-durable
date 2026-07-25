@@ -189,7 +189,7 @@ function verify_gate_wiring(string $workflow, string $publicBoundaryWorkflow): v
             'classification behavior and trust tests' => 'test-build-qualification.py',
             'exact feature inventory verification' => 'verify-feature-shards.php',
             'workflow YAML syntax validation' => "yq eval-all '.' .github/workflows/*.yml",
-            'release recovery contract tests' => 'test-component-release-recovery.py',
+            'release recovery conformance' => 'release_recovery_consumer_conformance.py',
             'public-boundary validation' => 'scripts/check-public-boundary.sh',
         ] as $description => $needle
     ) {
