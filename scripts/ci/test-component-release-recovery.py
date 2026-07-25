@@ -906,12 +906,10 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
                 "accepted_continuity_supersession",
                 return_value=None,
             ),
-            self.assertRaisesRegex(
-                self.recovery.RecoveryError,
-                "no public release plan is available",
-            ),
         ):
-            self.recovery.select_implicit_plan_authority(mock.Mock())
+            selected = self.recovery.select_implicit_plan_authority(mock.Mock())
+        self.assertEqual(tags[1], selected["tag"])
+        self.assertEqual("completed", selected["lifecycle"])
 
     def test_equal_versions_with_different_source_commits_are_conflicting(self) -> None:
         first = lifecycle_plan(self.recovery, "beta")
@@ -1073,7 +1071,7 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
             self.recovery.current_product_train_authorities(authorities),
         )
 
-    def test_scheduled_recovery_without_actionable_plan_is_a_truthful_no_op(self) -> None:
+    def test_scheduled_recovery_without_plan_authority_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             evidence = root / "release-recovery-evidence.json"
@@ -1106,15 +1104,15 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
                 ),
                 mock.patch.object(self.recovery, "resolve_component") as recover_component,
             ):
-                self.assertEqual(0, self.recovery.main())
+                self.assertEqual(1, self.recovery.main())
 
             recover_component.assert_not_called()
             state = json.loads(evidence.read_text())
             self.assertEqual("plan-discovery", state["phase"])
-            self.assertEqual("idle", state["outcome"])
-            self.assertEqual("action=none\n", github_output.read_text())
+            self.assertEqual("failed", state["outcome"])
+            self.assertFalse(github_output.exists())
 
-    def test_explicit_completed_plan_is_not_recovered(self) -> None:
+    def test_explicit_completed_plan_is_selected_for_verification(self) -> None:
         candidate = lifecycle_plan(self.recovery, "beta")
         tag = f"release-plan/{candidate['plan']}"
         commit = "a" * 40
@@ -1134,18 +1132,15 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
                 "classify_plan_authorities",
                 return_value=[authority],
             ),
-            self.assertRaisesRegex(
-                self.recovery.RecoveryError,
-                "is completed and cannot be recovered",
-            ),
         ):
-            self.recovery.select_explicit_plan_authority(
+            selected = self.recovery.select_explicit_plan_authority(
                 mock.Mock(),
                 tag,
                 commit,
                 candidate,
                 None,
             )
+        self.assertEqual({**authority, "selection": "explicit"}, selected)
 
     def test_convergence_rechecks_nonselected_lifecycle_authority(self) -> None:
         older = {"tag": "release-plan/older", "lifecycle": "completed"}
@@ -1439,6 +1434,81 @@ class ImmutablePlanDiscoveryTest(unittest.TestCase):
             state["publication_authority"]["registry_lifecycle_snapshot"],
         )
         self.assertTrue(publication_credentials_are_eligible(0, outputs))
+
+    def test_implicit_completed_plan_refuses_publication_when_artifact_is_absent(
+        self,
+    ) -> None:
+        candidate = lifecycle_plan(self.recovery)
+        preparation = {
+            "components": {
+                "sdk-php": {
+                    "release_notes": {
+                        "release_date": "2026-07-23",
+                        "sha256": "c" * 64,
+                        "source": {},
+                    }
+                }
+            }
+        }
+        component = self.recovery.COMPONENTS["sdk-php"]
+        selected = {
+            "tag": "release-plan/completed",
+            "commit": "a" * 40,
+            "recorded_at": dt.datetime(2026, 7, 23, tzinfo=dt.UTC),
+            "plan": candidate,
+            "preparation": preparation,
+            "lifecycle": "completed",
+            "successor": None,
+        }
+        authority = {
+            **selected,
+            "selection": "implicit",
+            "authority_snapshot": [selected],
+        }
+
+        with (
+            mock.patch.object(
+                self.recovery,
+                "verify_plan_authority",
+                return_value=({}, {}),
+            ),
+            mock.patch.object(self.recovery, "validate_release_preparation"),
+            mock.patch.object(self.recovery, "resolve_tag", return_value=None),
+            mock.patch.object(
+                self.recovery,
+                "classify_implicit_plan_authority",
+                return_value=(selected, [selected]),
+            ),
+            mock.patch.object(
+                self.recovery,
+                "continuity_authority_snapshot",
+                return_value={
+                    "accepted": {"tag": None, "commit": None},
+                    "resumed": {"tag": None, "commit": None},
+                },
+            ),
+            mock.patch.dict(
+                self.recovery.VERIFIERS,
+                {
+                    component.distribution: mock.Mock(
+                        side_effect=self.recovery.NotFound("not published")
+                    )
+                },
+            ),
+            self.assertRaisesRegex(
+                self.recovery.RecoveryError,
+                "is completed; refusing publication instead of idempotent verification",
+            ),
+        ):
+            self.recovery.resolve_component(
+                mock.Mock(),
+                "sdk-php",
+                selected["tag"],
+                selected["commit"],
+                candidate,
+                preparation,
+                authority,
+            )
 
     def test_publication_boundary_preserves_supported_nonterminal_and_completed_actions(
         self,

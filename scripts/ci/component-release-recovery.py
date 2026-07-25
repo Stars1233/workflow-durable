@@ -2313,7 +2313,7 @@ def classify_implicit_plan_authority(
             "plan-discovery",
         )
     selected = current_train[-1]
-    if selected["lifecycle"] in {"completed", "superseded"}:
+    if selected["lifecycle"] == "superseded":
         selected = None
     return selected, authorities
 
@@ -2390,12 +2390,8 @@ def select_explicit_plan_authority(
             f"explicit release plan {tag} changed while its lifecycle was classified",
             "plan-discovery",
         )
-    if authority["lifecycle"] not in {"actionable", "interrupted"}:
-        lifecycle = (
-            "terminally superseded"
-            if authority["lifecycle"] == "superseded"
-            else authority["lifecycle"]
-        )
+    if authority["lifecycle"] not in {"actionable", "interrupted", "completed"}:
+        lifecycle = "terminally superseded"
         raise RecoveryError(
             f"explicit release plan {tag} is {lifecycle} and cannot be recovered",
             "plan-discovery",
@@ -2436,9 +2432,16 @@ def revalidate_explicit_plan_authority(
             "during component preflight; refusing a stale recovery action",
             "plan-discovery",
         )
-    if current["lifecycle"] == "completed" and action == "publish":
+    require_completed_plan_verification(current, action)
+
+
+def require_completed_plan_verification(
+    authority: dict[str, Any],
+    action: str,
+) -> None:
+    if authority.get("lifecycle") == "completed" and action == "publish":
         raise RecoveryError(
-            f"explicit release plan {explicit_authority['tag']} is completed; "
+            f"release plan {authority['tag']} is completed; "
             "refusing publication instead of idempotent verification",
             "plan-discovery",
         )
@@ -2448,6 +2451,7 @@ def implicit_publication_authority_handoff(
     client: PublicClient,
     implicit_authority: dict[str, Any],
     plan: dict[str, Any],
+    action: str,
 ) -> dict[str, Any]:
     authority_snapshot = implicit_authority.get("authority_snapshot")
     if not isinstance(authority_snapshot, list):
@@ -2456,6 +2460,7 @@ def implicit_publication_authority_handoff(
             "plan-discovery",
         )
     revalidate_implicit_plan_authority(client, implicit_authority)
+    require_completed_plan_verification(implicit_authority, action)
     selected_authority = {
         key: value
         for key, value in implicit_authority.items()
@@ -3678,6 +3683,7 @@ def resolve_component(
             client,
             plan_authority,
             plan,
+            action,
         )
     state = base_state(component_name, tag, plan)
     state.update(
@@ -3934,23 +3940,6 @@ def main() -> int:
                 args.evidence.write_bytes(canonical_json(state))
                 write_output(args.github_output, outputs)
             except RecoveryError as error:
-                if (
-                    args.allow_empty
-                    and error.phase == "plan-discovery"
-                    and str(error) == "no public release plan is available"
-                ):
-                    idle = base_state(args.component)
-                    idle.update(
-                        {
-                            "phase": "plan-discovery",
-                            "outcome": "idle",
-                            "reason": str(error),
-                            "resume_action": "No action is required; scheduled discovery will check again",
-                        }
-                    )
-                    args.evidence.write_bytes(canonical_json(idle))
-                    write_output(args.github_output, {"action": "none"})
-                    return 0
                 failure = base_state(args.component, tag, plan)
                 if record_commit is not None:
                     failure["plan_record_commit"] = record_commit
