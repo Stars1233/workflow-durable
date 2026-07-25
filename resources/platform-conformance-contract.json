@@ -240,9 +240,9 @@
           "worker_runtime": "sdk-rust",
           "artifact": {
             "package": "durable-workflow",
-            "version": "2.0.0-beta.14",
+            "version": "2.0.0-beta.16",
             "source": "crates.io",
-            "cargo_requirement": "=2.0.0-beta.14"
+            "cargo_requirement": "=2.0.0-beta.16"
           },
           "query_state_model": "snapshot_derived_transport_state",
           "caller_paths": [
@@ -255,9 +255,9 @@
           "worker_runtime": "sdk-python",
           "artifact": {
             "package": "durable-workflow",
-            "version": "2.0.0-beta.14",
+            "version": "2.0.0-beta.16",
             "source": "crates.io",
-            "cargo_requirement": "=2.0.0-beta.14"
+            "cargo_requirement": "=2.0.0-beta.16"
           },
           "rust_role": "client",
           "caller_paths": [
@@ -268,9 +268,9 @@
           "worker_runtime": "sdk-php",
           "artifact": {
             "package": "durable-workflow",
-            "version": "2.0.0-beta.14",
+            "version": "2.0.0-beta.16",
             "source": "crates.io",
-            "cargo_requirement": "=2.0.0-beta.14"
+            "cargo_requirement": "=2.0.0-beta.16"
           },
           "rust_role": "client",
           "caller_paths": [
@@ -281,9 +281,9 @@
           "worker_runtime": "sdk-rust",
           "artifact": {
             "package": "durable-workflow",
-            "version": "2.0.0-beta.14",
+            "version": "2.0.0-beta.16",
             "source": "crates.io",
-            "cargo_requirement": "=2.0.0-beta.14"
+            "cargo_requirement": "=2.0.0-beta.16"
           },
           "query_state_model": "snapshot_derived_transport_state",
           "required_assertions": [
@@ -304,9 +304,9 @@
           "worker_runtime": "sdk-rust",
           "artifact": {
             "package": "durable-workflow",
-            "version": "2.0.0-beta.14",
+            "version": "2.0.0-beta.16",
             "source": "crates.io",
-            "cargo_requirement": "=2.0.0-beta.14"
+            "cargo_requirement": "=2.0.0-beta.16"
           },
           "query_state_model": "replayed_workflow_instance_state",
           "lifecycle": [
