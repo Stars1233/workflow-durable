@@ -556,11 +556,6 @@ documented contract and the matching test in the same change:
   schedule-to-run routing handoff.
 - `V2OperatorQueueVisibilityTest` and the run-detail/list projection
   tests for the operator-visible routing exposure.
-- This pinning test,
-  `tests/Unit/V2/RoutingPrecedenceDocumentationTest.php`, which
-  asserts the contract document contains the frozen headings, terms,
-  authority class names, column names, and the rule statements named
-  above.
 
 ## Changing this contract
 
@@ -571,12 +566,9 @@ protocol-level change. The required process is:
 1. Update this contract document first, including the terminology,
    the resolution and inheritance tables, and the test strategy
    alignment section as appropriate.
-2. Update the pinning test
-   `tests/Unit/V2/RoutingPrecedenceDocumentationTest.php` in the
-   same change so the regression guard tracks the new rule.
-3. Update the concrete behaviour tests listed above so they exercise
+2. Update the concrete behaviour tests listed above so they exercise
    the new rule.
-4. Update product docs on the docs site, CLI reasoning, and
+3. Update product docs on the docs site, CLI reasoning, and
    Waterline surfaces that reference the rule so the fleet speaks
    one language.
 

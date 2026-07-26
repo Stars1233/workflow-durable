@@ -482,8 +482,7 @@ Frozen `liveness_state` values:
 - `timer_scheduled` — a timer task is scheduled to fire.
 
 A `liveness_state` that is not in this enumeration is a protocol
-violation; adding a value requires updating this contract and the
-pinning test.
+violation.
 
 Rules:
 
@@ -877,22 +876,12 @@ Rules:
 
 ## Test strategy alignment
 
-This contract is pinned by a dedicated unit test so that the
-guarantees here are reviewed with the implementation.
-
-- `tests/Unit/V2/OperationalLivenessDocumentationTest.php` asserts
-  the presence of every heading, term, class, migration, env var,
-  health check, claim reason code, liveness state, frozen metric
-  key, and migration-path step documented above.
 - Behaviour tests for redelivery, repair, heartbeat renewal, claim
   transitions, and admin HTTP routes live under
   `tests/Feature/V2/` and `tests/Unit/V2/` with class names
   including `TaskRepair`, `TaskRepairPolicy`, `TaskRepairCandidates`,
   `ActivityTaskClaimer`, `ActivityLease`, `TaskDispatcher`, and
   `RunSummaryProjector`.
-- A change to any named guarantee requires both a doc update here
-  and a test update. A change that drops a test assertion without
-  updating the doc is a contract violation.
 
 ## What this contract does not yet guarantee
 
@@ -923,17 +912,13 @@ roadmap and are tracked as follow-on roadmap issues:
 
 A change to any guarantee named here MUST ship alongside:
 
-1. A matching change to
-   `tests/Unit/V2/OperationalLivenessDocumentationTest.php` that
-   adds, renames, or removes the assertion for the changed
-   guarantee.
-2. A matching change to the class, method, migration, or config
+1. A matching change to the class, method, migration, or config
    variable cited so that the code matches the doc.
-3. A matching change to `docs/architecture/rollout-safety.md` if
+2. A matching change to `docs/architecture/rollout-safety.md` if
    the change also affects the rollout-safety envelope.
-4. A matching change to `docs/architecture/execution-guarantees.md`
+3. A matching change to `docs/architecture/execution-guarantees.md`
    if the change also affects duplicate-execution semantics.
-5. An entry in the repository's public release notes that calls
+4. An entry in the repository's public release notes that calls
    out the protocol impact.
 
 This contract builds on Phase 1 execution guarantees,

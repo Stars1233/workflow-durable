@@ -329,13 +329,6 @@ not be assumed:
 - `tests/Feature/V2/V2OperatorQueueVisibilityTest.php` and
   `tests/Feature/V2/V2OperatorMetricsTest.php` cover the operator
   surfaces that expose `build_ids` and worker scopes.
-- This document is pinned by
-  `tests/Unit/V2/WorkerCompatibilityDocumentationTest.php`. A change
-  that renames, removes, or narrows any named guarantee (marker
-  inheritance, claim-time enforcement, the `supports_required` flag,
-  the heartbeat TTL contract, or the wildcard marker semantics) must
-  update the pinning test and this document in the same change so
-  the contract does not drift silently.
 
 ## Changing this contract
 

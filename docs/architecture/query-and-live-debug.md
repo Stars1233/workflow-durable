@@ -438,14 +438,6 @@ code translation.
 - `tests/Feature/V2/V2OperatorMetricsTest.php` and
   `tests/Feature/V2/V2OperatorQueueVisibilityTest.php` pin the
   aggregate live-debug surfaces.
-- This document is pinned by
-  `tests/Unit/V2/QueryAndLiveDebugDocumentationTest.php`. A
-  future change that renames, removes, or narrows any named
-  guarantee (non-durability, command-dispatch suppression, the
-  three-way response code boundary, the blocked-reason code
-  value, or the query-authoring rules) must update the pinning
-  test and this document in the same change so the contract
-  does not drift silently.
 
 ## What this contract does not yet guarantee
 

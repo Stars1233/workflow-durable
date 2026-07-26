@@ -10,8 +10,8 @@ namespace Workflow\V2\Enums;
  * observability surfaces can explain the result without inspecting raw
  * transport logs.
  *
- * Pinned by docs/architecture/workflow-service-calls-architecture.md and
- * tests/Unit/V2/WorkflowServiceCallsArchitectureDocumentationTest.php.
+ * Exported by Workflow\V2\Support\ServiceExecutionContract and covered by
+ * tests/Unit/V2/ServiceExecutionContractTest.php.
  */
 enum ServiceCallFailureReason: string
 {

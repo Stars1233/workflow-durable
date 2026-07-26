@@ -412,15 +412,6 @@ Aggregate roll-ups:
 - `tests/Feature/V2/V2QueryWorkflowTest.php` pins the query-time
   application of the precedence — parent-history blocking holds
   across an advanced child run.
-- This document is pinned by
-  `tests/Unit/V2/ChildOutcomeSourceOfTruthDocumentationTest.php`. A
-  future change that renames, removes, or narrows any named
-  guarantee (the five-step resolution precedence, the three
-  history-authority modes, the payload precedence for output and
-  exception, the parent-history blocking invariant, or the
-  continued-run traversal rule) must update the pinning test and
-  this document in the same change so the contract does not drift
-  silently.
 
 ## What this contract does not yet guarantee
 

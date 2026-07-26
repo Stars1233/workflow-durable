@@ -7,8 +7,8 @@ namespace Workflow\V2\Enums;
 /**
  * Lifecycle status of a cross-namespace service call.
  *
- * Pinned by docs/architecture/workflow-service-calls-architecture.md and
- * tests/Unit/V2/WorkflowServiceCallsArchitectureDocumentationTest.php.
+ * Exported by Workflow\V2\Support\ServiceExecutionContract and covered by
+ * tests/Unit/V2/ServiceExecutionContractTest.php.
  */
 enum ServiceCallStatus: string
 {

@@ -365,14 +365,6 @@ is a policy violation).
   deterministic `now()` contract end-to-end.
 - `tests/Unit/V2/WorkflowFiberContextTimeTest.php` pins the
   fiber-time contract used by `now()`.
-- This document is pinned by
-  `tests/Unit/V2/MutableSideEffectPolicyDocumentationTest.php`.
-  A future change that renames, removes, or narrows any named
-  guarantee (the six policy rules, the seven rule codes, the
-  three status constants, the three source constants, the
-  replay-safe primitives, or the non-goals list) must update
-  the pinning test and this document in the same change so the
-  contract does not drift silently.
 
 ## Changing this contract
 

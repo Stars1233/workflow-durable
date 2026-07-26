@@ -1023,8 +1023,7 @@ actually ran in production:
 
 Changing a durable home, removing a mapped feature row, changing a
 support boundary from supported to deferred, or claiming support for a
-deferred item requires updating this document and
-`tests/Unit/V2/FeatureMappingDocumentationTest.php` in the same change.
+deferred item requires updating this document in the same change.
 If the change affects a frozen history-event field, update
 [`docs/api-stability.md`](../api-stability.md) and the corresponding
 payload contract tests as well.

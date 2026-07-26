@@ -411,14 +411,6 @@ change review:
   rendering of cancellation and termination state.
 - `tests/Unit/V2/ChildCallServiceTest.php` pins the
   `cancel_requested` per-child counter.
-- This document is pinned by
-  `tests/Unit/V2/CancellationScopeDocumentationTest.php`. A
-  future change that renames, removes, or narrows any named
-  guarantee (the run-level scope, the two command types, the
-  parent-close policy values, the cooperative heartbeat flag,
-  or the typed history surface) must update the pinning test
-  and this document in the same change so the contract does not
-  drift silently.
 
 ## Changing this contract
 

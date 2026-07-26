@@ -498,14 +498,6 @@ Guarantees:
   `tests/Unit/V2/LongPollCacheValidatorTest.php` — cover the
   acceleration-layer contract without coupling it to correctness
   assertions.
-- This document is pinned by
-  `tests/Unit/V2/SchedulerCorrectnessDocumentationTest.php`. A
-  change that renames, removes, or narrows any named guarantee
-  (correctness substrate rows, acceleration layer
-  responsibilities, degraded-mode behaviors, bounded discovery
-  latency, backend classification, or detection surfaces) must
-  update the pinning test and this document in the same change
-  so the contract does not drift silently.
 
 ## What this contract does not yet guarantee
 

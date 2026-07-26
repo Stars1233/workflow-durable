@@ -10,8 +10,8 @@ namespace Workflow\V2\Enums;
  * link to the actual durable execution without re-resolving the
  * operation contract.
  *
- * Pinned by docs/architecture/workflow-service-calls-architecture.md and
- * tests/Unit/V2/WorkflowServiceCallsArchitectureDocumentationTest.php.
+ * Exported by Workflow\V2\Support\ServiceExecutionContract and covered by
+ * tests/Unit/V2/ServiceExecutionContractTest.php.
  */
 enum ServiceCallBindingKind: string
 {

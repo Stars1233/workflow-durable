@@ -31,9 +31,6 @@ The contract builds on:
   boundary policy order and caller-facing outcome values that sit above
   handler binding.
 
-The pinning test for this contract lives at
-`tests/Unit/V2/WorkflowServiceCallsArchitectureDocumentationTest.php`.
-
 A cross-namespace service call is not "just an HTTP request" and not
 "just a child workflow." It is a durable operation with its own
 lifecycle, references, and outcome semantics.
@@ -402,8 +399,8 @@ The following components are bound by this contract:
   every accepted call snaps.
 - `WorkflowServiceEndpoint` — owns admission of calls in a target
   namespace.
-- `WorkflowServiceCallsArchitectureDocumentationTest` — the pinning
-  test for this contract.
+- `ServiceExecutionContract` — publishes the machine-readable runtime
+  surface consumed by the standalone server.
 - `WorkflowExecutor` — issues service calls from a caller workflow
   and records terminal outcomes on the caller side.
 - `ChildCallService` — interoperates when the resolved binding is a
@@ -435,28 +432,10 @@ them is permitted to rely on transport-only state.
 
 ## Test strategy alignment
 
-The pinning test
-`tests/Unit/V2/WorkflowServiceCallsArchitectureDocumentationTest.php`
-asserts:
-
-- that this document declares every named heading;
-- that this document defines every named term;
-- that the documented `ServiceCallStatus` values match the runtime
-  `Workflow\V2\Enums\ServiceCallStatus` enum;
-- that the documented `ServiceCallOperationMode` values match the
-  runtime `Workflow\V2\Enums\ServiceCallOperationMode` enum;
-- that the documented `ServiceCallBindingKind` values match the
-  runtime `Workflow\V2\Enums\ServiceCallBindingKind` enum;
-- that the documented `ServiceCallOutcome` values match the runtime
-  `Workflow\V2\Enums\ServiceCallOutcome` enum;
-- that the documented `ServiceCallFailureReason` values match the
-  runtime `Workflow\V2\Enums\ServiceCallFailureReason` enum;
-- that the documented schema columns match the
-  `workflow_service_calls` migration;
-- that the document cites itself as its pinning test path.
-
-Changes to any named guarantee in this document MUST update the
-pinning test in the same change so drift is reviewed deliberately.
+`tests/Unit/V2/ServiceExecutionContractTest.php` verifies the
+machine-readable service execution manifest against the runtime enums,
+control-plane interface, and durable record fields. Migration and model
+tests verify the persisted service-call shape.
 
 ## Changing this contract
 
@@ -466,9 +445,8 @@ or failure reason requires:
 1. A new value on the corresponding enum, with `isTerminal()` (where
    applicable) updated to the right partition.
 2. A new row in the corresponding table in this document.
-3. A new assertion in
-   `tests/Unit/V2/WorkflowServiceCallsArchitectureDocumentationTest.php`
-   pinning the new value.
+3. A machine-readable contract and behavior-test update for the new
+   value.
 4. A migration update if the value changes the persisted shape (for
    instance a new column or a new index on
    `resolved_binding_kind`).

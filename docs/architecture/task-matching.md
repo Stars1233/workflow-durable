@@ -585,15 +585,6 @@ control-plane and execution-plane roles. The contract guarantees:
 - `tests/Feature/V2/V2CompatibilityWorkflowTest.php` exercises the
   Phase 2 claim-time compatibility enforcement that Phase 3 must
   preserve.
-- This document is pinned by
-  `tests/Unit/V2/TaskMatchingDocumentationTest.php`. A change that
-  renames, removes, or narrows any named guarantee (the matching
-  role's three deployment shapes, the ready-task discovery query
-  shape, the claim reason codes, the wake snapshot/changed
-  contract, the partition primitives, or the lease-expiry-driven
-  backpressure model) must update the pinning test and this
-  document in the same change so the contract does not drift
-  silently.
 
 ## What this contract does not yet guarantee
 

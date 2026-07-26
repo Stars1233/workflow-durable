@@ -492,8 +492,8 @@ each step independently.
 
 1. **Audit role boundaries.** Every direct mutation of a role's
    authority surface from outside that role becomes a Phase 4
-   violation. Tooling (Public Boundary scan, pinning tests) flags
-   regressions but does not change runtime behaviour.
+   violation. Tooling flags regressions but does not change runtime
+   behaviour.
 2. **Expose role binding points.** The package binds every role's
    canonical implementation through named container bindings so
    an out-of-process adapter can replace the binding without
@@ -691,14 +691,6 @@ Guarantees:
 - `tests/Feature/V2/V2ScheduleManagerTest.php` (when present) and
   `tests/Feature/V2/V2ScheduleTest.php` cover the scheduler-role
   boundary against the control plane.
-- This document is pinned by
-  `tests/Unit/V2/ControlPlaneSplitDocumentationTest.php`. A change
-  that renames, removes, or narrows any named guarantee (the six
-  roles, the authority boundary table, the three supported
-  topologies, the migration path, or the protocol-version
-  coordination rule) must update the pinning test and this
-  document in the same change so the split contract does not
-  drift silently.
 
 ## What this contract does not yet guarantee
 

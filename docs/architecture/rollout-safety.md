@@ -589,9 +589,7 @@ missing-coverage case explicitly so the operator action ("ensure a
 worker advertising the required marker rolls in") is unambiguous.
 Adding a new check is allowed; renaming or removing one is a
 protocol-level change. The canonical check names above match the
-strings emitted by `Workflow\V2\Support\HealthCheck::snapshot()`
-verbatim, and a runtime pinning test in the workflow package asserts
-the match so doc/code drift fails loudly.
+strings emitted by `Workflow\V2\Support\HealthCheck::snapshot()`.
 
 ### Queue visibility
 
@@ -885,15 +883,6 @@ downgraded without data migration.
   validation modes that Phase 5 and Phase 6 share.
 - `tests/Unit/V2/ReadinessContractTest.php` pins the readiness
   surface shape and HTTP status behavior.
-- This document is pinned by
-  `tests/Unit/V2/RolloutSafetyDocumentationTest.php`. A change
-  that renames, removes, or narrows any named guarantee (the
-  admission layers, the frozen metric keys, the frozen health
-  check names, the routing safety rules, the stuck detectors,
-  the Waterline screen list, the config surface, or the
-  migration-path steps) MUST update the pinning test and this
-  document in the same change so rollout-safety behavior does
-  not drift silently.
 
 ## What this contract does not yet guarantee
 

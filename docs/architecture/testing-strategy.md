@@ -42,9 +42,7 @@ frozen here. The buckets, surface contracts, and guarantees are.
 The first release v2.0 testing strategy is complete when every
 required bucket below has at least one executable suite that is wired
 into CI or release validation, when the testing API surface stays
-documented and observable, and when the documentation-pin test below
-keeps the bucket inventory and surface contract aligned with the rest
-of the v2 contracts.
+documented and observable.
 
 ## Testing API Surface
 
@@ -109,10 +107,9 @@ Every required bucket below has a status:
   bucket MUST still have a named home (the suite or harness that will
   own it) so the gap is inspectable.
 
-Statuses change as suites land. The documentation-pin test below
-asserts the inventory of bucket names; bucket text is the authoritative
-description, but the names below are the wire-format the cross-repo
-conformance layer reads.
+Statuses change as suites land. Bucket text describes the intended
+coverage; executable suites and conformance manifests remain the
+machine-owned evidence.
 
 ## Required Test Buckets
 
@@ -371,28 +368,6 @@ These defaults are load-bearing testing-strategy choices for v2.0:
 - Mocking a workflow class is rejected; child workflows are observed
   through their output rather than replaced.
 
-## Documentation Pins
-
-`tests/Unit/V2/TestingStrategyDocumentationTest.php` pins this
-contract. The pin asserts:
-
-- the document exists at the canonical path and declares the required
-  top-level headings;
-- the testing API surface section names every supported helper above,
-  including `WorkflowStub::fake()`, `WorkflowStub::mock()`,
-  `assertDispatched`/`assertDispatchedTimes`/`assertNotDispatched`/
-  `assertNothingDispatched`, `runReadyTasks()`, `ActivityFakeContext`,
-  framework time travel, delayed-callback hooks, and the unhandled
-  exception policy;
-- every required test bucket name above is present in the document;
-- the v2.0 test-mode defaults are stated;
-- the suite-layering table names the workflow package fixtures and
-  contract suites, the server suites, the Waterline V2 suites, the
-  platform conformance fixtures, and the replay-debug bundles;
-- the document keeps a `## Relationship To Other Contracts` section
-  that points at the feature mapping matrix and the multi-node
-  hardening roadmap.
-
 ## Relationship To Other Contracts
 
 - [`docs/workflow/plan.md`](../workflow/plan.md) is the v1 → v2
@@ -425,8 +400,7 @@ contract. The pin asserts:
 
 Adding, removing, or renaming a required test bucket, changing the
 testing API surface, or relocating the suite layers requires updating
-this document and `tests/Unit/V2/TestingStrategyDocumentationTest.php`
-in the same change. Promoting a bucket from `planned` or `partial` to
+this document in the same change. Promoting a bucket from `planned` or `partial` to
 `proven` requires updating the bucket's status text in the same change
 that lands the suite. Demoting a bucket without removing the suite is
 not allowed; if a suite is retired, the bucket text MUST name the

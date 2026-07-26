@@ -326,12 +326,6 @@ but the service call row remains the cross-namespace audit record.
 
 The behaviour frozen above is covered by coordinated tests:
 
-- `tests/Unit/V2/CrossNamespaceServiceAddressingDocumentationTest.php`
-  pins this contract document, the adjacent routing and child-call
-  statements, every registry table, every model, and every frozen
-  handler binding kind named here. It derives runtime resolved binding
-  kinds from `Workflow\V2\Enums\ServiceCallBindingKind` so the
-  cross-namespace service contract cannot drift from the runtime enum.
 - migration tests cover creation and rollback of
   `workflow_service_endpoints`, `workflow_services`,
   `workflow_service_operations`, and `workflow_service_calls`.
@@ -362,11 +356,8 @@ to task routing and child workflows is a protocol-level change. The
 required process is:
 
 1. Update this contract document first.
-2. Update
-   `tests/Unit/V2/CrossNamespaceServiceAddressingDocumentationTest.php`
-   in the same change so the regression guard tracks the new rule.
-3. Update migrations, models, concrete dispatch tests, and product
+2. Update migrations, models, concrete dispatch tests, and product
    surfaces that consume the service registry or service call rows.
-4. Update adjacent docs that refer to routing, child workflow lineage,
+3. Update adjacent docs that refer to routing, child workflow lineage,
    Waterline visibility, CLI output, or server/cloud control-plane
    ingress so the fleet speaks one language.

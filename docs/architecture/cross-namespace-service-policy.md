@@ -667,15 +667,11 @@ elsewhere or deferred to a follow-on phase:
 ## Test strategy alignment
 
 The behaviour frozen above is covered by the following coordinated
-tests. A change to any of the rules above must update both the
-documented contract and the matching test in the same change:
+tests:
 
-- The pinning test
-  `tests/Unit/V2/CrossNamespaceServicePolicyDocumentationTest.php`,
-  which asserts the contract document contains the frozen
-  headings, terms, authority class names, durable column names,
-  outcome taxonomy values, enforcement-order steps, and citations
-  named in this document.
+- `tests/Unit/V2/CrossNamespaceServicePolicyDocumentationTest.php`
+  covers runtime outcome values, model table identities, casts, and
+  relationship surfaces.
 - Migration regression coverage on the four
   `workflow_service_*` tables ensuring the unique-key invariants
   (`wf_service_endpoints_namespace_name_unique`,
@@ -697,12 +693,9 @@ rules above is a protocol-level change. The required process is:
 1. Update this contract document first, including the terminology,
    the enforcement-order table, the outcome taxonomy, and the test
    strategy alignment section as appropriate.
-2. Update the pinning test
-   `tests/Unit/V2/CrossNamespaceServicePolicyDocumentationTest.php`
-   in the same change so the regression guard tracks the new rule.
-3. Update the concrete behaviour tests (migrations, codec, operator
+2. Update the concrete behaviour tests (migrations, codec, operator
    views) listed above so they exercise the new rule.
-4. Update product docs on the docs site, CLI reasoning, and
+3. Update product docs on the docs site, CLI reasoning, and
    Waterline surfaces that reference the rule so the fleet speaks
    one language.
 

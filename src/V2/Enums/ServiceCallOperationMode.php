@@ -9,8 +9,8 @@ namespace Workflow\V2\Enums;
  * the caller receives a terminal result inline or only an in-flight
  * durable reference.
  *
- * Pinned by docs/architecture/workflow-service-calls-architecture.md and
- * tests/Unit/V2/WorkflowServiceCallsArchitectureDocumentationTest.php.
+ * Exported by Workflow\V2\Support\ServiceExecutionContract and covered by
+ * tests/Unit/V2/ServiceExecutionContractTest.php.
  */
 enum ServiceCallOperationMode: string
 {

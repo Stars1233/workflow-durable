@@ -374,11 +374,6 @@ activity.
   cases.
 - Message cursor monotonicity is covered by the
   `MessageCursorAdvanced` sequencing tests.
-- This document is pinned by
-  `tests/Unit/V2/ExecutionGuaranteesDocumentationTest.php`. A future
-  change that renames, removes, or narrows any named guarantee must
-  update the test and this document in the same change so the
-  contract does not drift silently.
 
 ## Changing this contract
 
