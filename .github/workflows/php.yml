@@ -115,6 +115,7 @@ jobs:
           --contract scripts/ci/release-recovery-consumer-contract.json \
           --adapter scripts/ci/release-recovery-consumer-adapter.json \
           "${arguments[@]}"
+        python scripts/ci/test-component-release-recovery.py ConsumerContractIdentityRegressionTest
 
     - name: Scan public boundary
       shell: bash
