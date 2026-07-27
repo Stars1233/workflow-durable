@@ -587,11 +587,61 @@ def exercise_continuity_resolution(
     qualification_run: Any,
 ) -> str:
     client = mock.Mock()
-    client.json.return_value = qualification_run
+    resolution_tag = resolution_tags[0] if len(resolution_tags) == 1 else None
+    qualification = resolution.get("qualification") if isinstance(resolution, dict) else None
+    qualification_url = (
+        (
+            f"https://api.github.com/repos/{qualification['repository']}/actions/runs/"
+            f"{qualification['run_id']}/attempts/{qualification['run_attempt']}"
+        )
+        if (
+            isinstance(qualification, dict)
+            and isinstance(qualification.get("repository"), str)
+            and type(qualification.get("run_id")) is int
+            and type(qualification.get("run_attempt")) is int
+        )
+        else None
+    )
+
+    def list_resolution_tags(request_client: Any, interrupted_plan: Any) -> list[str]:
+        if request_client is client and interrupted_plan == interrupted["plan"]["plan"]:
+            return resolution_tags
+        return []
+
+    def resolve_resolution_tag(request_client: Any, repository: Any, tag: Any) -> str | None:
+        if (
+            request_client is client
+            and repository == module.CONTROL_REPOSITORY
+            and tag == resolution_tag
+        ):
+            return resolution_commit
+        return None
+
+    def read_resolution_record(
+        request_client: Any,
+        tag: Any,
+        commit: Any,
+        filename: Any,
+    ) -> Any:
+        if (
+            request_client is client
+            and tag == resolution_tag
+            and commit == resolution_commit
+            and filename == "continuity-successor-resolution.json"
+        ):
+            return resolution
+        return None
+
+    def read_qualification(url: Any, **kwargs: Any) -> Any:
+        if url == qualification_url and not kwargs:
+            return qualification_run
+        return None
+
+    client.json.side_effect = read_qualification
     with (
-        mock.patch.object(module, "list_continuity_resolution_tags", return_value=resolution_tags),
-        mock.patch.object(module, "resolve_tag", return_value=resolution_commit),
-        mock.patch.object(module, "read_record", return_value=resolution),
+        mock.patch.object(module, "list_continuity_resolution_tags", side_effect=list_resolution_tags),
+        mock.patch.object(module, "resolve_tag", side_effect=resolve_resolution_tag),
+        mock.patch.object(module, "read_record", side_effect=read_resolution_record),
     ):
         return module.resolve_continuity_successor_fork(client, interrupted, successors)
 
