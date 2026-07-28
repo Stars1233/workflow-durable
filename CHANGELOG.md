@@ -11,6 +11,13 @@
   endpoint.
 - Platform conformance Rust signal/query scenarios continue to install the
   exact compatible `durable-workflow =2.0.0-rc.1` crates.io artifact.
+- Activity heartbeat handling now renews the persisted heartbeat deadline on
+  every accepted heartbeat. Timeout enforcement locks and validates the
+  current running attempt before closing it, so a stale scanner snapshot
+  cannot time out a live or already-closed attempt.
+- Release recovery now accepts release-candidate plans only when they retain a
+  coherent immutable beta qualification. The versioned recovery-consumer
+  conformance contract and release-docs audit now cover the `rc` channel.
 
 - Release-plan recovery now consumes immutable, exact-version release-note
   preparation authority before publishing a newly recorded plan.
