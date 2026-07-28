@@ -289,10 +289,8 @@ final class DefaultActivityTaskBridge implements ActivityTaskBridge
     private function observeAttempt(string $attemptId, bool $renewLease, ?array $progress = null): array
     {
         return DB::transaction(static function () use ($attemptId, $renewLease, $progress): array {
-            /** @var ActivityAttempt|null $attempt */
-            $attempt = ActivityAttempt::query()
-                ->lockForUpdate()
-                ->find($attemptId);
+            $lockedRows = ActivityRowLockOrder::lockForAttempt($attemptId);
+            $attempt = $lockedRows['attempt'];
 
             if (! $attempt instanceof ActivityAttempt) {
                 return self::attemptStatus(
@@ -308,10 +306,7 @@ final class DefaultActivityTaskBridge implements ActivityTaskBridge
                 );
             }
 
-            /** @var ActivityExecution|null $execution */
-            $execution = ActivityExecution::query()
-                ->lockForUpdate()
-                ->find($attempt->activity_execution_id);
+            $execution = $lockedRows['execution'];
 
             $run = null;
 

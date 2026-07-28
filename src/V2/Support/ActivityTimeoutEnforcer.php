@@ -86,24 +86,10 @@ final class ActivityTimeoutEnforcer
     {
         try {
             return DB::transaction(static function () use ($executionId): array {
-                /** @var ActivityExecution|null $snapshot */
-                $snapshot = ActivityExecution::query()->find($executionId);
-
-                if (! $snapshot instanceof ActivityExecution) {
-                    return self::skipped('execution_not_found');
-                }
-
-                $snapshotAttemptId = self::runningAttemptId($snapshot);
-                $attempt = $snapshotAttemptId !== null
-                    ? ActivityAttempt::query()
-                        ->lockForUpdate()
-                        ->find($snapshotAttemptId)
-                    : null;
-
-                /** @var ActivityExecution|null $execution */
-                $execution = ActivityExecution::query()
-                    ->lockForUpdate()
-                    ->find($executionId);
+                $lockedRows = ActivityRowLockOrder::lockForExecution($executionId);
+                $attempt = $lockedRows['attempt'];
+                $execution = $lockedRows['execution'];
+                $snapshotAttemptId = $lockedRows['snapshot_attempt_id'];
 
                 if (! $execution instanceof ActivityExecution) {
                     return self::skipped('execution_not_found');
@@ -550,21 +536,6 @@ final class ActivityTimeoutEnforcer
                 $execution->close_deadline_at->toIso8601String(),
             ),
         };
-    }
-
-    private static function runningAttemptId(ActivityExecution $execution): ?string
-    {
-        if ($execution->status !== ActivityStatus::Running) {
-            return null;
-        }
-
-        $attemptId = $execution->current_attempt_id;
-
-        if (! is_string($attemptId) || $attemptId === '') {
-            return null;
-        }
-
-        return $attemptId;
     }
 
     private static function currentAttemptStateReason(

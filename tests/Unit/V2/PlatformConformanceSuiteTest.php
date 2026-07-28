@@ -128,9 +128,9 @@ final class PlatformConformanceSuiteTest extends TestCase
         $contracts = $category['required_scenario_contracts'];
         $artifact = [
             'package' => 'durable-workflow',
-            'version' => '2.0.0-rc.1',
+            'version' => '2.0.0-rc.2',
             'source' => 'crates.io',
-            'cargo_requirement' => '=2.0.0-rc.1',
+            'cargo_requirement' => '=2.0.0-rc.2',
         ];
 
         $this->assertStringContainsString('Rust SDK', $manifest['targets']['official_sdk']['description']);

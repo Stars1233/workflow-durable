@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Advanced Workflow to the synchronized Durable Workflow `2.0.0-rc.1`
+- Advanced Workflow to the synchronized Durable Workflow `2.0.0-rc.2`
   product train. This is the only supported 2.0 prerelease baseline; earlier
   alphas and beta tuples remain historical and receive no compatibility shim.
 - Removed the package-owned hosted control-plane and runtime-target contract.
@@ -10,11 +10,11 @@
   separate deployment choices; Cloud placement stays behind the namespace
   endpoint.
 - Platform conformance Rust signal/query scenarios continue to install the
-  exact compatible `durable-workflow =2.0.0-rc.1` crates.io artifact.
-- Activity heartbeat handling now renews the persisted heartbeat deadline on
-  every accepted heartbeat. Timeout enforcement locks and validates the
-  current running attempt before closing it, so a stale scanner snapshot
-  cannot time out a live or already-closed attempt.
+  exact compatible `durable-workflow =2.0.0-rc.2` crates.io artifact.
+- Embedded and standalone activity heartbeats now use the same
+  attempt-before-execution row-lock order as timeout enforcement. Accepted
+  heartbeats renew the current attempt deadline, while stale scanner snapshots
+  cannot time out live, replaced, or already-closed attempts.
 - Release recovery now accepts release-candidate plans only when they retain a
   coherent immutable beta qualification. The versioned recovery-consumer
   conformance contract and release-docs audit now cover the `rc` channel.

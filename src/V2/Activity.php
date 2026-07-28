@@ -20,6 +20,7 @@ use Workflow\V2\Models\WorkflowRunSummary;
 use Workflow\V2\Models\WorkflowTask;
 use Workflow\V2\Support\ActivityAttemptNormalizer;
 use Workflow\V2\Support\ActivityLease;
+use Workflow\V2\Support\ActivityRowLockOrder;
 use Workflow\V2\Support\ActivitySnapshot;
 use Workflow\V2\Support\HeartbeatProgress;
 use Workflow\V2\Support\LocalActivityRuntime;
@@ -89,10 +90,14 @@ abstract class Activity
         $normalizedProgress = HeartbeatProgress::normalizeForWrite($progress);
 
         DB::transaction(function () use ($normalizedProgress): void {
-            /** @var ActivityExecution $execution */
-            $execution = ActivityExecution::query()
-                ->lockForUpdate()
-                ->findOrFail($this->execution->id);
+            $lockedRows = ActivityRowLockOrder::lockForExecution($this->execution->id);
+            $execution = $lockedRows['execution'];
+
+            if (! $execution instanceof ActivityExecution) {
+                ActivityExecution::query()->findOrFail($this->execution->id);
+
+                return;
+            }
 
             if ($execution->status !== ActivityStatus::Running) {
                 return;

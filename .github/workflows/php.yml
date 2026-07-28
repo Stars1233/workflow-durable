@@ -791,12 +791,13 @@ jobs:
           resolve_service redis 6379 "$REDIS_PUBLISHED_PORT" REDIS
         } >> "$GITHUB_ENV"
 
-    - name: Run bounded history budget regressions on MariaDB 10.5
+    - name: Run bounded locking and history regressions on MariaDB 10.5
       run: >-
         vendor/bin/phpunit --testdox --testsuite feature
         --filter
-        '/(testHistoryPayloadPaginatedUsesConfiguredSummaryCountersWithoutHydratingHistory|testHistoryPayloadPaginatedUsesBoundedAggregatesWhenSummaryIsMissingOrStale)/'
+        '/(testHistoryPayloadPaginatedUsesConfiguredSummaryCountersWithoutHydratingHistory|testHistoryPayloadPaginatedUsesBoundedAggregatesWhenSummaryIsMissingOrStale|testEmbeddedHeartbeatAndTimeoutEnforcementUseOneConcurrentLockOrder)/'
         tests/Feature/V2/V2WorkflowTaskBridgeTest.php
+        tests/Feature/V2/V2ActivityTimeoutTest.php
       env:
         APP_KEY: base64:i3g6f+dV8FfsIkcxqd7gbiPn2oXk5r00sTmdD6V5utI=
         DB_CONNECTION: mysql

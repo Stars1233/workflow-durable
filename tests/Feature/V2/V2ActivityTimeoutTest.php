@@ -5,9 +5,11 @@ declare(strict_types=1);
 namespace Tests\Feature\V2;
 
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\Fixtures\V2\TestGreetingActivity;
 use Tests\Fixtures\V2\TestGreetingWorkflow;
 use Tests\TestCase;
+use Throwable;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Contracts\ActivityTaskBridge;
 use Workflow\V2\Contracts\HistoryProjectionRole;
@@ -710,6 +712,231 @@ final class V2ActivityTimeoutTest extends TestCase
         Carbon::setTestNow();
     }
 
+    public function testAcceptedEmbeddedHeartbeatFencesExpiredScannerSnapshot(): void
+    {
+        \Workflow\V2\WorkflowStub::fake();
+
+        $startedAt = Carbon::parse('2026-01-15 10:00:00');
+        Carbon::setTestNow($startedAt);
+
+        [$run, $execution, $activityTask] = $this->createPendingActivity(
+            instanceId: 'act-timeout-embedded-hb-race-1',
+            retryPolicy: [
+                'snapshot_version' => 1,
+                'max_attempts' => 1,
+                'backoff_seconds' => [],
+                'start_to_close_timeout' => 120,
+                'schedule_to_start_timeout' => null,
+                'schedule_to_close_timeout' => null,
+                'heartbeat_timeout' => 10,
+            ],
+        );
+
+        /** @var ActivityTaskBridge $bridge */
+        $bridge = app(ActivityTaskBridge::class);
+        $claim = $bridge->claim($activityTask->id, 'embedded-heartbeat-race-worker');
+
+        $this->assertIsArray($claim);
+        /** @var ActivityAttempt $attempt */
+        $attempt = ActivityAttempt::query()->findOrFail($claim['activity_attempt_id']);
+        $previousLeaseExpiry = $attempt->lease_expires_at;
+        $this->assertNotNull($previousLeaseExpiry);
+
+        Carbon::setTestNow($startedAt->copy()->addSeconds(11));
+
+        $expiredSnapshot = ActivityTimeoutEnforcer::expiredExecutionIds();
+        $this->assertContains($execution->id, $expiredSnapshot);
+
+        $activity = new TestGreetingActivity($execution->fresh(), $run->fresh(), $activityTask->id);
+        $activity->heartbeat([
+            'message' => 'still working',
+        ]);
+
+        $execution->refresh();
+        $attempt->refresh();
+        $this->assertSame(
+            $startedAt->copy()
+                ->addSeconds(21)
+                ->toIso8601String(),
+            $execution->heartbeat_deadline_at?->toIso8601String(),
+        );
+        $this->assertSame(now()->toIso8601String(), $attempt->last_heartbeat_at?->toIso8601String());
+        $this->assertTrue($attempt->lease_expires_at?->gt($previousLeaseExpiry) ?? false);
+        $this->assertSame(
+            1,
+            WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('event_type', HistoryEventType::ActivityHeartbeatRecorded->value)
+                ->count(),
+        );
+
+        $result = ActivityTimeoutEnforcer::enforce($execution->id);
+
+        $this->assertFalse($result['enforced']);
+        $this->assertSame('no_deadline_expired', $result['reason']);
+        $this->assertSame(ActivityStatus::Running, $execution->fresh()->status);
+        $this->assertSame(
+            0,
+            WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('event_type', HistoryEventType::ActivityTimedOut->value)
+                ->count(),
+        );
+
+        Carbon::setTestNow();
+    }
+
+    public function testEmbeddedHeartbeatAndTimeoutEnforcementUseOneConcurrentLockOrder(): void
+    {
+        if (DB::connection()->getDriverName() === 'sqlite') {
+            $this->markTestSkipped('A database with row-level locking is required.');
+        }
+
+        if (
+            ! function_exists('pcntl_fork')
+            || ! function_exists('posix_kill')
+            || ! function_exists('stream_socket_pair')
+        ) {
+            $this->markTestSkipped('Process control and local sockets are required for concurrency coverage.');
+        }
+
+        self::stopWorkers();
+        \Workflow\V2\WorkflowStub::fake();
+
+        $startedAt = Carbon::parse('2026-01-15 10:00:00');
+        Carbon::setTestNow($startedAt);
+
+        [$run, $execution, $activityTask] = $this->createPendingActivity(
+            instanceId: 'act-timeout-embedded-hb-concurrent-1',
+            retryPolicy: [
+                'snapshot_version' => 1,
+                'max_attempts' => 1,
+                'backoff_seconds' => [],
+                'start_to_close_timeout' => 120,
+                'schedule_to_start_timeout' => null,
+                'schedule_to_close_timeout' => null,
+                'heartbeat_timeout' => 10,
+            ],
+        );
+
+        /** @var ActivityTaskBridge $bridge */
+        $bridge = app(ActivityTaskBridge::class);
+        $claim = $bridge->claim($activityTask->id, 'embedded-heartbeat-concurrent-worker');
+
+        $this->assertIsArray($claim);
+        $attemptId = $claim['activity_attempt_id'];
+        $this->assertIsString($attemptId);
+
+        Carbon::setTestNow($startedAt->copy()->addSeconds(11));
+        $expiredSnapshot = ActivityTimeoutEnforcer::expiredExecutionIds();
+        $this->assertContains($execution->id, $expiredSnapshot);
+
+        $children = [];
+        $lockReleased = false;
+
+        // Fork before opening the coordinating transaction so no child
+        // inherits its database socket or transaction state.
+        DB::purge();
+
+        try {
+            $children['enforcer'] = $this->forkDatabaseOperation(
+                static function () use ($execution): array {
+                    $result = ActivityTimeoutEnforcer::enforce($execution->id);
+
+                    return [
+                        'enforced' => $result['enforced'],
+                        'reason' => $result['reason'],
+                    ];
+                },
+            );
+            $this->awaitDatabaseOperationReady($children['enforcer']);
+
+            $children['heartbeat'] = $this->forkDatabaseOperation(
+                static function () use ($execution, $run, $activityTask): array {
+                    $activity = new TestGreetingActivity(
+                        ActivityExecution::query()->findOrFail($execution->id),
+                        WorkflowRun::query()->findOrFail($run->id),
+                        $activityTask->id,
+                    );
+                    $activity->heartbeat([
+                        'message' => 'concurrent work',
+                    ]);
+
+                    return [
+                        'completed' => true,
+                    ];
+                },
+            );
+            $this->awaitDatabaseOperationReady($children['heartbeat']);
+
+            DB::reconnect();
+            DB::beginTransaction();
+            ActivityAttempt::query()
+                ->lockForUpdate()
+                ->findOrFail($attemptId);
+
+            $this->releaseDatabaseOperation($children['enforcer']);
+
+            // Let enforcement queue on the canonical first row before the
+            // embedded heartbeat enters the same lock queue.
+            usleep(150_000);
+
+            $this->releaseDatabaseOperation($children['heartbeat']);
+            usleep(150_000);
+            DB::commit();
+            $lockReleased = true;
+
+            $enforcerResult = $this->awaitDatabaseOperation($children['enforcer']);
+            $heartbeatResult = $this->awaitDatabaseOperation($children['heartbeat']);
+            $children = [];
+        } finally {
+            if (! $lockReleased && DB::connection()->transactionLevel() > 0) {
+                DB::rollBack();
+            }
+
+            foreach ($children as $child) {
+                $this->terminateDatabaseOperation($child);
+            }
+
+            Carbon::setTestNow();
+        }
+
+        $this->assertTrue($heartbeatResult['ok'], $heartbeatResult['error'] ?? 'Embedded heartbeat failed.');
+        $this->assertSame([
+            'completed' => true,
+        ], $heartbeatResult['result']);
+        $this->assertTrue($enforcerResult['ok'], $enforcerResult['error'] ?? 'Timeout enforcement failed.');
+        $this->assertContains(
+            $enforcerResult['result'],
+            [
+                [
+                    'enforced' => true,
+                    'reason' => null,
+                ],
+                [
+                    'enforced' => false,
+                    'reason' => 'no_deadline_expired',
+                ],
+            ],
+        );
+
+        $heartbeatEvents = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::ActivityHeartbeatRecorded->value)
+            ->count();
+        $timeoutEvents = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::ActivityTimedOut->value)
+            ->count();
+
+        $this->assertSame(1, $heartbeatEvents + $timeoutEvents);
+        $this->assertSame(
+            $heartbeatEvents === 1 ? ActivityStatus::Running : ActivityStatus::Failed,
+            $execution->fresh()
+                ->status,
+        );
+    }
+
     public function testTimeoutEnforcementSkipsClosedCurrentAttempt(): void
     {
         $startedAt = Carbon::parse('2026-01-15 10:00:00');
@@ -1126,5 +1353,127 @@ final class V2ActivityTimeoutTest extends TestCase
         ], $activityTask);
 
         return [$run, $execution, $activityTask, $attempt];
+    }
+
+    /**
+     * @param callable(): array<string, mixed> $operation
+     * @return array{pid: int, socket: resource}
+     */
+    private function forkDatabaseOperation(callable $operation): array
+    {
+        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        $this->assertIsArray($sockets);
+
+        $pid = pcntl_fork();
+        $this->assertNotSame(-1, $pid, 'Unable to fork a database operation.');
+
+        if ($pid === 0) {
+            fclose($sockets[0]);
+            $payload = null;
+
+            try {
+                DB::reconnect();
+                fwrite($sockets[1], json_encode([
+                    'ready' => true,
+                ], JSON_THROW_ON_ERROR) . PHP_EOL);
+
+                if (fgets($sockets[1]) !== 'go' . PHP_EOL) {
+                    throw new \RuntimeException('Concurrent database operation received an invalid release signal.');
+                }
+
+                $payload = [
+                    'ok' => true,
+                    'result' => $operation(),
+                ];
+            } catch (Throwable $throwable) {
+                $payload = [
+                    'ok' => false,
+                    'error' => $throwable::class . ': ' . $throwable->getMessage(),
+                ];
+            }
+
+            fwrite($sockets[1], json_encode($payload, JSON_THROW_ON_ERROR) . PHP_EOL);
+            fclose($sockets[1]);
+            exit($payload['ok'] ? 0 : 1);
+        }
+
+        fclose($sockets[1]);
+        stream_set_timeout($sockets[0], 5);
+
+        return [
+            'pid' => $pid,
+            'socket' => $sockets[0],
+        ];
+    }
+
+    /**
+     * @param array{pid: int, socket: resource} $child
+     */
+    private function awaitDatabaseOperationReady(array $child): void
+    {
+        $line = fgets($child['socket']);
+        $this->assertIsString($line, 'A concurrent database operation did not become ready.');
+        $this->assertSame([
+            'ready' => true,
+        ], json_decode($line, true, flags: JSON_THROW_ON_ERROR));
+    }
+
+    /**
+     * @param array{pid: int, socket: resource} $child
+     */
+    private function releaseDatabaseOperation(array $child): void
+    {
+        $this->assertSame(3, fwrite($child['socket'], 'go' . PHP_EOL));
+    }
+
+    /**
+     * @param array{pid: int, socket: resource} $child
+     * @return array{ok: bool, result?: array<string, mixed>, error?: string}
+     */
+    private function awaitDatabaseOperation(array $child): array
+    {
+        $deadline = microtime(true) + 10;
+        $status = 0;
+
+        do {
+            $waitedPid = pcntl_waitpid($child['pid'], $status, WNOHANG);
+
+            if ($waitedPid === $child['pid']) {
+                break;
+            }
+
+            if ($waitedPid === -1) {
+                $this->fail('Unable to wait for a concurrent database operation.');
+            }
+
+            usleep(10_000);
+        } while (microtime(true) < $deadline);
+
+        if ($waitedPid !== $child['pid']) {
+            $this->terminateDatabaseOperation($child);
+            $this->fail('A concurrent database operation did not finish within 10 seconds.');
+        }
+
+        $line = fgets($child['socket']);
+        fclose($child['socket']);
+
+        $this->assertIsString($line, 'A concurrent database operation returned no result.');
+        $payload = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
+        $this->assertIsArray($payload);
+
+        return $payload;
+    }
+
+    /**
+     * @param array{pid: int, socket: resource} $child
+     */
+    private function terminateDatabaseOperation(array $child): void
+    {
+        @posix_kill($child['pid'], SIGKILL);
+        @pcntl_waitpid($child['pid'], $status);
+
+        if (is_resource($child['socket'])) {
+            fclose($child['socket']);
+        }
     }
 }
