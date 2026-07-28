@@ -321,8 +321,13 @@ final class RunWaitProjector
      */
     private static function canonicalEntries(array $entries): array
     {
+        // Projection models materialize absent optional wait fields as null.
+        // Durable snapshots may omit them, but both shapes mean "no value".
         return array_map(
-            static fn (array $entry): array => self::canonicalizeValue(self::normalizedPayload($entry)),
+            static fn (array $entry): array => self::canonicalizeValue(array_filter(
+                self::normalizedPayload($entry),
+                static fn (mixed $value): bool => $value !== null,
+            )),
             $entries,
         );
     }

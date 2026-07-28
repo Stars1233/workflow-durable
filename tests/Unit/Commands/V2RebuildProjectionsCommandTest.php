@@ -12,6 +12,7 @@ use Tests\TestCase;
 use Workflow\V2\Contracts\HistoryProjectionMaintenanceRole;
 use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Enums\RunStatus;
+use Workflow\V2\Enums\TimerStatus;
 use Workflow\V2\Models\ActivityAttempt;
 use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowHistoryEvent;
@@ -25,6 +26,7 @@ use Workflow\V2\Models\WorkflowTask;
 use Workflow\V2\Models\WorkflowTimelineEntry;
 use Workflow\V2\Models\WorkflowTimer;
 use Workflow\V2\Support\DefaultHistoryProjectionRole;
+use Workflow\V2\Support\OperatorMetrics;
 use Workflow\V2\Support\RunSummaryProjector;
 
 final class V2RebuildProjectionsCommandTest extends TestCase
@@ -725,6 +727,64 @@ final class V2RebuildProjectionsCommandTest extends TestCase
         ]);
     }
 
+    public function testNamespaceRepairOfResolvedWaitProjectionIsIdempotentAndPreservesHistory(): void
+    {
+        $namespace = 'projection-repair-target';
+        $otherNamespace = 'projection-repair-other';
+        $targetRun = $this->createResolvedTimerWait('projection-repair-target-instance', $namespace);
+        $otherRun = $this->createResolvedTimerWait('projection-repair-other-instance', $otherNamespace);
+
+        foreach ([$targetRun, $otherRun] as $run) {
+            WorkflowRunWait::query()
+                ->where('workflow_run_id', $run->id)
+                ->update([
+                    'summary' => 'Stale resolved wait.',
+                ]);
+        }
+
+        $targetHistoryCount = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $targetRun->id)
+            ->count();
+        $otherHistoryCount = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $otherRun->id)
+            ->count();
+        $targetWaitMetrics = OperatorMetrics::snapshot(namespace: $namespace)['projections']['run_waits'];
+        $otherWaitMetrics = OperatorMetrics::snapshot(namespace: $otherNamespace)['projections']['run_waits'];
+
+        $this->assertSame(1, $targetWaitMetrics['stale_projected_runs']);
+        $this->assertSame(1, $otherWaitMetrics['stale_projected_runs']);
+
+        $this->artisan('workflow:v2:rebuild-projections', [
+            '--instance-id' => 'projection-repair-target-instance',
+            '--namespace' => $namespace,
+            '--needs-rebuild' => true,
+        ])
+            ->expectsOutput('Rebuilt 1 run-summary projection row(s).')
+            ->assertSuccessful();
+
+        $targetWaitMetrics = OperatorMetrics::snapshot(namespace: $namespace)['projections']['run_waits'];
+        $otherWaitMetrics = OperatorMetrics::snapshot(namespace: $otherNamespace)['projections']['run_waits'];
+
+        $this->assertSame(0, $targetWaitMetrics['stale_projected_runs']);
+        $this->assertSame(1, $otherWaitMetrics['stale_projected_runs']);
+        $this->assertSame($targetHistoryCount, WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $targetRun->id)
+            ->count());
+        $this->assertSame($otherHistoryCount, WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $otherRun->id)
+            ->count());
+
+        $this->artisan('workflow:v2:rebuild-projections', [
+            '--instance-id' => 'projection-repair-target-instance',
+            '--namespace' => $namespace,
+            '--needs-rebuild' => true,
+            '--dry-run' => true,
+            '--json' => true,
+        ])
+            ->expectsOutputToContain('"runs_matched":0')
+            ->assertSuccessful();
+    }
+
     public function testItUsesConfiguredRunAndSummaryModels(): void
     {
         $this->createCustomProjectionTables();
@@ -1085,6 +1145,57 @@ final class V2RebuildProjectionsCommandTest extends TestCase
         ])->save();
 
         return [$instance->refresh(), $run->refresh()];
+    }
+
+    private function createResolvedTimerWait(string $instanceId, string $namespace): WorkflowRun
+    {
+        [, $run] = $this->createWaitingRun($instanceId);
+        $run->forceFill([
+            'namespace' => $namespace,
+        ])->save();
+        $fireAt = now()
+            ->subMinute();
+        $firedAt = now()
+            ->subSecond();
+
+        /** @var WorkflowTimer $timer */
+        $timer = WorkflowTimer::query()->create([
+            'id' => (string) Str::ulid(),
+            'workflow_run_id' => $run->id,
+            'sequence' => 1,
+            'status' => TimerStatus::Fired->value,
+            'delay_seconds' => 60,
+            'fire_at' => $fireAt,
+            'fired_at' => $firedAt,
+            'created_at' => now()
+                ->subMinutes(2),
+            'updated_at' => $firedAt,
+        ]);
+
+        WorkflowHistoryEvent::record($run, HistoryEventType::TimerScheduled, [
+            'timer_id' => $timer->id,
+            'sequence' => $timer->sequence,
+            'delay_seconds' => $timer->delay_seconds,
+            'fire_at' => $fireAt->toJSON(),
+        ]);
+        WorkflowHistoryEvent::record($run, HistoryEventType::TimerFired, [
+            'timer_id' => $timer->id,
+            'sequence' => $timer->sequence,
+            'delay_seconds' => $timer->delay_seconds,
+            'fire_at' => $fireAt->toJSON(),
+            'fired_at' => $firedAt->toJSON(),
+        ]);
+
+        RunSummaryProjector::project($run->refresh());
+
+        /** @var WorkflowRunWait $wait */
+        $wait = WorkflowRunWait::query()
+            ->where('workflow_run_id', $run->id)
+            ->sole();
+        $this->assertSame('resolved', $wait->status);
+        $this->assertArrayNotHasKey('timeout_fired_at', $wait->payload);
+
+        return $run->refresh();
     }
 }
 

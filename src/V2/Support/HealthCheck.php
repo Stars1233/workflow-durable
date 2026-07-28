@@ -204,18 +204,29 @@ final class HealthCheck
     private static function commandContractCheck(array $metrics): array
     {
         $needed = self::integer($metrics['backfill_needed_runs'] ?? 0);
+        $actionableNeeded = self::integer($metrics['actionable_backfill_needed_runs'] ?? $needed);
 
         return self::check(
             'command_contract_snapshots',
-            $needed === 0 ? 'ok' : 'warning',
-            $needed === 0
-                ? 'WorkflowStarted command-contract snapshots are complete.'
-                : 'Some WorkflowStarted command-contract snapshots need backfill before operators can trust command forms.',
+            $actionableNeeded === 0 ? 'ok' : 'warning',
+            match (true) {
+                $actionableNeeded > 0 => 'Some open runs need WorkflowStarted command-contract backfill before operators can trust command forms.',
+                $needed > 0 => 'Historical WorkflowStarted command-contract gaps are retained as informational metrics; no open run depends on them.',
+                default => 'WorkflowStarted command-contract snapshots are complete.',
+            },
             self::CATEGORY_CORRECTNESS,
             [
                 'backfill_needed_runs' => $needed,
                 'backfill_available_runs' => self::integer($metrics['backfill_available_runs'] ?? 0),
                 'backfill_unavailable_runs' => self::integer($metrics['backfill_unavailable_runs'] ?? 0),
+                'actionable_backfill_needed_runs' => $actionableNeeded,
+                'actionable_backfill_available_runs' => self::integer(
+                    $metrics['actionable_backfill_available_runs'] ?? 0,
+                ),
+                'actionable_backfill_unavailable_runs' => self::integer(
+                    $metrics['actionable_backfill_unavailable_runs'] ?? 0,
+                ),
+                'closed_backfill_needed_runs' => self::integer($metrics['closed_backfill_needed_runs'] ?? 0),
             ],
         );
     }

@@ -549,6 +549,8 @@ final class OperatorMetrics
     {
         $needed = 0;
         $available = 0;
+        $actionableNeeded = 0;
+        $actionableAvailable = 0;
 
         self::runQuery($namespace)
             ->whereHas('historyEvents', static function ($query): void {
@@ -560,7 +562,12 @@ final class OperatorMetrics
                         ->orderBy('sequence');
                 },
             ])
-            ->chunkById(200, static function ($runs) use (&$needed, &$available): void {
+            ->chunkById(200, static function ($runs) use (
+                &$actionableAvailable,
+                &$actionableNeeded,
+                &$available,
+                &$needed,
+            ): void {
                 foreach ($runs as $run) {
                     if (! $run instanceof WorkflowRun) {
                         continue;
@@ -577,6 +584,16 @@ final class OperatorMetrics
                     if ($status['available']) {
                         $available++;
                     }
+
+                    if ($run->status->isTerminal()) {
+                        continue;
+                    }
+
+                    $actionableNeeded++;
+
+                    if ($status['available']) {
+                        $actionableAvailable++;
+                    }
                 }
             });
 
@@ -584,6 +601,10 @@ final class OperatorMetrics
             'backfill_needed_runs' => $needed,
             'backfill_available_runs' => $available,
             'backfill_unavailable_runs' => max(0, $needed - $available),
+            'actionable_backfill_needed_runs' => $actionableNeeded,
+            'actionable_backfill_available_runs' => $actionableAvailable,
+            'actionable_backfill_unavailable_runs' => max(0, $actionableNeeded - $actionableAvailable),
+            'closed_backfill_needed_runs' => max(0, $needed - $actionableNeeded),
         ];
     }
 

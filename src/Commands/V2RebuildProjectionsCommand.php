@@ -18,6 +18,7 @@ class V2RebuildProjectionsCommand extends Command
     protected $signature = 'workflow:v2:rebuild-projections
         {--run-id=* : Rebuild one or more selected workflow run ids}
         {--instance-id= : Rebuild every run for one workflow instance id}
+        {--namespace= : Limit rebuild candidates to one workflow namespace}
         {--missing : Only rebuild runs that do not have a run-summary row}
         {--needs-rebuild : Only rebuild runs whose summary, wait, timeline, timer, or lineage projections need rebuild}
         {--prune-stale : Delete projection rows whose durable workflow run or history row no longer exists}
@@ -36,12 +37,21 @@ class V2RebuildProjectionsCommand extends Command
     {
         $runIds = $this->runIds();
         $instanceId = $this->stringOption('instance-id');
+        $namespace = $this->stringOption('namespace');
         $missingOnly = (bool) $this->option('missing');
         $needsRebuildOnly = (bool) $this->option('needs-rebuild');
         $pruneStale = (bool) $this->option('prune-stale');
         $dryRun = (bool) $this->option('dry-run');
 
-        $runQuery = $this->runQuery($runIds, $instanceId, $missingOnly, $needsRebuildOnly);
+        if ($namespace !== null && $pruneStale) {
+            $this->error(
+                'The --namespace and --prune-stale options cannot be combined because orphaned rows have no durable namespace authority.'
+            );
+
+            return self::FAILURE;
+        }
+
+        $runQuery = $this->runQuery($runIds, $instanceId, $namespace, $missingOnly, $needsRebuildOnly);
         $matchedRuns = (clone $runQuery)->count();
         $historyProjectionRole = $this->historyProjectionRole;
 
@@ -109,8 +119,13 @@ class V2RebuildProjectionsCommand extends Command
     /**
      * @param list<string> $runIds
      */
-    private function runQuery(array $runIds, ?string $instanceId, bool $missingOnly, bool $needsRebuildOnly)
-    {
+    private function runQuery(
+        array $runIds,
+        ?string $instanceId,
+        ?string $namespace,
+        bool $missingOnly,
+        bool $needsRebuildOnly,
+    ) {
         $runModel = $this->runModel();
         $summaryModel = $this->summaryModel();
         $runTable = (new $runModel())->getTable();
@@ -136,15 +151,35 @@ class V2RebuildProjectionsCommand extends Command
             $query->where('workflow_instance_id', $instanceId);
         }
 
+        if ($namespace !== null) {
+            $query->where(sprintf('%s.namespace', $runTable), $namespace);
+        }
+
         if ($needsRebuildOnly) {
-            $staleSummaryIds = RunSummaryProjectionDrift::staleSummaryQuery($runIds, $instanceId)
+            $staleSummaryIds = RunSummaryProjectionDrift::staleSummaryQuery($runIds, $instanceId, $namespace)
                 ->select(sprintf('%s.id', $summaryTable));
-            $schemaOutdatedIds = RunSummaryProjectionDrift::schemaOutdatedQuery($runIds, $instanceId)
+            $schemaOutdatedIds = RunSummaryProjectionDrift::schemaOutdatedQuery($runIds, $instanceId, $namespace)
                 ->select(sprintf('%s.id', $summaryTable));
-            $selectedRunWaitIds = SelectedRunProjectionDrift::waitRunIdsNeedingRebuild($runIds, $instanceId);
-            $selectedRunTimelineIds = SelectedRunProjectionDrift::timelineRunIdsNeedingRebuild($runIds, $instanceId);
-            $selectedRunTimerIds = SelectedRunProjectionDrift::timerRunIdsNeedingRebuild($runIds, $instanceId);
-            $selectedRunLineageIds = SelectedRunProjectionDrift::lineageRunIdsNeedingRebuild($runIds, $instanceId);
+            $selectedRunWaitIds = SelectedRunProjectionDrift::waitRunIdsNeedingRebuild(
+                $runIds,
+                $instanceId,
+                $namespace,
+            );
+            $selectedRunTimelineIds = SelectedRunProjectionDrift::timelineRunIdsNeedingRebuild(
+                $runIds,
+                $instanceId,
+                $namespace,
+            );
+            $selectedRunTimerIds = SelectedRunProjectionDrift::timerRunIdsNeedingRebuild(
+                $runIds,
+                $instanceId,
+                $namespace,
+            );
+            $selectedRunLineageIds = SelectedRunProjectionDrift::lineageRunIdsNeedingRebuild(
+                $runIds,
+                $instanceId,
+                $namespace,
+            );
 
             $query->where(static function ($query) use (
                 $selectedRunLineageIds,

@@ -375,6 +375,144 @@ final class HealthCheckTest extends TestCase
         $this->assertSame(1, $history['data']['events']);
     }
 
+    public function testClosedUnavailableCommandContractRemainsInformationalWithHistoryIntact(): void
+    {
+        config()->set('queue.default', 'redis');
+        config()
+            ->set('queue.connections.redis.driver', 'redis');
+        config()
+            ->set('cache.default', 'array');
+        config()
+            ->set('cache.stores.array.driver', 'array');
+
+        $namespace = 'historical-contract-health';
+        $instance = WorkflowInstance::query()->create([
+            'id' => 'health-historical-contract',
+            'workflow_class' => 'Missing\\HistoricalWorkflow',
+            'workflow_type' => 'workflow.historical-contract',
+            'run_count' => 1,
+        ]);
+
+        /** @var WorkflowRun $run */
+        $run = WorkflowRun::query()->create([
+            'id' => '01JHEALTHHISTCONTRACT00001',
+            'workflow_instance_id' => $instance->id,
+            'run_number' => 1,
+            'namespace' => $namespace,
+            'workflow_class' => 'Missing\\HistoricalWorkflow',
+            'workflow_type' => 'workflow.historical-contract',
+            'status' => 'terminated',
+            'closed_reason' => 'terminated',
+            'started_at' => now()
+                ->subMinutes(5),
+            'closed_at' => now()
+                ->subMinute(),
+            'last_progress_at' => now()
+                ->subMinute(),
+        ]);
+
+        $instance->forceFill([
+            'current_run_id' => $run->id,
+        ])->save();
+
+        WorkflowHistoryEvent::record($run, HistoryEventType::WorkflowStarted, [
+            'workflow_class' => 'Missing\\HistoricalWorkflow',
+            'workflow_type' => 'workflow.historical-contract',
+        ]);
+
+        for ($sequence = 1; $sequence <= 25; $sequence++) {
+            WorkflowHistoryEvent::record($run, HistoryEventType::SideEffectRecorded, [
+                'sequence' => $sequence,
+                'result' => [
+                    'historical' => $sequence,
+                ],
+            ]);
+        }
+
+        WorkflowHistoryEvent::record($run, HistoryEventType::WorkflowTerminated, [
+            'reason' => 'Terminated before command-contract snapshots were introduced.',
+        ]);
+
+        RunSummaryProjector::project($run->refresh());
+
+        $snapshot = HealthCheck::snapshot(namespace: $namespace);
+        $commandContracts = collect($snapshot['checks'])->firstWhere('name', 'command_contract_snapshots');
+        $routing = collect($snapshot['checks'])->firstWhere('name', 'routing_health');
+        $compatibility = collect($snapshot['checks'])->firstWhere('name', 'worker_compatibility');
+
+        $this->assertSame('ok', $snapshot['status']);
+        $this->assertSame('ok', $commandContracts['status']);
+        $this->assertSame(1, $commandContracts['data']['backfill_needed_runs']);
+        $this->assertSame(1, $commandContracts['data']['backfill_unavailable_runs']);
+        $this->assertSame(0, $commandContracts['data']['actionable_backfill_needed_runs']);
+        $this->assertSame(0, $commandContracts['data']['actionable_backfill_unavailable_runs']);
+        $this->assertSame(1, $commandContracts['data']['closed_backfill_needed_runs']);
+        $this->assertSame('ok', $routing['status']);
+        $this->assertSame('ok', $compatibility['status']);
+        $this->assertSame(1, $snapshot['operator_metrics']['runs']['terminated']);
+        $this->assertSame(27, $snapshot['operator_metrics']['history']['events']);
+        $retainedHistoryEvents = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->count();
+
+        $this->assertSame(27, $retainedHistoryEvents);
+    }
+
+    public function testOpenUnavailableCommandContractStillWarnsCorrectnessHealth(): void
+    {
+        config()->set('queue.default', 'redis');
+        config()
+            ->set('queue.connections.redis.driver', 'redis');
+        config()
+            ->set('cache.default', 'array');
+        config()
+            ->set('cache.stores.array.driver', 'array');
+
+        $namespace = 'actionable-contract-health';
+        $instance = WorkflowInstance::query()->create([
+            'id' => 'health-actionable-contract',
+            'workflow_class' => 'Missing\\ActionableWorkflow',
+            'workflow_type' => 'workflow.actionable-contract',
+            'run_count' => 1,
+        ]);
+
+        /** @var WorkflowRun $run */
+        $run = WorkflowRun::query()->create([
+            'id' => '01JHEALTHACTCONTRACT000001',
+            'workflow_instance_id' => $instance->id,
+            'run_number' => 1,
+            'namespace' => $namespace,
+            'workflow_class' => 'Missing\\ActionableWorkflow',
+            'workflow_type' => 'workflow.actionable-contract',
+            'status' => 'waiting',
+            'started_at' => now()
+                ->subMinute(),
+            'last_progress_at' => now()
+                ->subSecond(),
+        ]);
+
+        $instance->forceFill([
+            'current_run_id' => $run->id,
+        ])->save();
+
+        WorkflowHistoryEvent::record($run, HistoryEventType::WorkflowStarted, [
+            'workflow_class' => 'Missing\\ActionableWorkflow',
+            'workflow_type' => 'workflow.actionable-contract',
+        ]);
+        RunSummaryProjector::project($run->refresh());
+
+        $snapshot = HealthCheck::snapshot(namespace: $namespace);
+        $commandContracts = collect($snapshot['checks'])->firstWhere('name', 'command_contract_snapshots');
+
+        $this->assertSame('warning', $snapshot['status']);
+        $this->assertSame('warning', $commandContracts['status']);
+        $this->assertSame(1, $commandContracts['data']['backfill_needed_runs']);
+        $this->assertSame(1, $commandContracts['data']['backfill_unavailable_runs']);
+        $this->assertSame(1, $commandContracts['data']['actionable_backfill_needed_runs']);
+        $this->assertSame(1, $commandContracts['data']['actionable_backfill_unavailable_runs']);
+        $this->assertSame(0, $commandContracts['data']['closed_backfill_needed_runs']);
+    }
+
     public function testSnapshotWarnsWhenSelectedRunProjectionPayloadsAreStale(): void
     {
         config()->set('queue.default', 'redis');
