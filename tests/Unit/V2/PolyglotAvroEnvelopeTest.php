@@ -42,7 +42,7 @@ final class PolyglotAvroEnvelopeTest extends TestCase
         }
     }
 
-    public function testEnvelopeBlobUsesGenericWrapperPrefix(): void
+    public function testEnvelopeBlobUsesValueSingleObjectIdentity(): void
     {
         $envelope = Avro::envelope([
             'polyglot' => true,
@@ -51,7 +51,7 @@ final class PolyglotAvroEnvelopeTest extends TestCase
 
         $this->assertNotFalse($raw);
         $this->assertNotEmpty($raw);
-        $this->assertSame(Avro::PREFIX_GENERIC_WRAPPER, $raw[0]);
+        $this->assertSame(Avro::SINGLE_OBJECT_MAGIC . Avro::VALUE_SCHEMA_FINGERPRINT, substr($raw, 0, 10));
     }
 
     public function testDecodeEnvelopeAcceptsRawBlobWhenCodecIsKnownFromTask(): void
@@ -70,7 +70,7 @@ final class PolyglotAvroEnvelopeTest extends TestCase
     public function testDecodeEnvelopeRejectsEngineSpecificCodec(): void
     {
         $this->expectException(CodecDecodeException::class);
-        $this->expectExceptionMessage('language-neutral Avro envelopes');
+        $this->expectExceptionMessage('Use Avro::decodeEnvelope() only with codec="avro" envelopes.');
 
         Avro::decodeEnvelope([
             'codec' => 'workflow-serializer-y',
