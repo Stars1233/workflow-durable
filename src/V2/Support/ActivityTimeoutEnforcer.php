@@ -86,6 +86,20 @@ final class ActivityTimeoutEnforcer
     {
         try {
             return DB::transaction(static function () use ($executionId): array {
+                /** @var ActivityExecution|null $snapshot */
+                $snapshot = ActivityExecution::query()->find($executionId);
+
+                if (! $snapshot instanceof ActivityExecution) {
+                    return self::skipped('execution_not_found');
+                }
+
+                $snapshotAttemptId = self::runningAttemptId($snapshot);
+                $attempt = $snapshotAttemptId !== null
+                    ? ActivityAttempt::query()
+                        ->lockForUpdate()
+                        ->find($snapshotAttemptId)
+                    : null;
+
                 /** @var ActivityExecution|null $execution */
                 $execution = ActivityExecution::query()
                     ->lockForUpdate()
@@ -95,11 +109,21 @@ final class ActivityTimeoutEnforcer
                     return self::skipped('execution_not_found');
                 }
 
+                if (! in_array($execution->status, [ActivityStatus::Pending, ActivityStatus::Running], true)) {
+                    return self::skipped('execution_already_terminal');
+                }
+
                 $now = now();
                 $timeoutKind = self::resolveTimeoutKind($execution, $now);
 
                 if ($timeoutKind === null) {
                     return self::skipped('no_deadline_expired');
+                }
+
+                $attemptStateReason = self::currentAttemptStateReason($execution, $attempt, $snapshotAttemptId);
+
+                if ($attemptStateReason !== null) {
+                    return self::skipped($attemptStateReason);
                 }
 
                 /** @var WorkflowRun $run */
@@ -110,9 +134,6 @@ final class ActivityTimeoutEnforcer
                 if ($run->status->isTerminal()) {
                     return self::skipped('run_already_terminal');
                 }
-
-                // Close the current attempt if one exists.
-                $attempt = self::currentAttempt($execution);
 
                 if ($attempt instanceof ActivityAttempt && $attempt->status === ActivityAttemptStatus::Running) {
                     $attempt->forceFill([
@@ -531,18 +552,53 @@ final class ActivityTimeoutEnforcer
         };
     }
 
-    private static function currentAttempt(ActivityExecution $execution): ?ActivityAttempt
+    private static function runningAttemptId(ActivityExecution $execution): ?string
     {
+        if ($execution->status !== ActivityStatus::Running) {
+            return null;
+        }
+
         $attemptId = $execution->current_attempt_id;
 
         if (! is_string($attemptId) || $attemptId === '') {
             return null;
         }
 
-        return ActivityAttempt::query()
-            ->where('activity_execution_id', $execution->id)
-            ->whereKey($attemptId)
-            ->first();
+        return $attemptId;
+    }
+
+    private static function currentAttemptStateReason(
+        ActivityExecution $execution,
+        ?ActivityAttempt $attempt,
+        ?string $snapshotAttemptId,
+    ): ?string {
+        if ($execution->status !== ActivityStatus::Running) {
+            return null;
+        }
+
+        if (
+            $snapshotAttemptId === null
+            || $execution->current_attempt_id !== $snapshotAttemptId
+        ) {
+            return 'current_attempt_changed';
+        }
+
+        if (! $attempt instanceof ActivityAttempt) {
+            return 'current_attempt_not_found';
+        }
+
+        if (
+            $attempt->activity_execution_id !== $execution->id
+            || $attempt->attempt_number !== (int) $execution->attempt_count
+        ) {
+            return 'current_attempt_changed';
+        }
+
+        if ($attempt->status !== ActivityAttemptStatus::Running) {
+            return 'current_attempt_not_running';
+        }
+
+        return null;
     }
 
     private static function openActivityTask(ActivityExecution $execution): ?WorkflowTask

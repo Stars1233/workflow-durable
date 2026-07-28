@@ -393,9 +393,19 @@ final class DefaultActivityTaskBridge implements ActivityTaskBridge
 
             $heartbeatAt = now();
             $leaseExpiresAt = ActivityLease::expiresAt();
+            $retryPolicy = is_array($execution->retry_policy) ? $execution->retry_policy : [];
+            $heartbeatTimeout = is_int($retryPolicy['heartbeat_timeout'] ?? null)
+                && $retryPolicy['heartbeat_timeout'] > 0
+                    ? $retryPolicy['heartbeat_timeout']
+                    : null;
+            $heartbeatDeadlineAt = $heartbeatTimeout !== null
+                ? $heartbeatAt->copy()
+                    ->addSeconds($heartbeatTimeout)
+                : null;
 
             $execution->forceFill([
                 'last_heartbeat_at' => $heartbeatAt,
+                'heartbeat_deadline_at' => $heartbeatDeadlineAt,
             ])->save();
 
             $attempt->forceFill([

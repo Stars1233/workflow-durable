@@ -84,6 +84,7 @@ VERSION_PATTERN = re.compile(
 )
 ALPHA_VERSION_PATTERN = re.compile(r"^2\.0\.0-alpha\.[1-9][0-9]*$")
 BETA_VERSION_PATTERN = re.compile(r"^2\.0\.0-beta\.[1-9][0-9]*$")
+RC_VERSION_PATTERN = re.compile(r"^2\.0\.0-rc\.[1-9][0-9]*$")
 MARKDOWN_MEDIA_TYPE = "text/markdown"
 IMPLICIT_AUTHORITY_MAX_ATTEMPTS = 3
 GITHUB_READ_MAX_ATTEMPTS = 5
@@ -572,8 +573,8 @@ def validate_plan(plan: Any) -> None:
         )
     if not isinstance(plan["plan"], str) or not PLAN_PATTERN.fullmatch(plan["plan"]):
         raise RecoveryError("release plan has an invalid identity")
-    if plan["channel"] not in {"alpha", "beta"}:
-        raise RecoveryError("release plan channel must be alpha or beta")
+    if plan["channel"] not in {"alpha", "beta", "rc"}:
+        raise RecoveryError("release plan channel must be alpha, beta, or rc")
     if plan["foundation"] != {"tag": FOUNDATION_TAG, "commit": FOUNDATION_COMMIT}:
         raise RecoveryError(
             "release plan does not name the proven immutable candidate foundation"
@@ -594,9 +595,11 @@ def validate_plan(plan: Any) -> None:
             raise RecoveryError(
                 f"components.{name}.commit is not a full source identity"
             )
-    channel_pattern = (
-        ALPHA_VERSION_PATTERN if plan["channel"] == "alpha" else BETA_VERSION_PATTERN
-    )
+    channel_pattern = {
+        "alpha": ALPHA_VERSION_PATTERN,
+        "beta": BETA_VERSION_PATTERN,
+        "rc": RC_VERSION_PATTERN,
+    }[plan["channel"]]
     for name in ("workflow", "waterline"):
         if not channel_pattern.fullmatch(components[name]["version"]):
             raise RecoveryError(
@@ -605,7 +608,7 @@ def validate_plan(plan: Any) -> None:
     authorization = plan["beta_authorization"]
     if plan["channel"] == "alpha" and authorization is not None:
         raise RecoveryError("alpha plans cannot claim beta authorization")
-    if plan["channel"] == "beta" and (
+    if plan["channel"] in {"beta", "rc"} and (
         not isinstance(authorization, dict)
         or set(authorization) != {"tag", "commit"}
         or not re.fullmatch(
@@ -614,9 +617,48 @@ def validate_plan(plan: Any) -> None:
         )
         or not COMMIT_PATTERN.fullmatch(str(authorization.get("commit", "")))
     ):
-        raise RecoveryError("beta plans require an immutable beta authorization")
+        raise RecoveryError("beta and release-candidate plans require immutable beta qualification")
     if plan["schema"] == LEGACY_SCHEMA and manifest_digest(plan) not in LEGACY_PLAN_DIGESTS:
         raise RecoveryError("legacy release plan is not an exact recorded historical contract")
+
+
+def beta_authorization_matches_plan(
+    plan: dict[str, Any],
+    authorization: dict[str, str],
+    record: Any,
+) -> bool:
+    if plan["channel"] == "beta":
+        return record == {
+            "schema": "durable-workflow.beta-authorization/v1",
+            "channel": "beta",
+            "candidate": plan["plan"],
+            "components": plan["components"],
+        }
+    if plan["channel"] != "rc" or not isinstance(record, dict):
+        return False
+    components = record.get("components")
+    candidate = record.get("candidate")
+    if (
+        set(record) != {"schema", "channel", "candidate", "components"}
+        or record.get("schema") != "durable-workflow.beta-authorization/v1"
+        or record.get("channel") != "beta"
+        or not isinstance(candidate, str)
+        or authorization["tag"] != f"beta-authorization/{candidate}"
+        or not isinstance(components, dict)
+        or set(components) != set(COMPONENTS)
+    ):
+        return False
+    versions: set[str] = set()
+    for identity in components.values():
+        if (
+            not isinstance(identity, dict)
+            or set(identity) != {"version", "commit"}
+            or not BETA_VERSION_PATTERN.fullmatch(str(identity.get("version", "")))
+            or not COMMIT_PATTERN.fullmatch(str(identity.get("commit", "")))
+        ):
+            return False
+        versions.add(identity["version"])
+    return len(versions) == 1
 
 
 def manifest_digest(value: Any) -> str:
@@ -2979,15 +3021,9 @@ def verify_plan_authority(
             authorization["commit"],
             "beta-authorization.json",
         )
-        expected = {
-            "schema": "durable-workflow.beta-authorization/v1",
-            "channel": "beta",
-            "candidate": plan["plan"],
-            "components": plan["components"],
-        }
-        if record != expected:
+        if not beta_authorization_matches_plan(plan, authorization, record):
             raise RecoveryError(
-                "beta authorization names a different candidate or component tuple",
+                "beta qualification does not authorize this prerelease transition",
                 "channel-authorization",
             )
     return branches, recovery_workflows
@@ -3686,7 +3722,7 @@ def resolve_component(
     source_train = None
     if (
         action == "publish"
-        and plan["channel"] == "beta"
+        and plan["channel"] in {"beta", "rc"}
         and component_name in SOURCE_PRODUCT_TRAINS
     ):
         source_train = source_product_train_evidence(client, component_name, identity)

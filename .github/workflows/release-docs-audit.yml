@@ -5,6 +5,7 @@ on:
     tags:
       - '2.0.0-alpha.*'
       - '2.0.0-beta.*'
+      - '2.0.0-rc.*'
       - '2.0.0'
   workflow_dispatch:
     inputs:
@@ -42,7 +43,7 @@ jobs:
             tag="$GITHUB_REF_NAME"
           fi
           tag="${tag#v}"
-          if ! printf '%s\n' "$tag" | grep -Eq '^2\.0\.0((-(alpha|beta)\.[0-9]+)?)$'; then
+          if ! printf '%s\n' "$tag" | grep -Eq '^2\.0\.0((-(alpha|beta|rc)\.[0-9]+)?)$'; then
             echo "::error::Invalid Workflow release tag for docs audit: $tag"
             exit 1
           fi

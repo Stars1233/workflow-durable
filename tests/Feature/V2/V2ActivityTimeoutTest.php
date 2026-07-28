@@ -9,6 +9,7 @@ use Tests\Fixtures\V2\TestGreetingActivity;
 use Tests\Fixtures\V2\TestGreetingWorkflow;
 use Tests\TestCase;
 use Workflow\Serializers\Serializer;
+use Workflow\V2\Contracts\ActivityTaskBridge;
 use Workflow\V2\Contracts\HistoryProjectionRole;
 use Workflow\V2\Enums\ActivityAttemptStatus;
 use Workflow\V2\Enums\ActivityStatus;
@@ -626,6 +627,123 @@ final class V2ActivityTimeoutTest extends TestCase
 
         $this->assertStringContainsString('heartbeat deadline expired', $failure->message);
         $this->assertStringContainsString('last heartbeat:', $failure->message);
+
+        /** @var ActivityTaskBridge $bridge */
+        $bridge = app(ActivityTaskBridge::class);
+        $heartbeat = $bridge->heartbeat($attempt->id);
+        $completion = $bridge->complete($attempt->id, 'too late');
+        $failure = $bridge->fail($attempt->id, 'also too late');
+
+        $this->assertFalse($heartbeat['can_continue']);
+        $this->assertSame('attempt_closed', $heartbeat['reason']);
+        $this->assertFalse($completion['recorded']);
+        $this->assertSame('stale_attempt', $completion['reason']);
+        $this->assertFalse($failure['recorded']);
+        $this->assertSame('stale_attempt', $failure['reason']);
+
+        Carbon::setTestNow();
+    }
+
+    public function testAcceptedHeartbeatFencesExpiredScannerSnapshot(): void
+    {
+        \Workflow\V2\WorkflowStub::fake();
+
+        $startedAt = Carbon::parse('2026-01-15 10:00:00');
+        Carbon::setTestNow($startedAt);
+
+        [$run, $execution, $activityTask] = $this->createPendingActivity(
+            instanceId: 'act-timeout-hb-race-1',
+            retryPolicy: [
+                'snapshot_version' => 1,
+                'max_attempts' => 1,
+                'backoff_seconds' => [],
+                'start_to_close_timeout' => 120,
+                'schedule_to_start_timeout' => null,
+                'schedule_to_close_timeout' => null,
+                'heartbeat_timeout' => 10,
+            ],
+        );
+
+        /** @var ActivityTaskBridge $bridge */
+        $bridge = app(ActivityTaskBridge::class);
+        $claim = $bridge->claim($activityTask->id, 'heartbeat-race-worker');
+
+        $this->assertIsArray($claim);
+        $this->assertSame(
+            $startedAt->copy()
+                ->addSeconds(10)
+                ->toIso8601String(),
+            $execution->fresh()
+                ->heartbeat_deadline_at?->toIso8601String(),
+        );
+
+        Carbon::setTestNow($startedAt->copy()->addSeconds(11));
+
+        $expiredSnapshot = ActivityTimeoutEnforcer::expiredExecutionIds();
+        $this->assertContains($execution->id, $expiredSnapshot);
+
+        $heartbeat = $bridge->heartbeat($claim['activity_attempt_id']);
+        $this->assertTrue($heartbeat['can_continue']);
+        $this->assertTrue($heartbeat['heartbeat_recorded']);
+
+        $execution->refresh();
+        $this->assertSame(
+            $startedAt->copy()
+                ->addSeconds(21)
+                ->toIso8601String(),
+            $execution->heartbeat_deadline_at?->toIso8601String(),
+        );
+
+        $result = ActivityTimeoutEnforcer::enforce($execution->id);
+
+        $this->assertFalse($result['enforced']);
+        $this->assertSame('no_deadline_expired', $result['reason']);
+        $this->assertSame(ActivityStatus::Running, $execution->fresh()->status);
+        $this->assertSame(
+            0,
+            WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('event_type', HistoryEventType::ActivityTimedOut->value)
+                ->count(),
+        );
+
+        Carbon::setTestNow();
+    }
+
+    public function testTimeoutEnforcementSkipsClosedCurrentAttempt(): void
+    {
+        $startedAt = Carbon::parse('2026-01-15 10:00:00');
+        Carbon::setTestNow($startedAt);
+
+        [$run, $execution, $activityTask, $attempt] = $this->createRunningActivity(
+            instanceId: 'act-timeout-closed-attempt-1',
+            closeDeadlineAt: $startedAt->copy()
+                ->addSeconds(300),
+        );
+
+        $execution->forceFill([
+            'heartbeat_deadline_at' => $startedAt->copy()
+                ->subSecond(),
+        ])->save();
+        $attempt->forceFill([
+            'status' => ActivityAttemptStatus::Completed,
+            'lease_expires_at' => null,
+            'closed_at' => $startedAt,
+        ])->save();
+
+        $result = ActivityTimeoutEnforcer::enforce($execution->id);
+
+        $this->assertFalse($result['enforced']);
+        $this->assertSame('current_attempt_not_running', $result['reason']);
+        $this->assertSame(ActivityStatus::Running, $execution->fresh()->status);
+        $this->assertSame(TaskStatus::Leased, $activityTask->fresh()->status);
+        $this->assertSame(
+            0,
+            WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('event_type', HistoryEventType::ActivityTimedOut->value)
+                ->count(),
+        );
 
         Carbon::setTestNow();
     }
