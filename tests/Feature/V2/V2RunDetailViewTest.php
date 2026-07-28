@@ -628,7 +628,7 @@ final class V2RunDetailViewTest extends TestCase
         $detail = RunDetailView::forRun($run);
         $signalWait = $this->findWait($detail['waits'], 'signal', 'name-provided');
 
-        $this->assertSame('workflow_run_waits_rebuilt', $detail['waits_projection_source']);
+        $this->assertSame('workflow_run_waits', $detail['waits_projection_source']);
         $this->assertDatabaseHas('workflow_run_waits', [
             'workflow_run_id' => $runId,
             'workflow_instance_id' => 'detail-projected-wait',
