@@ -10,7 +10,7 @@
   separate deployment choices; Cloud placement stays behind the namespace
   endpoint.
 - Platform conformance Rust signal/query scenarios continue to install the
-  exact compatible `durable-workflow =2.0.0-rc.2` crates.io artifact.
+  exact compatible `durable-workflow =2.0.0-rc.1` crates.io artifact.
 - Embedded and standalone activity heartbeats now use the same
   attempt-before-execution row-lock order as timeout enforcement. Accepted
   heartbeats renew the current attempt deadline, while stale scanner snapshots

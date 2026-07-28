@@ -128,9 +128,9 @@ final class PlatformConformanceSuiteTest extends TestCase
         $contracts = $category['required_scenario_contracts'];
         $artifact = [
             'package' => 'durable-workflow',
-            'version' => '2.0.0-rc.2',
+            'version' => '2.0.0-rc.1',
             'source' => 'crates.io',
-            'cargo_requirement' => '=2.0.0-rc.2',
+            'cargo_requirement' => '=2.0.0-rc.1',
         ];
 
         $this->assertStringContainsString('Rust SDK', $manifest['targets']['official_sdk']['description']);
@@ -184,6 +184,42 @@ final class PlatformConformanceSuiteTest extends TestCase
             'failed_replayed_query_does_not_change_state_returned_by_later_query',
         ] as $assertion) {
             $this->assertContains($assertion, $replay['required_assertions']);
+        }
+    }
+
+    public function testWorkflowReleaseTrainDoesNotRewritePublishedSdkArtifacts(): void
+    {
+        $composerPath = dirname(__DIR__, 3) . '/composer.json';
+        $composerJson = file_get_contents($composerPath);
+
+        $this->assertIsString($composerJson);
+
+        $composer = json_decode($composerJson, true, 512, JSON_THROW_ON_ERROR);
+        $workflowRelease = $composer['extra']['durable-workflow']['product-train'];
+        $surfaceManifest = SurfaceStabilityContract::manifest();
+        $sdkCompatibility = $surfaceManifest['surface_families']['official_sdks']['package_compatibility'];
+        $suiteManifest = PlatformConformanceSuite::manifest();
+        $contracts = $suiteManifest['fixture_catalog']['signal_query_runtime_contract']['required_scenario_contracts'];
+
+        $this->assertSame('2.0.0-rc.2', $workflowRelease);
+
+        foreach ($sdkCompatibility as $sdk) {
+            $this->assertSame('2.0.0-rc.1', $sdk['release_line']);
+            $this->assertSame('2.0.0-rc.1', $sdk['product_train']);
+            $this->assertSame('2.0.0-rc.1', $sdk['supported_server_versions']);
+            $this->assertNotSame($workflowRelease, $sdk['release_line']);
+        }
+
+        $this->assertSame('2.0.0rc1', $sdkCompatibility['python_sdk']['registry_version']);
+
+        foreach ($contracts as $contract) {
+            $artifact = $contract['artifact'];
+
+            $this->assertSame('durable-workflow', $artifact['package']);
+            $this->assertSame('crates.io', $artifact['source']);
+            $this->assertSame('2.0.0-rc.1', $artifact['version']);
+            $this->assertSame('=' . $artifact['version'], $artifact['cargo_requirement']);
+            $this->assertNotSame($workflowRelease, $artifact['version']);
         }
     }
 
