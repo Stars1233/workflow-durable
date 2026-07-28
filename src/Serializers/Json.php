@@ -62,7 +62,7 @@ final class Json implements SerializerInterface
                 throw new CodecDecodeException(
                     'json',
                     'Payload bytes look like base64-encoded Avro, not JSON: ' . $e->getMessage(),
-                    'The blob is valid base64 starting with an Avro framing prefix (0x00 generic wrapper or 0x01 typed schema). Either change the codec tag to "avro", or re-encode the payload as JSON.',
+                    'The blob is valid base64 starting with Avro single-object magic c301. Either change the codec tag to "avro", or re-encode the payload as JSON.',
                     $e,
                 );
             }
@@ -80,11 +80,9 @@ final class Json implements SerializerInterface
      * Heuristic: do these bytes look like base64-encoded Avro?
      *
      * The cheapest reliable check: pure base64 alphabet, base64_decode in
-     * strict mode succeeds, and the first decoded byte is 0x00 (generic
-     * Avro wrapper) or 0x01 (typed Avro schema). JSON ASCII text never
-     * decodes to bytes leading with 0x00/0x01 because base64 alphabet
-     * cannot represent control characters in source form, so this check
-     * has effectively no false positives on misformatted JSON.
+     * strict mode succeeds, and the decoded bytes start with Avro's c301
+     * single-object magic. JSON ASCII text cannot contain that binary prefix,
+     * so this check has effectively no false positives on misformatted JSON.
      */
     private static function looksLikeBase64Avro(string $data): bool
     {
@@ -97,6 +95,6 @@ final class Json implements SerializerInterface
             return false;
         }
 
-        return $decoded[0] === "\x00" || $decoded[0] === "\x01";
+        return str_starts_with($decoded, Avro::SINGLE_OBJECT_MAGIC);
     }
 }

@@ -401,9 +401,11 @@ final class BundleIntegrityVerifier
                 }
 
                 if ($writerSchema !== null && $writerSchemaFingerprint !== null) {
-                    $expected = 'sha256:' . hash('sha256', $writerSchema);
+                    $expected = $writerSchema === Avro::valueSchemaJson()
+                        ? 'crc64-avro:' . Avro::valueSchemaFingerprint()
+                        : null;
 
-                    if ($expected !== $writerSchemaFingerprint) {
+                    if ($expected === null || $expected !== $writerSchemaFingerprint) {
                         self::addFinding(
                             $findings,
                             'payload_manifest.writer_schema_fingerprint_mismatch',
@@ -431,41 +433,31 @@ final class BundleIntegrityVerifier
 
         if (isset($codecSchemas['avro']) && is_array($codecSchemas['avro'])) {
             $avro = $codecSchemas['avro'];
-            $wrapperSchema = self::stringValue($avro['wrapper_schema'] ?? null);
-            $expectedFingerprint = self::stringValue(
-                ($avro['generic_wrapper']['writer_schema_fingerprint'] ?? null),
-            );
+            $current = self::stringValue($avro['current_fingerprint'] ?? null);
+            $schemas = is_array($avro['writer_schemas'] ?? null) ? $avro['writer_schemas'] : [];
+            $entry = $current !== null && is_array($schemas[$current] ?? null)
+                ? $schemas[$current]
+                : null;
 
-            if ($wrapperSchema !== null && $expectedFingerprint !== null) {
-                $derived = 'sha256:' . hash('sha256', $wrapperSchema);
-
-                if ($derived !== $expectedFingerprint) {
-                    self::addFinding(
-                        $findings,
-                        'codec_schemas.wrapper_fingerprint_mismatch',
-                        self::SEVERITY_ERROR,
-                        'Avro generic_wrapper.writer_schema_fingerprint disagrees with the embedded wrapper_schema.',
-                        'codec_schemas.avro.generic_wrapper.writer_schema_fingerprint',
-                        [
-                            'expected' => $derived,
-                            'actual' => $expectedFingerprint,
-                        ],
-                    );
-                }
-            }
-
-            if ($wrapperSchema !== null) {
-                $runtimeWrapper = Avro::wrapperSchemaJson();
-
-                if ($wrapperSchema !== $runtimeWrapper) {
-                    self::addFinding(
-                        $findings,
-                        'codec_schemas.wrapper_schema_drift',
-                        self::SEVERITY_WARNING,
-                        'Embedded Avro wrapper_schema differs from this runtime; offline decoders should prefer the embedded schema.',
-                        'codec_schemas.avro.wrapper_schema',
-                    );
-                }
+            if ($current !== Avro::valueSchemaFingerprint() || $entry === null) {
+                self::addFinding(
+                    $findings,
+                    'codec_schemas.value_schema_missing',
+                    self::SEVERITY_ERROR,
+                    'Avro codec metadata does not bundle the current Value writer schema.',
+                    'codec_schemas.avro.writer_schemas',
+                );
+            } elseif (
+                ($entry['schema'] ?? null) !== Avro::valueSchemaJson()
+                || ($entry['fingerprint'] ?? null) !== 'crc64-avro:' . Avro::valueSchemaFingerprint()
+            ) {
+                self::addFinding(
+                    $findings,
+                    'codec_schemas.value_schema_drift',
+                    self::SEVERITY_ERROR,
+                    'Bundled Avro Value schema or fingerprint differs from this runtime.',
+                    'codec_schemas.avro.writer_schemas.' . $current,
+                );
             }
         }
     }

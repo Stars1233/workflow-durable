@@ -1800,7 +1800,7 @@ final class HistoryExportTest extends TestCase
         $this->assertSame('inline-redacted:payloads.arguments.data', $stubBundle['payloads']['arguments']['data']);
     }
 
-    public function testItEmbedsAvroWrapperSchemaWhenBundleContainsAvroPayloads(): void
+    public function testItEmbedsCanonicalAvroValueSchemaWhenBundleContainsAvroPayloads(): void
     {
         if (! class_exists(\Apache\Avro\Schema\AvroSchema::class)) {
             $this->markTestSkipped('apache/avro package is not installed in this environment.');
@@ -1817,31 +1817,30 @@ final class HistoryExportTest extends TestCase
 
         $this->assertArrayHasKey('codec_schemas', $bundle);
         $this->assertArrayHasKey('avro', $bundle['codec_schemas']);
-        $this->assertSame('base64-avro-binary', $bundle['codec_schemas']['avro']['encoding']);
-        $schema = json_decode($bundle['codec_schemas']['avro']['wrapper_schema'], true);
+        $this->assertSame('base64-avro-single-object', $bundle['codec_schemas']['avro']['encoding']);
+        $this->assertSame('single_object', $bundle['codec_schemas']['avro']['framing']);
+        $this->assertSame('c301', $bundle['codec_schemas']['avro']['magic_hex']);
+        $fingerprint = Avro::valueSchemaFingerprint();
+        $this->assertSame($fingerprint, $bundle['codec_schemas']['avro']['current_fingerprint']);
+        $schemaEntry = $bundle['codec_schemas']['avro']['writer_schemas'][$fingerprint];
+        $schema = json_decode($schemaEntry['schema'], true);
         $this->assertSame('record', $schema['type']);
-        $this->assertSame('Payload', $schema['name']);
-        $this->assertSame('durable_workflow', $schema['namespace']);
-        $this->assertSame('00', $bundle['codec_schemas']['avro']['wrapper_prefix_hex']);
-        $this->assertSame('01', $bundle['codec_schemas']['avro']['typed_prefix_hex']);
-        $this->assertSame('00', $bundle['codec_schemas']['avro']['generic_wrapper']['prefix_hex']);
-        $this->assertSame(
-            'uint32_be_length_prefixed_utf8_json',
-            $bundle['codec_schemas']['avro']['typed_schema']['schema_header']
-        );
+        $this->assertSame('Value', $schema['name']);
+        $this->assertSame('durable_workflow.protocol', $schema['namespace']);
+        $this->assertSame('crc64-avro:' . $fingerprint, $schemaEntry['fingerprint']);
 
         $argumentEntry = collect($bundle['payload_manifest']['entries'])->firstWhere('path', 'payloads.arguments.data');
         $this->assertIsArray($argumentEntry);
         $this->assertSame('avro', $argumentEntry['codec']);
-        $this->assertSame('base64-avro-binary', $argumentEntry['encoding']);
-        $this->assertSame('generic_wrapper', $argumentEntry['avro_framing']);
-        $this->assertSame('00', $argumentEntry['avro_prefix_hex']);
-        $this->assertSame($bundle['codec_schemas']['avro']['wrapper_schema'], $argumentEntry['writer_schema']);
-        $this->assertStringStartsWith('sha256:', $argumentEntry['writer_schema_fingerprint']);
+        $this->assertSame('base64-avro-single-object', $argumentEntry['encoding']);
+        $this->assertSame('single_object', $argumentEntry['avro_framing']);
+        $this->assertSame('c301', $argumentEntry['avro_prefix_hex']);
+        $this->assertSame(Avro::valueSchemaJson(), $argumentEntry['writer_schema']);
+        $this->assertSame('crc64-avro:' . $fingerprint, $argumentEntry['writer_schema_fingerprint']);
         $this->assertNull($argumentEntry['diagnostic']);
     }
 
-    public function testItEmbedsTypedAvroWriterSchemaInPayloadManifest(): void
+    public function testItMarksUnavailableAvroPayloadsWithoutInventingSchemaMetadata(): void
     {
         if (! class_exists(\Apache\Avro\Schema\AvroSchema::class)) {
             $this->markTestSkipped('apache/avro package is not installed in this environment.');
@@ -1850,11 +1849,6 @@ final class HistoryExportTest extends TestCase
         config()
             ->set('workflows.serializer', 'avro');
         $run = $this->createMinimalCompletedRun('history-export-typed-avro');
-        $schemaJson = '{"type":"record","name":"OrderPayload","namespace":"durable_workflow.test","fields":['
-            . '{"name":"order_id","type":"string"},'
-            . '{"name":"amount","type":"double"}]}';
-
-        Avro::withSchema(Avro::parseSchema($schemaJson));
         $run->forceFill([
             'arguments' => Serializer::serializeWithCodec('avro', [
                 'order_id' => 'ORD-42',
@@ -1868,15 +1862,13 @@ final class HistoryExportTest extends TestCase
         $outputEntry = collect($bundle['payload_manifest']['entries'])->firstWhere('path', 'payloads.output.data');
 
         $this->assertIsArray($argumentEntry);
-        $this->assertSame('typed_schema', $argumentEntry['avro_framing']);
-        $this->assertSame('01', $argumentEntry['avro_prefix_hex']);
+        $this->assertSame('single_object', $argumentEntry['avro_framing']);
+        $this->assertSame('c301', $argumentEntry['avro_prefix_hex']);
         $this->assertNull($argumentEntry['diagnostic']);
-        $this->assertStringStartsWith('sha256:', $argumentEntry['writer_schema_fingerprint']);
-
-        $writerSchema = json_decode($argumentEntry['writer_schema'], true);
-        $this->assertSame('OrderPayload', $writerSchema['name']);
-        $this->assertSame('durable_workflow.test', $writerSchema['namespace']);
-        $this->assertSame(['order_id', 'amount'], array_column($writerSchema['fields'], 'name'));
+        $this->assertSame(
+            'crc64-avro:' . Avro::valueSchemaFingerprint(),
+            $argumentEntry['writer_schema_fingerprint'],
+        );
 
         $this->assertIsArray($outputEntry);
         $this->assertFalse($outputEntry['available']);
@@ -1989,10 +1981,13 @@ final class HistoryExportTest extends TestCase
         $this->assertSame('avro-encoded-update-result', $updateRow['result']);
 
         // The run itself is PHP-legacy-coded, but the Avro signal/update rows must
-        // trigger codec_schemas.avro so an offline consumer has the wrapper
-        // schema needed to decode those blobs.
+        // trigger codec_schemas.avro so an offline consumer has the fixed
+        // writer schema and fingerprint needed to decode those blobs.
         $this->assertArrayHasKey('avro', $bundle['codec_schemas']);
-        $this->assertSame('00', $bundle['codec_schemas']['avro']['wrapper_prefix_hex']);
+        $this->assertSame(
+            Avro::VALUE_SCHEMA_FINGERPRINT_HEX,
+            $bundle['codec_schemas']['avro']['current_fingerprint'],
+        );
     }
 
     public function testItOmitsAvroSchemasWhenBundleHasNoAvroPayloads(): void

@@ -13,7 +13,7 @@ these universal codecs:
 
 | Codec | Use |
 | --- | --- |
-| `avro` | Default for new v2 workflows and activities. The blob is a base64-encoded Avro generic-wrapper around a JSON document. |
+| `avro` | Default for new v2 workflows and activities. The blob is a base64-encoded Avro single-object frame containing the fixed recursive `durable_workflow.protocol.Value` schema. |
 | `json` | Explicit interop envelope for UTF-8 JSON payloads. Workers and control-plane poll responses can decode it when an external SDK or previously persisted row already tagged the payload as JSON. |
 
 Legacy PHP history can still name PHP-engine-specific codecs. Those
@@ -35,23 +35,24 @@ explicit adapter the workflow author writes before encode.
 
 ### Clean round-trip
 
-These values are JSON-native in both languages and round-trip with
-identical observable behaviour:
+These values have direct branches in the fixed Avro Value schema and
+round-trip with identical observable behaviour:
 
 | Wire shape | PHP type | Python type |
 | --- | --- | --- |
 | `null` | `null` | `None` |
 | `boolean` | `bool` | `bool` |
 | `integer` | `int` | `int` |
-| `number` | `float` | `float` |
+| `double` | `float` | `float` |
 | `string` | `string` | `str` |
-| `array` | indexed `array<int, mixed>` | `list[Any]` |
-| `object` | associative `array<string, mixed>` | `dict[str, Any]` |
+| `bytes` | `AvroBinaryValue` | `bytes` |
+| `ArrayValue` | indexed `array<int, mixed>` | `list[Any]` |
+| `MapValue` | associative `array<string, mixed>` or `AvroMapValue` | `dict[str, Any]` |
 
-Both universal codecs accept any JSON document built from this set. New
-PHP-authored v2 payloads write the default `payload_codec: "avro"`
-envelope; workers and control-plane clients also read explicit
-`payload_codec: "json"` envelopes without further configuration.
+The Avro codec selects a named branch for every value, so booleans cannot be
+inferred as numbers and bytes cannot be inferred as text. New PHP-authored v2
+payloads write the default `payload_codec: "avro"` envelope; workers and
+control-plane clients also read explicit `payload_codec: "json"` envelopes.
 
 ### Round-trip with documented coercion
 
@@ -61,12 +62,12 @@ must adapt the value back at the consumer.
 
 | Producer | Wire shape | Consumer | Coercion |
 | --- | --- | --- | --- |
-| PHP `int` outside the JS-safe range (above 2^53-1) | JSON `number` | Python `int` | No loss in Python; PHP to Python preserves precision because the universal codecs carry the integer as a JSON integer token. Avoid routing these values through JSON processors that coerce all numbers to floating point. |
-| Python `IntEnum` / `StrEnum` | JSON scalar | PHP `int`/`string` | The receiver sees the raw scalar. Re-attach the enum class on the consumer side if it is significant. |
-| Python `Decimal` | JSON `string` (via `to_avro_payload_value`) | PHP `string` | The receiver must re-parse to its money/fixed-point type. |
-| Python `datetime` / `date` / `time` | ISO 8601 `string` | PHP `string` (parse with `Carbon`/`DateTimeImmutable`) | Time zone is preserved when the producer emits a tz-aware `datetime`; naive datetimes are wire-ambiguous and SHOULD be avoided. |
-| Python `UUID` | JSON `string` | PHP `string` | Parse on the consumer with `Ramsey\Uuid\Uuid::fromString()` or equivalent. |
-| Empty PHP `array` `[]` | JSON `[]` (always) | Python `list` | The PHP encoder always tags an empty `array` as a JSON list. Producers that need an empty mapping must encode `(object)[]` (`stdClass`) or `[]` typed as `array<string, mixed>` via an explicit adapter. |
+| PHP `int` outside the JS-safe range (above 2^53-1) | Avro `long` | Python `int` | The Avro path retains all signed 64-bit integer values. Avoid routing these values through JSON processors that coerce all numbers to floating point. |
+| Python `IntEnum` / `StrEnum` | Avro `LongValue` / `StringValue` | PHP `int`/`string` | The receiver sees the adapted primitive. Re-attach the enum class on the consumer side if it is significant. |
+| Python `Decimal` | Avro `StringValue` (via `to_avro_payload_value`) | PHP `string` | The receiver must re-parse to its money/fixed-point type. |
+| Python `datetime` / `date` / `time` | Avro `StringValue` containing ISO 8601 text | PHP `string` (parse with `Carbon`/`DateTimeImmutable`) | Time zone is preserved when the producer emits a tz-aware `datetime`; naive datetimes are wire-ambiguous and SHOULD be avoided. |
+| Python `UUID` | Avro `StringValue` | PHP `string` | Parse on the consumer with `Ramsey\Uuid\Uuid::fromString()` or equivalent. |
+| Empty PHP `array` `[]` | Avro `ArrayValue` | Python `list` | PHP uses `array_is_list()`, so `[]` is a list. Use `AvroMapValue::fromPairs([])` when the intended value is an empty map. |
 
 ### Requires an explicit adapter at the call site
 
@@ -81,8 +82,7 @@ encoder raises:
 - Python `pydantic` models (the SDK calls `model_dump(mode="json")`;
   any custom `to_dict` should match that contract)
 - Python `pendulum` values (convert with `.isoformat()`)
-- Python `bytes` / `bytearray` (encode as base64 `string` or split
-  into a `dict` with explicit `encoding` and `data` fields)
+- Python `bytearray` (convert to native `bytes`, which uses Avro `BytesValue`)
 - Python `set` / `frozenset` (convert to a sorted `list`)
 - Python custom objects without a registered adapter
 - PHP objects that are not plain `stdClass` or arrays (the workflow

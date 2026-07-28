@@ -196,10 +196,9 @@ final class HistoryExport
      * Collect the well-known wire schemas needed to decode the payloads in
      * this bundle offline.
      *
-     * For Avro: embeds the generic-wrapper schema (used by every codec=avro
-     * payload that does not carry a typed schema). Consumers reading the
-     * export without the workflow runtime can use this to decode the
-     * `0x00`-prefixed Avro payloads.
+     * For Avro: embeds the immutable Value schema keyed by its CRC-64-AVRO
+     * fingerprint. Consumers can decode the standard single-object frame
+     * without a network schema lookup.
      *
      * For JSON and other self-describing codecs: the map is empty.
      *
@@ -212,19 +211,15 @@ final class HistoryExport
 
         if (self::bundleUsesCodec($bundle, 'avro')) {
             $schemas['avro'] = [
-                'encoding' => 'base64-avro-binary',
-                'wrapper_schema' => Avro::wrapperSchemaJson(),
-                'wrapper_prefix_hex' => '00',
-                'typed_prefix_hex' => '01',
-                'generic_wrapper' => [
-                    'prefix_hex' => '00',
-                    'writer_schema' => Avro::wrapperSchemaJson(),
-                    'writer_schema_fingerprint' => 'sha256:' . hash('sha256', Avro::wrapperSchemaJson()),
-                ],
-                'typed_schema' => [
-                    'prefix_hex' => '01',
-                    'schema_header' => 'uint32_be_length_prefixed_utf8_json',
-                    'writer_schema_location' => 'payload_manifest.entries[*].writer_schema',
+                'encoding' => 'base64-avro-single-object',
+                'framing' => 'single_object',
+                'magic_hex' => 'c301',
+                'current_fingerprint' => Avro::valueSchemaFingerprint(),
+                'writer_schemas' => [
+                    Avro::valueSchemaFingerprint() => [
+                        'schema' => Avro::valueSchemaJson(),
+                        'fingerprint' => 'crc64-avro:' . Avro::valueSchemaFingerprint(),
+                    ],
                 ],
             ];
         }
@@ -452,7 +447,7 @@ final class HistoryExport
     private static function payloadEncoding(string $codec): string
     {
         return match ($codec) {
-            'avro' => 'base64-avro-binary',
+            'avro' => 'base64-avro-single-object',
             'workflow-serializer-y', 'Workflow\\Serializers\\Y' => 'php-serialized-escaped',
             'workflow-serializer-base64', 'Workflow\\Serializers\\Base64' => 'php-serialized-base64',
             default => 'opaque-string',

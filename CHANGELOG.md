@@ -2,15 +2,24 @@
 
 ## Unreleased
 
-- Advanced Workflow to the synchronized Durable Workflow `2.0.0-rc.2`
+- Advanced Workflow to the synchronized Durable Workflow `2.0.0-rc.3`
   product train. This is the only supported 2.0 prerelease baseline; earlier
   alphas and beta tuples remain historical and receive no compatibility shim.
+- Replaced the prerelease JSON-in-Avro wrapper with the fixed recursive
+  `durable_workflow.protocol.Value` schema and standard Avro single-object
+  framing. Native adapters now preserve booleans, signed 64-bit integers,
+  finite doubles, bytes, UTF-8 text, lists, and string-keyed maps.
+- Added a backup-first prerelease-history migration that recursively rewrites
+  inline and external wrapper copies in retained event snapshots. Replacement
+  external objects receive verified hashes and sizes while original objects
+  remain recoverable, and affected exported histories must replay before the
+  migration reports success.
 - Removed the package-owned hosted control-plane and runtime-target contract.
   Embedded Laravel, independent self-hosted Server, and managed Cloud remain
   separate deployment choices; Cloud placement stays behind the namespace
   endpoint.
 - Platform conformance Rust signal/query scenarios continue to install the
-  exact compatible `durable-workflow =2.0.0-rc.1` crates.io artifact.
+  exact compatible `durable-workflow =2.0.0-rc.3` crates.io artifact.
 - Embedded and standalone activity heartbeats now use the same
   attempt-before-execution row-lock order as timeout enforcement. Accepted
   heartbeats renew the current attempt deadline, while stale scanner snapshots

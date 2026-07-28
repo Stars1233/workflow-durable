@@ -85,6 +85,47 @@ final class ExternalPayloads
     }
 
     /**
+     * Store converted bytes beside an existing external object and return the
+     * replacement wire envelope. The old object is intentionally retained so
+     * a prerelease-history migration can be rolled back from its backup.
+     *
+     * @param array{codec: string, external_storage: array<string, mixed>} $envelope
+     *
+     * @return array{codec: string, external_storage: array<string, mixed>}
+     */
+    public static function replaceStoredEnvelope(
+        array $envelope,
+        string $convertedPayload,
+        ?string $namespace,
+    ): array {
+        $reference = self::referenceFromEnvelope($envelope);
+        $driver = self::policy()->driverFor($namespace);
+        if ($driver === null) {
+            throw new RuntimeException('External payload storage driver is unavailable for this namespace.');
+        }
+
+        $replacement = ExternalPayloadStorage::store($driver, $convertedPayload, $reference->codec);
+
+        return [
+            'codec' => $reference->codec,
+            'external_storage' => $replacement->toArray(),
+        ];
+    }
+
+    public static function replaceStoredReference(
+        string $payload,
+        string $convertedPayload,
+        ?string $namespace,
+    ): string {
+        $envelope = self::storedEnvelope($payload);
+        if ($envelope === null) {
+            throw new InvalidArgumentException('Expected an external payload reference.');
+        }
+
+        return self::encodeStoredEnvelope(self::replaceStoredEnvelope($envelope, $convertedPayload, $namespace));
+    }
+
+    /**
      * @return array{codec: string, blob: string}|array{codec: string, external_storage: array<string, mixed>}|null
      */
     public static function wireEnvelope(?string $payload, ?string $codec, ?string $namespace): ?array

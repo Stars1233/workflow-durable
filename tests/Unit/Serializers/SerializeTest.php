@@ -8,6 +8,8 @@ use Laravel\SerializableClosure\SerializableClosure;
 use Tests\Fixtures\TestEnum;
 use Tests\TestCase;
 use Throwable;
+use Workflow\Serializers\AvroBinaryValue;
+use Workflow\Serializers\AvroMapValue;
 use Workflow\Serializers\Base64;
 use Workflow\Serializers\Serializer;
 use Workflow\Serializers\Y;
@@ -118,6 +120,24 @@ final class SerializeTest extends TestCase
 
         $this->assertInstanceOf(SerializableClosure::class, $unserialized[0]);
         $this->assertSame('ok', $unserialized[0]->getClosure()());
+    }
+
+    public function testAvroProtocolAdaptersStayOnAvroUnlessAMapContainsAPhpOnlyValue(): void
+    {
+        $value = AvroMapValue::fromPairs([
+            ['nested', AvroMapValue::fromPairs([['bytes', AvroBinaryValue::fromBytes("\x00\xFF")]])],
+        ]);
+
+        $this->assertSame('avro', Serializer::chooseCodecForData('avro', $value));
+        $this->assertSame(
+            'workflow-serializer-y',
+            Serializer::chooseCodecForData(
+                'avro',
+                AvroMapValue::fromPairs([
+                    ['callback', new SerializableClosure(static fn (): string => 'php-only')],
+                ]),
+            ),
+        );
     }
 
     private function testSerializeUnserialize($data, $serializer, $unserializer): void

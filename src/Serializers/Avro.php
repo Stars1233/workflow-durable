@@ -4,71 +4,48 @@ declare(strict_types=1);
 
 namespace Workflow\Serializers;
 
-use Apache\Avro\Datum\AvroIOBinaryDecoder;
 use Apache\Avro\Datum\AvroIOBinaryEncoder;
-use Apache\Avro\Datum\AvroIODatumReader;
-use Apache\Avro\Datum\AvroIODatumWriter;
 use Apache\Avro\IO\AvroStringIO;
 use Apache\Avro\Schema\AvroSchema;
+use InvalidArgumentException;
 use Throwable;
+use UnderflowException;
 
 /**
- * Avro binary codec with optional schema support.
+ * Fixed, language-neutral Avro Value codec.
  *
- * When a schema is provided (via the static schema context), payloads are
- * encoded as typed Avro records with full type fidelity (int stays int,
- * float stays float). When no schema is provided, payloads are wrapped
- * in a generic envelope that stores the JSON-encoded value as an Avro
- * string — preserving binary framing while remaining schemaless.
- *
- * Registered as codec name "avro" in {@see CodecRegistry}.
- *
- * @see https://avro.apache.org/docs/current/specification/
+ * Every payload uses Avro single-object encoding with the immutable
+ * durable_workflow.protocol.Value schema. Domain-specific schemas and a live
+ * schema registry are deliberately not part of the protocol.
  */
 final class Avro implements SerializerInterface
 {
-    /**
-     * Stable wire-protocol prefix bytes documented for SDK / export consumers.
-     */
-    public const PREFIX_GENERIC_WRAPPER = "\x00";
+    public const SINGLE_OBJECT_MAGIC = "\xC3\x01";
 
-    public const PREFIX_TYPED_SCHEMA = "\x01";
+    public const VALUE_SCHEMA_FINGERPRINT_HEX = 'e2a33dff55802237';
 
-    private const TYPED_SCHEMA_HEADER_BYTES = 4;
+    public const VALUE_SCHEMA_FINGERPRINT = "\xE2\xA3\x3D\xFF\x55\x80\x22\x37";
 
-    /**
-     * Generic wrapper schema for arbitrary payloads.
-     *
-     * Used when no typed schema is available. Stores the payload as a
-     * JSON string inside an Avro record, providing binary framing and
-     * schema evolution (the wrapper can be extended with metadata fields
-     * without breaking existing payloads).
-     */
-    private const WRAPPER_SCHEMA = '{"type":"record","name":"Payload","namespace":"durable_workflow","fields":[{"name":"json","type":"string"},{"name":"version","type":"int","default":1}]}';
+    public const VALUE_SCHEMA_JSON = '{"type":"record","name":"Value","namespace":"durable_workflow.protocol","fields":[{"name":"value","type":["null",{"type":"record","name":"BooleanValue","fields":[{"name":"boolean","type":"boolean"}]},{"type":"record","name":"LongValue","fields":[{"name":"long","type":"long"}]},{"type":"record","name":"DoubleValue","fields":[{"name":"double","type":"double"}]},{"type":"record","name":"BytesValue","fields":[{"name":"bytes","type":"bytes"}]},{"type":"record","name":"StringValue","fields":[{"name":"string","type":"string"}]},{"type":"record","name":"ArrayValue","fields":[{"name":"items","type":{"type":"array","items":"Value"}}]},{"type":"record","name":"MapValue","fields":[{"name":"entries","type":{"type":"map","values":"Value"}}]}]}]}';
 
-    private static ?AvroSchema $wrapperSchema = null;
+    private static ?AvroSchema $valueSchema = null;
 
-    /**
-     * @var AvroSchema|null Typed schema set by the caller for the current encode/decode.
-     */
-    private static ?AvroSchema $contextSchema = null;
-
-    /**
-     * The generic-wrapper schema as canonical JSON.
-     *
-     * Exposed so that history-export bundles and similar self-describing
-     * artifacts can embed the schema needed to decode `0x00`-prefixed
-     * Avro payloads offline, without coupling consumers to this class.
-     */
-    public static function wrapperSchemaJson(): string
+    public static function valueSchemaJson(): string
     {
-        return self::WRAPPER_SCHEMA;
+        return self::VALUE_SCHEMA_JSON;
+    }
+
+    public static function valueSchemaFingerprint(): string
+    {
+        return self::VALUE_SCHEMA_FINGERPRINT_HEX;
+    }
+
+    public static function parseSchema(string $json): AvroSchema
+    {
+        return self::suppressApacheDeprecations(static fn (): AvroSchema => AvroSchema::parse($json));
     }
 
     /**
-     * Describe enough framing metadata for offline history-export consumers to
-     * decode a stored Avro payload without coupling to this PHP serializer.
-     *
      * @return array{
      *     encoding: string,
      *     framing: string|null,
@@ -81,7 +58,7 @@ final class Avro implements SerializerInterface
     public static function payloadMetadata(string $data): array
     {
         $metadata = [
-            'encoding' => 'base64-avro-binary',
+            'encoding' => 'base64-avro-single-object',
             'framing' => null,
             'prefix_hex' => null,
             'writer_schema' => null,
@@ -104,56 +81,24 @@ final class Avro implements SerializerInterface
             return $metadata;
         }
 
-        $prefix = $bytes[0];
-        $metadata['prefix_hex'] = bin2hex($prefix);
-
-        if ($prefix === self::PREFIX_GENERIC_WRAPPER) {
-            $metadata['framing'] = 'generic_wrapper';
-            $metadata['writer_schema'] = self::WRAPPER_SCHEMA;
-            $metadata['writer_schema_fingerprint'] = self::schemaFingerprint(self::WRAPPER_SCHEMA);
+        $metadata['prefix_hex'] = bin2hex(substr($bytes, 0, 2));
+        if (! str_starts_with($bytes, self::SINGLE_OBJECT_MAGIC)) {
+            $metadata['diagnostic'] = 'invalid_single_object_magic';
 
             return $metadata;
         }
 
-        if ($prefix === self::PREFIX_TYPED_SCHEMA) {
-            $metadata['framing'] = 'typed_schema';
+        $metadata['framing'] = 'single_object';
+        $fingerprint = substr($bytes, 2, 8);
+        $metadata['writer_schema_fingerprint'] = 'crc64-avro:' . bin2hex($fingerprint);
 
-            try {
-                $typed = self::readTypedPayload($bytes);
-                $metadata['writer_schema'] = $typed['writer_schema_json'];
-                $metadata['writer_schema_fingerprint'] = self::schemaFingerprint($typed['writer_schema_json']);
-            } catch (CodecDecodeException) {
-                $metadata['diagnostic'] = 'typed_schema_missing_writer_schema';
-            } catch (Throwable) {
-                $metadata['diagnostic'] = 'typed_schema_invalid_writer_schema';
-            }
-
-            return $metadata;
+        if ($fingerprint === self::VALUE_SCHEMA_FINGERPRINT) {
+            $metadata['writer_schema'] = self::VALUE_SCHEMA_JSON;
+        } else {
+            $metadata['diagnostic'] = 'unsupported_payload_schema';
         }
-
-        $metadata['diagnostic'] = 'unknown_prefix';
 
         return $metadata;
-    }
-
-    /**
-     * Set a typed Avro schema for the next serialize/unserialize call.
-     *
-     * Call this before serialize() or unserialize() when the workflow or
-     * activity type declares an Avro schema. The schema is consumed on
-     * the next call and reset to null.
-     */
-    public static function withSchema(AvroSchema $schema): void
-    {
-        self::$contextSchema = $schema;
-    }
-
-    /**
-     * Parse a JSON schema string into an AvroSchema.
-     */
-    public static function parseSchema(string $json): AvroSchema
-    {
-        return self::suppressDeprecations(static fn () => AvroSchema::parse($json));
     }
 
     public static function encode(string $data): string
@@ -168,33 +113,77 @@ final class Avro implements SerializerInterface
 
     public static function serialize($data): string
     {
-        $schema = self::consumeContextSchema();
+        try {
+            return self::suppressApacheDeprecations(static function () use ($data): string {
+                $io = new AvroStringIO();
+                $io->write(self::SINGLE_OBJECT_MAGIC . self::VALUE_SCHEMA_FINGERPRINT);
+                (new ValueDatumWriter())->write(self::toDatum($data), new AvroIOBinaryEncoder($io));
 
-        if ($schema !== null) {
-            return self::encodeWithSchema($data, $schema);
+                return base64_encode($io->string());
+            });
+        } catch (InvalidArgumentException $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            throw new InvalidArgumentException(
+                'avro_value_encode_failed: ' . $exception->getMessage(),
+                0,
+                $exception,
+            );
         }
-
-        return self::encodeWrapped($data);
     }
 
     public static function unserialize(string $data)
     {
-        if ($data === '') {
-            return null;
+        $bytes = base64_decode($data, true);
+        if ($bytes === false) {
+            self::failWithIngressDiagnosis($data);
+        }
+        if (strlen($bytes) < 10 || ! str_starts_with($bytes, self::SINGLE_OBJECT_MAGIC)) {
+            throw new CodecDecodeException(
+                'avro',
+                'invalid_payload_framing: expected Avro single-object magic c301.',
+                'Encode the value with a Durable Workflow 2.0 Avro codec, or use the JSON codec explicitly.',
+            );
         }
 
-        $schema = self::consumeContextSchema();
+        $fingerprint = substr($bytes, 2, 8);
+        $writerSchema = self::schemaForFingerprint($fingerprint);
 
-        if ($schema !== null) {
-            return self::decodeWithSchema($data, $schema);
+        try {
+            return self::suppressApacheDeprecations(static function () use ($bytes, $writerSchema): mixed {
+                $payloadIo = new AvroStringIO(substr($bytes, 10));
+                $reader = new ValueDatumReader($writerSchema, self::valueSchema());
+                $datum = $reader->read(new ValueDatumDecoder($payloadIo));
+                if (! $payloadIo->isEof()) {
+                    throw new CodecDecodeException(
+                        'avro',
+                        'invalid_payload_framing: trailing bytes after Avro Value datum.',
+                        'Provide exactly one Avro Value datum in each single-object frame.',
+                    );
+                }
+
+                return self::fromDatum($datum);
+            });
+        } catch (CodecDecodeException $exception) {
+            throw $exception;
+        } catch (UnderflowException $exception) {
+            throw new CodecDecodeException(
+                'avro',
+                'invalid_payload_framing: truncated Avro Value datum.',
+                'Provide one complete Avro Value datum after the single-object fingerprint.',
+                $exception,
+            );
+        } catch (Throwable $exception) {
+            throw new CodecDecodeException(
+                'avro',
+                'invalid_payload_framing: malformed Avro Value datum.',
+                'Provide one complete datum encoded with the writer schema selected by the single-object fingerprint.',
+                $exception,
+            );
         }
-
-        return self::decodeWrapped($data);
     }
 
     /**
-     * Build the worker-protocol payload envelope for an Avro value.
-     *
      * @return array{codec: string, blob: string}
      */
     public static function envelope(mixed $value): array
@@ -206,11 +195,6 @@ final class Avro implements SerializerInterface
     }
 
     /**
-     * Decode a worker-protocol Avro envelope.
-     *
-     * Accepts either the normal {codec, blob} shape or a raw Avro blob string
-     * when the surrounding task already declared payload_codec=avro.
-     *
      * @param array<string, mixed>|string|null $envelope
      */
     public static function decodeEnvelope(array|string|null $envelope): mixed
@@ -218,346 +202,231 @@ final class Avro implements SerializerInterface
         if ($envelope === null) {
             return null;
         }
-
         if (is_string($envelope)) {
             return self::unserialize($envelope);
         }
-
-        $codec = $envelope['codec'] ?? 'avro';
-        if ($codec !== 'avro') {
+        if (($envelope['codec'] ?? 'avro') !== 'avro') {
             throw new CodecDecodeException(
                 'avro',
-                sprintf('Avro envelope declared unsupported codec %s.', self::describeEnvelopeCodec($codec)),
-                'Use Workflow\\Serializers\\Avro::decodeEnvelope() only for language-neutral Avro envelopes.',
+                'Avro envelope declared a different codec.',
+                'Use Avro::decodeEnvelope() only with codec="avro" envelopes.',
             );
         }
-
-        $blob = $envelope['blob'] ?? null;
-        if (! is_string($blob)) {
+        if (! isset($envelope['blob']) || ! is_string($envelope['blob'])) {
             throw new CodecDecodeException(
                 'avro',
                 'Avro envelope is missing a string `blob` field.',
-                'Provide a base64 Avro payload in the envelope `blob` field.',
+                'Provide a base64 Avro single-object payload in `blob`.',
             );
         }
 
-        return self::unserialize($blob);
+        return self::unserialize($envelope['blob']);
     }
 
     /**
-     * Encode a value using a typed Avro schema.
-     *
-     * The value must match the schema (e.g., a record schema expects an
-     * associative array with the declared fields).
+     * @return array{value: mixed}
      */
-    private static function encodeWithSchema(mixed $data, AvroSchema $schema): string
+    private static function toDatum(mixed $value): array
     {
-        return self::suppressDeprecations(static function () use ($data, $schema): string {
-            $schemaJson = self::schemaJson($schema);
-            $io = new AvroStringIO();
-            $writer = new AvroIODatumWriter($schema);
-            $encoder = new AvroIOBinaryEncoder($io);
-
-            // Prefix: 0x01 = typed schema mode. The writer schema follows so
-            // exported payloads are self-describing for offline consumers.
-            $io->write(self::PREFIX_TYPED_SCHEMA);
-            $io->write(pack('N', strlen($schemaJson)));
-            $io->write($schemaJson);
-            $writer->write($data, $encoder);
-
-            return base64_encode($io->string());
-        });
-    }
-
-    /**
-     * Decode a value using a typed Avro schema.
-     */
-    private static function decodeWithSchema(string $data, AvroSchema $schema): mixed
-    {
-        return self::suppressDeprecations(static function () use ($data, $schema): mixed {
-            $bytes = base64_decode($data, true);
-            if ($bytes === false) {
-                self::failWithIngressDiagnosis($data);
+        if ($value === null) {
+            return [
+                'value' => null,
+            ];
+        }
+        if (is_bool($value)) {
+            return [
+                'value' => [
+                    'boolean' => $value,
+                ],
+            ];
+        }
+        if (is_int($value)) {
+            return [
+                'value' => [
+                    'long' => $value,
+                ],
+            ];
+        }
+        if (is_float($value)) {
+            if (! is_finite($value)) {
+                throw new InvalidArgumentException('non_finite_float: Avro Value doubles must be finite.');
             }
 
-            $prefix = $bytes[0] ?? '';
-            if ($prefix !== self::PREFIX_TYPED_SCHEMA) {
-                $schemaName = method_exists($schema, 'fullname') ? $schema->fullname() : null;
-                throw new CodecDecodeException(
-                    'avro',
-                    sprintf(
-                        'Expected typed Avro payload (prefix 0x01) for schema "%s", got prefix 0x%s.',
-                        $schemaName ?: 'inline',
-                        bin2hex($prefix),
-                    ),
-                    'Re-encode the payload with the typed Avro path against the matching writer schema, or change the codec tag to match the bytes you are sending.',
+            return [
+                'value' => [
+                    'double' => $value,
+                ],
+            ];
+        }
+        if ($value instanceof AvroBinaryValue) {
+            return [
+                'value' => [
+                    'bytes' => $value->bytes,
+                ],
+            ];
+        }
+        if ($value instanceof AvroMapValue) {
+            return [
+                'value' => [
+                    'entries' => AvroMapValue::fromPairs(array_map(
+                        static fn (array $pair): array => [$pair[0], self::toDatum($pair[1])],
+                        $value->pairs,
+                    )),
+                ],
+            ];
+        }
+        if (is_string($value)) {
+            if (preg_match('//u', $value) !== 1) {
+                throw new InvalidArgumentException(
+                    'invalid_utf8_string: wrap binary strings with AvroBinaryValue::fromBytes().',
                 );
             }
 
-            try {
-                $typed = self::readTypedPayload($bytes, $schema);
-                $reader = new AvroIODatumReader($typed['writer_schema'], $schema);
-                $io = new AvroStringIO($typed['datum_bytes']);
-                $decoder = new AvroIOBinaryDecoder($io);
-
-                return $reader->read($decoder);
-            } catch (CodecDecodeException $e) {
-                throw $e;
-            } catch (Throwable $e) {
-                $schemaName = method_exists($schema, 'fullname') ? $schema->fullname() : null;
-                throw new CodecDecodeException(
-                    'avro',
-                    sprintf(
-                        'Avro datum reader failed against schema "%s": %s',
-                        $schemaName ?: 'inline',
-                        $e->getMessage(),
-                    ),
-                    'Verify the writer schema matches the bytes (resolution: writer→reader compatibility per Avro spec). If you intended a different schema, supply it via Avro::withSchema() before decoding.',
-                    $e,
-                );
-            }
-        });
-    }
-
-    /**
-     * Encode an arbitrary value using the generic wrapper schema.
-     */
-    private static function encodeWrapped(mixed $data): string
-    {
-        return self::suppressDeprecations(static function () use ($data): string {
-            $schema = self::wrapperSchema();
-            $io = new AvroStringIO();
-            $writer = new AvroIODatumWriter($schema);
-            $encoder = new AvroIOBinaryEncoder($io);
-
-            // Prefix: 0x00 = generic wrapper mode
-            $io->write("\x00");
-            $writer->write([
-                'json' => json_encode(
-                    $data,
-                    JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION
-                ),
-                'version' => 1,
-            ], $encoder);
-
-            return base64_encode($io->string());
-        });
-    }
-
-    /**
-     * Decode a value from the generic wrapper schema.
-     */
-    private static function decodeWrapped(string $data): mixed
-    {
-        return self::suppressDeprecations(static function () use ($data): mixed {
-            $bytes = base64_decode($data, true);
-            if ($bytes === false) {
-                self::failWithIngressDiagnosis($data);
+            return [
+                'value' => [
+                    'string' => $value,
+                ],
+            ];
+        }
+        if (is_array($value)) {
+            if (array_is_list($value)) {
+                return [
+                    'value' => [
+                        'items' => array_map(static fn (mixed $item): array => self::toDatum($item), $value),
+                    ],
+                ];
             }
 
-            $io = new AvroStringIO($bytes);
-
-            // Read prefix
-            $prefix = $io->read(1);
-            if ($prefix === self::PREFIX_TYPED_SCHEMA) {
-                try {
-                    $typed = self::readTypedPayload($bytes);
-                    $reader = new AvroIODatumReader($typed['writer_schema']);
-                    $decoder = new AvroIOBinaryDecoder(new AvroStringIO($typed['datum_bytes']));
-
-                    return $reader->read($decoder);
-                } catch (CodecDecodeException $e) {
-                    throw $e;
-                } catch (Throwable $e) {
-                    throw new CodecDecodeException(
-                        'avro',
-                        'Typed Avro payload decode failed: ' . $e->getMessage(),
-                        'Verify the embedded writer schema matches the bytes. If you need schema evolution, supply the reader schema via Avro::withSchema() before decoding.',
-                        $e,
+            $entries = [];
+            foreach ($value as $key => $item) {
+                if (! is_string($key)) {
+                    throw new InvalidArgumentException(
+                        'invalid_map_key: Avro Value maps require string keys; keys are never stringified.',
                     );
                 }
-            }
-            if ($prefix !== self::PREFIX_GENERIC_WRAPPER) {
-                throw new CodecDecodeException(
-                    'avro',
-                    sprintf(
-                        'Unknown Avro payload prefix: 0x%s (expected 0x00 generic wrapper or 0x01 typed schema).',
-                        bin2hex($prefix),
-                    ),
-                    'These bytes were not produced by Workflow\\Serializers\\Avro::serialize(). Re-encode the payload with the Avro codec, or change the codec tag if the producer used a different codec.',
-                );
+                $entries[] = [$key, self::toDatum($item)];
             }
 
-            try {
-                $schema = self::wrapperSchema();
-                $reader = new AvroIODatumReader($schema);
-                $decoder = new AvroIOBinaryDecoder($io);
-                $record = $reader->read($decoder);
+            return [
+                'value' => [
+                    'entries' => AvroMapValue::fromPairs($entries),
+                ],
+            ];
+        }
 
-                return json_decode($record['json'], true, 512, JSON_THROW_ON_ERROR);
-            } catch (CodecDecodeException $e) {
-                throw $e;
-            } catch (Throwable $e) {
-                throw new CodecDecodeException(
-                    'avro',
-                    'Generic Avro wrapper decode failed: ' . $e->getMessage(),
-                    'Re-encode the payload with the Avro codec (generic wrapper produces a JSON-string-inside-Avro envelope), or change the codec tag if the producer used a different codec.',
-                    $e,
-                );
-            }
-        });
+        throw new InvalidArgumentException(sprintf(
+            'unsupported_value_type: adapt %s to null, bool, int, finite float, UTF-8 string, AvroBinaryValue, list, or string-keyed map.',
+            get_debug_type($value),
+        ));
     }
 
-    /**
-     * Diagnose why the bytes labeled as Avro could not be base64-decoded
-     * and throw a {@see CodecDecodeException} with the most actionable hint.
-     *
-     * The most common ingress mistakes are:
-     *  - A producer JSON-encoded the payload but tagged it `avro`. The bytes
-     *    will start with a JSON character ({, [, ", -, digit, t, f, n) and
-     *    base64_decode() in strict mode rejects them outright.
-     *  - A producer sent raw binary Avro bytes without base64-encoding them.
-     */
-    private static function failWithIngressDiagnosis(string $data): never
+    private static function fromDatum(mixed $datum): mixed
     {
-        if (self::looksLikeJson($data)) {
+        if (! is_array($datum) || ! array_key_exists('value', $datum)) {
             throw new CodecDecodeException(
                 'avro',
-                'Payload bytes look like JSON, not base64-encoded Avro.',
-                'The producer appears to have JSON-encoded the payload but tagged it with codec "avro". Re-encode the payload with Workflow\\Serializers\\Avro::serialize() before tagging it "avro", or tag the payload with codec "json".',
+                'invalid_payload_framing: datum is not a durable_workflow.protocol.Value record.',
+                'Provide a schema-conformant Avro Value datum.',
             );
+        }
+
+        $branch = $datum['value'];
+        if ($branch === null) {
+            return null;
+        }
+        if (! is_array($branch)) {
+            throw new CodecDecodeException(
+                'avro',
+                'invalid_payload_framing: Value selected an invalid union branch.',
+                'Provide a schema-conformant Avro Value datum.',
+            );
+        }
+
+        foreach (['boolean', 'long', 'double', 'bytes', 'string'] as $field) {
+            if (array_key_exists($field, $branch)) {
+                return $field === 'bytes'
+                    ? AvroBinaryValue::fromBytes((string) $branch[$field])
+                    : $branch[$field];
+            }
+        }
+        if (array_key_exists('items', $branch) && is_array($branch['items'])) {
+            return array_map(static fn (mixed $item): mixed => self::fromDatum($item), $branch['items']);
+        }
+        if (array_key_exists('entries', $branch) && is_array($branch['entries'])) {
+            $entries = [];
+            $pairs = [];
+            $requiresAdapter = $branch['entries'] === [];
+            foreach ($branch['entries'] as $key => $item) {
+                $decoded = self::fromDatum($item);
+                $pairs[] = [(string) $key, $decoded];
+                if (! is_string($key)) {
+                    $requiresAdapter = true;
+                } else {
+                    $entries[$key] = $decoded;
+                }
+            }
+
+            return $requiresAdapter
+                ? AvroMapValue::fromPairs($pairs)
+                : $entries;
         }
 
         throw new CodecDecodeException(
             'avro',
-            'Failed to base64-decode Avro payload bytes.',
-            'Avro payloads on the wire must be base64-encoded bytes whose first byte is 0x00 (generic wrapper) or 0x01 (typed schema). Re-encode the payload, or change the codec tag if the producer used a different codec.',
+            'invalid_payload_framing: Value selected an unknown named branch.',
+            'Provide a branch defined by the writer schema selected by the single-object fingerprint.',
+        );
+    }
+
+    private static function schemaForFingerprint(string $fingerprint): AvroSchema
+    {
+        if ($fingerprint !== self::VALUE_SCHEMA_FINGERPRINT) {
+            throw new CodecDecodeException(
+                'avro',
+                sprintf('unsupported_payload_schema: unknown CRC-64-AVRO fingerprint %s.', bin2hex($fingerprint)),
+                'Upgrade to a runtime that bundles this writer schema; never guess or fall back to JSON.',
+            );
+        }
+
+        return self::valueSchema();
+    }
+
+    private static function valueSchema(): AvroSchema
+    {
+        return self::$valueSchema ??= self::parseSchema(self::VALUE_SCHEMA_JSON);
+    }
+
+    private static function failWithIngressDiagnosis(string $data): never
+    {
+        $looksLikeJson = self::looksLikeJson($data);
+        throw new CodecDecodeException(
+            'avro',
+            $looksLikeJson
+                ? 'invalid_payload_framing: payload bytes look like JSON, not base64-encoded Avro.'
+                : 'invalid_payload_framing: failed to base64-decode Avro payload bytes.',
+            $looksLikeJson
+                ? 'Use codec="json" explicitly, or encode the value with the fixed Avro Value codec.'
+                : 'Avro payloads must be strict base64 containing a c301 single-object frame.',
         );
     }
 
     private static function looksLikeJson(string $data): bool
     {
-        if ($data === '') {
-            return false;
-        }
+        $first = $data[0] ?? '';
 
-        $first = $data[0];
-        if ($first === '{' || $first === '[' || $first === '"') {
-            return true;
-        }
-        if ($first === '-' || ($first >= '0' && $first <= '9')) {
-            return true;
-        }
-
-        return in_array($data, ['true', 'false', 'null'], true);
-    }
-
-    private static function describeEnvelopeCodec(mixed $codec): string
-    {
-        if (is_string($codec)) {
-            return sprintf('"%s"', $codec);
-        }
-
-        if ($codec === null) {
-            return 'null';
-        }
-
-        if (is_bool($codec)) {
-            return $codec ? 'true' : 'false';
-        }
-
-        if (is_int($codec) || is_float($codec)) {
-            return (string) $codec;
-        }
-
-        return gettype($codec);
-    }
-
-    private static function wrapperSchema(): AvroSchema
-    {
-        if (self::$wrapperSchema === null) {
-            self::$wrapperSchema = self::suppressDeprecations(static fn () => AvroSchema::parse(self::WRAPPER_SCHEMA));
-        }
-
-        return self::$wrapperSchema;
+        return in_array($first, ['{', '[', '"', '-', 't', 'f', 'n'], true)
+            || ($first >= '0' && $first <= '9');
     }
 
     /**
-     * @return array{writer_schema: AvroSchema, writer_schema_json: string, datum_bytes: string}
+     * Apache Avro 1.12 emits PHP deprecations for legacy numeric casts. Only
+     * E_DEPRECATED is adapted; schema-resolution warnings remain visible.
      */
-    private static function readTypedPayload(string $bytes, ?AvroSchema $fallbackWriterSchema = null): array
+    private static function suppressApacheDeprecations(callable $operation): mixed
     {
-        if (($bytes[0] ?? '') !== self::PREFIX_TYPED_SCHEMA) {
-            throw new CodecDecodeException(
-                'avro',
-                'Expected typed Avro payload (prefix 0x01).',
-                'Re-encode the payload with the typed Avro path, or decode it as a generic Avro wrapper if it starts with 0x00.',
-            );
-        }
-
-        $body = substr($bytes, 1);
-        if (strlen($body) >= self::TYPED_SCHEMA_HEADER_BYTES) {
-            $schemaLength = unpack('N', substr($body, 0, self::TYPED_SCHEMA_HEADER_BYTES))[1];
-            $schemaStart = self::TYPED_SCHEMA_HEADER_BYTES;
-            $datumStart = $schemaStart + $schemaLength;
-
-            if ($schemaLength > 0 && strlen($body) >= $datumStart) {
-                $schemaJson = substr($body, $schemaStart, $schemaLength);
-
-                return [
-                    'writer_schema' => self::parseSchema($schemaJson),
-                    'writer_schema_json' => $schemaJson,
-                    'datum_bytes' => substr($body, $datumStart),
-                ];
-            }
-        }
-
-        if ($fallbackWriterSchema instanceof AvroSchema) {
-            return [
-                'writer_schema' => $fallbackWriterSchema,
-                'writer_schema_json' => self::schemaJson($fallbackWriterSchema),
-                'datum_bytes' => $body,
-            ];
-        }
-
-        throw new CodecDecodeException(
-            'avro',
-            'Typed Avro payload (prefix 0x01) does not include an embedded writer schema.',
-            'Re-encode the payload with the current typed Avro path so the writer schema is embedded, or call Avro::withSchema($writerSchema) before decoding legacy development data.',
-        );
-    }
-
-    private static function schemaJson(AvroSchema $schema): string
-    {
-        $json = json_encode(
-            $schema->toAvro(),
-            JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION,
-        );
-
-        return is_string($json) ? $json : (string) $schema;
-    }
-
-    private static function schemaFingerprint(string $schemaJson): string
-    {
-        return 'sha256:' . hash('sha256', $schemaJson);
-    }
-
-    private static function consumeContextSchema(): ?AvroSchema
-    {
-        $schema = self::$contextSchema;
-        self::$contextSchema = null;
-
-        return $schema;
-    }
-
-    /**
-     * Suppress PHP 8.4 deprecation warnings from apache/avro's (double) casts.
-     */
-    private static function suppressDeprecations(callable $fn): mixed
-    {
-        set_error_handler(static fn () => true, E_DEPRECATED);
+        set_error_handler(static fn (): bool => true, E_DEPRECATED);
         try {
-            return $fn();
+            return $operation();
         } finally {
             restore_error_handler();
         }

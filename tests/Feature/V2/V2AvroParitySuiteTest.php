@@ -18,9 +18,7 @@ use Workflow\V2\Models\WorkflowTask;
 use Workflow\V2\Support\HistoryExport;
 use Workflow\V2\WorkflowStub;
 
-/**
- * Release-gating Avro parity suite (#362).
- */
+/** Release-gating Avro parity suite. */
 final class V2AvroParitySuiteTest extends TestCase
 {
     protected function setUp(): void
@@ -139,87 +137,69 @@ final class V2AvroParitySuiteTest extends TestCase
             ->firstWhere('path', 'payloads.arguments.data');
 
         $this->assertIsArray($argumentEntry);
-        $this->assertSame('generic_wrapper', $argumentEntry['avro_framing']);
-        $this->assertSame('00', $argumentEntry['avro_prefix_hex']);
+        $this->assertSame('single_object', $argumentEntry['avro_framing']);
+        $this->assertSame('c301', $argumentEntry['avro_prefix_hex']);
         $this->assertNotEmpty($argumentEntry['writer_schema']);
-        $this->assertStringStartsWith('sha256:', $argumentEntry['writer_schema_fingerprint']);
+        $this->assertSame(
+            'crc64-avro:' . \Workflow\Serializers\Avro::valueSchemaFingerprint(),
+            $argumentEntry['writer_schema_fingerprint'],
+        );
     }
 
-    public function testSchemaEvolutionDecodesV1PayloadWithV2ReaderSchema(): void
+    public function testSchemaEvolutionResolvesOldValueAndRejectsUnknownNewBranch(): void
     {
         if (! class_exists(\Apache\Avro\Schema\AvroSchema::class)) {
             $this->markTestSkipped('apache/avro not installed');
         }
 
-        $writerSchemaJson = json_encode([
+        $v1 = json_decode(\Workflow\Serializers\Avro::valueSchemaJson(), true, flags: JSON_THROW_ON_ERROR);
+        $v2 = $v1;
+        $v2['fields'][0]['type'][] = [
             'type' => 'record',
-            'name' => 'OrderPayload',
-            'namespace' => 'durable_workflow.test',
-            'fields' => [
-                [
-                    'name' => 'order_id',
-                    'type' => 'string',
-                ],
-                [
-                    'name' => 'amount',
-                    'type' => 'double',
-                ],
-                [
-                    'name' => 'items_count',
-                    'type' => 'int',
-                ],
-            ],
-        ]);
-
-        $readerSchemaJson = json_encode([
-            'type' => 'record',
-            'name' => 'OrderPayload',
-            'namespace' => 'durable_workflow.test',
-            'fields' => [
-                [
-                    'name' => 'order_id',
-                    'type' => 'string',
-                ],
-                [
-                    'name' => 'amount',
-                    'type' => 'double',
-                ],
-                [
-                    'name' => 'items_count',
-                    'type' => 'int',
-                ],
-                [
-                    'name' => 'region',
-                    'type' => 'string',
-                    'default' => 'us-east',
-                ],
-            ],
-        ]);
-
-        $writerSchema = \Apache\Avro\Schema\AvroSchema::parse($writerSchemaJson);
-        $readerSchema = \Apache\Avro\Schema\AvroSchema::parse($readerSchemaJson);
+            'name' => 'TimestampValue',
+            'fields' => [[
+                'name' => 'timestamp',
+                'type' => 'string',
+            ]],
+        ];
+        $writerSchema = \Workflow\Serializers\Avro::parseSchema(json_encode($v1, JSON_THROW_ON_ERROR));
+        $readerSchema = \Workflow\Serializers\Avro::parseSchema(json_encode($v2, JSON_THROW_ON_ERROR));
 
         $io = new \Apache\Avro\IO\AvroStringIO();
         $encoder = new \Apache\Avro\Datum\AvroIOBinaryEncoder($io);
         $writer = new \Apache\Avro\Datum\AvroIODatumWriter($writerSchema);
         $writer->write([
-            'order_id' => 'ORD-EVOLVE',
-            'amount' => 42.0,
-            'items_count' => 3,
+            'value' => [
+                'long' => 7,
+            ],
         ], $encoder);
         $v1Bytes = $io->string();
 
         $readIo = new \Apache\Avro\IO\AvroStringIO($v1Bytes);
         $decoder = new \Apache\Avro\Datum\AvroIOBinaryDecoder($readIo);
-        $reader = new \Apache\Avro\Datum\AvroIODatumReader($writerSchema, $readerSchema);
+        $reader = new \Workflow\Serializers\ValueDatumReader($writerSchema, $readerSchema);
         $decoded = $reader->read($decoder);
 
-        $this->assertSame('ORD-EVOLVE', $decoded['order_id']);
-        $this->assertSame(42.0, $decoded['amount']);
-        $this->assertIsFloat($decoded['amount']);
-        $this->assertSame(3, $decoded['items_count']);
-        $this->assertIsInt($decoded['items_count']);
-        $this->assertSame('us-east', $decoded['region'], 'Added field must get default value');
+        $this->assertSame([
+            'value' => [
+                'long' => 7,
+            ],
+        ], $decoded);
+
+        $newIo = new \Apache\Avro\IO\AvroStringIO();
+        (new \Apache\Avro\Datum\AvroIODatumWriter($readerSchema))->write(
+            [
+                'value' => [
+                    'timestamp' => '2026-07-28T00:00:00Z',
+                ],
+            ],
+            new \Apache\Avro\Datum\AvroIOBinaryEncoder($newIo),
+        );
+
+        $this->expectException(\Apache\Avro\Datum\AvroIOSchemaMatchException::class);
+        (new \Workflow\Serializers\ValueDatumReader($readerSchema, $writerSchema))->read(
+            new \Apache\Avro\Datum\AvroIOBinaryDecoder(new \Apache\Avro\IO\AvroStringIO($newIo->string())),
+        );
     }
 
     public function testNonAvroBytesUnderAvroCodecTagProducesTypedError(): void

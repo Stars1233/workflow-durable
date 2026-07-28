@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Workflow\V2\Support;
 
 use Throwable;
+use Workflow\Serializers\AvroBinaryValue;
 use Workflow\Serializers\Serializer;
 
 final class CommandPayloadPreview
@@ -67,9 +68,26 @@ final class CommandPayloadPreview
         }
 
         try {
-            return Serializer::unserializeWithCodec($codec, $payload);
+            return self::displayValue(Serializer::unserializeWithCodec($codec, $payload));
         } catch (Throwable) {
             return $payload;
         }
+    }
+
+    private static function displayValue(mixed $value): mixed
+    {
+        if ($value instanceof AvroBinaryValue) {
+            return [
+                '$type' => 'bytes',
+                'base64' => base64_encode($value->bytes),
+            ];
+        }
+        if (is_array($value)) {
+            foreach ($value as $key => $item) {
+                $value[$key] = self::displayValue($item);
+            }
+        }
+
+        return $value;
     }
 }

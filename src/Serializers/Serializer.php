@@ -231,6 +231,20 @@ final class Serializer
             return true;
         }
 
+        if ($data instanceof AvroBinaryValue) {
+            return false;
+        }
+
+        if ($data instanceof AvroMapValue) {
+            foreach ($data->pairs as [, $value]) {
+                if (self::containsPhpOnlyValue($value)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         if (is_array($data)) {
             foreach ($data as $value) {
                 if (self::containsPhpOnlyValue($value)) {
@@ -310,8 +324,7 @@ final class Serializer
         $bytes = base64_decode($blob, true);
 
         return $bytes !== false
-            && $bytes !== ''
-            && in_array($bytes[0], [Avro::PREFIX_GENERIC_WRAPPER, Avro::PREFIX_TYPED_SCHEMA], true);
+            && str_starts_with($bytes, Avro::SINGLE_OBJECT_MAGIC);
     }
 }
 

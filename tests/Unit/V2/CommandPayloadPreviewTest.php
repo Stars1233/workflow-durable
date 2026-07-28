@@ -115,32 +115,24 @@ final class CommandPayloadPreviewTest extends NonDatabaseTestCase
         $this->assertNull(CommandPayloadPreview::previewWithCodec(['x'], 'avro'));
     }
 
-    public function testPreviewWithCodecRendersAvroTypedRecordWhenSchemaContextIsSet(): void
+    public function testPreviewWithCodecRendersTypedAvroValueAndExplicitBytes(): void
     {
-        if (! class_exists(\Apache\Avro\Schema\AvroSchema::class)) {
-            $this->markTestSkipped('apache/avro package is not installed in this environment.');
-        }
-
-        $schemaJson = '{"type":"record","name":"OrderPayload","namespace":"durable_workflow.test","fields":['
-            . '{"name":"order_id","type":"string"},'
-            . '{"name":"amount","type":"double"},'
-            . '{"name":"items_count","type":"int"}]}';
-
-        $schema = \Workflow\Serializers\Avro::parseSchema($schemaJson);
-
-        \Workflow\Serializers\Avro::withSchema($schema);
         $blob = Serializer::serializeWithCodec('avro', [
             'order_id' => 'ord-42',
             'amount' => 19.95,
             'items_count' => 3,
+            'bytes' => \Workflow\Serializers\AvroBinaryValue::fromBytes("\x00\xFF"),
         ]);
 
-        \Workflow\Serializers\Avro::withSchema($schema);
         $decoded = CommandPayloadPreview::previewWithCodec($blob, 'avro');
 
         $this->assertIsArray($decoded);
         $this->assertSame('ord-42', $decoded['order_id']);
         $this->assertSame(19.95, $decoded['amount']);
         $this->assertSame(3, $decoded['items_count']);
+        $this->assertSame([
+            '$type' => 'bytes',
+            'base64' => 'AP8=',
+        ], $decoded['bytes']);
     }
 }

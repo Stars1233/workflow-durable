@@ -32,8 +32,8 @@ final class CodecMismatchIngressTest extends NonDatabaseTestCase
         } catch (CodecDecodeException $e) {
             $this->assertSame('avro', $e->declaredCodec);
             $this->assertStringContainsString('look like JSON', $e->detail);
-            $this->assertStringContainsString('Avro::serialize', $e->remediation);
-            $this->assertStringContainsString('codec "json"', $e->remediation);
+            $this->assertStringContainsString('fixed Avro Value codec', $e->remediation);
+            $this->assertStringContainsString('codec="json"', $e->remediation);
         }
     }
 
@@ -56,20 +56,13 @@ final class CodecMismatchIngressTest extends NonDatabaseTestCase
             $this->markTestSkipped('apache/avro package is not installed in this environment.');
         }
 
-        // Encode something with Avro (generic wrapper, prefix 0x00).
-        // base64 leading char is always 'A' for prefix bytes 0x00/0x01,
-        // but the second char varies with the encoded JSON length.
+        // Encode something with Avro single-object framing.
         $avroBytes = Avro::serialize(['hello', 123]);
 
-        $this->assertStringStartsWith(
-            'A',
-            $avroBytes,
-            'Avro generic wrapper bytes (prefix 0x00) base64-encode with first char "A".'
-        );
         $this->assertSame(
-            "\x00",
-            base64_decode($avroBytes, true)[0] ?? '?',
-            'Avro generic wrapper should decode to bytes starting with 0x00.'
+            Avro::SINGLE_OBJECT_MAGIC,
+            substr((string) base64_decode($avroBytes, true), 0, 2),
+            'Avro Value should decode to bytes starting with c301 single-object magic.'
         );
 
         try {
@@ -101,7 +94,7 @@ final class CodecMismatchIngressTest extends NonDatabaseTestCase
         }
 
         // Base64-encode a single byte 0x05 — pure base64 ("BQ=="), but not
-        // a valid Avro framing prefix (must be 0x00 or 0x01).
+        // valid Avro single-object framing.
         $bogus = base64_encode("\x05");
 
         try {
@@ -109,36 +102,33 @@ final class CodecMismatchIngressTest extends NonDatabaseTestCase
             $this->fail('Expected CodecDecodeException for unknown Avro prefix');
         } catch (CodecDecodeException $e) {
             $this->assertSame('avro', $e->declaredCodec);
-            $this->assertStringContainsString('Unknown Avro payload prefix', $e->detail);
-            $this->assertStringContainsString('0x05', $e->detail);
-            $this->assertStringContainsString('codec tag', $e->remediation);
+            $this->assertStringContainsString('invalid_payload_framing', $e->detail);
+            $this->assertStringContainsString('c301', $e->detail);
+            $this->assertStringContainsString('JSON codec explicitly', $e->remediation);
         }
     }
 
-    public function testTypedAvroEmbedsWriterSchemaAndDecodesWithoutSchemaContext(): void
+    public function testAvroValueCarriesCanonicalSingleObjectFingerprint(): void
     {
-        if (! class_exists(\Apache\Avro\Schema\AvroSchema::class)) {
-            $this->markTestSkipped('apache/avro package is not installed in this environment.');
-        }
-
-        $schema = Avro::parseSchema('{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}');
-        Avro::withSchema($schema);
         $typedBlob = Avro::serialize([
             'id' => 'X-1',
         ]);
 
         $this->assertSame(
-            "\x01",
-            base64_decode($typedBlob, true)[0] ?? '?',
-            'Typed Avro should decode to bytes starting with 0x01.'
+            Avro::SINGLE_OBJECT_MAGIC . Avro::VALUE_SCHEMA_FINGERPRINT,
+            substr((string) base64_decode($typedBlob, true), 0, 10),
+            'Avro Value should use the canonical single-object frame.'
         );
 
         $metadata = Avro::payloadMetadata($typedBlob);
 
-        $this->assertSame('typed_schema', $metadata['framing']);
-        $this->assertSame('01', $metadata['prefix_hex']);
-        $this->assertNotNull($metadata['writer_schema']);
-        $this->assertStringStartsWith('sha256:', $metadata['writer_schema_fingerprint']);
+        $this->assertSame('single_object', $metadata['framing']);
+        $this->assertSame('c301', $metadata['prefix_hex']);
+        $this->assertSame(Avro::VALUE_SCHEMA_JSON, $metadata['writer_schema']);
+        $this->assertSame(
+            'crc64-avro:' . Avro::VALUE_SCHEMA_FINGERPRINT_HEX,
+            $metadata['writer_schema_fingerprint'],
+        );
         $this->assertNull($metadata['diagnostic']);
 
         $decoded = Avro::unserialize($typedBlob);
