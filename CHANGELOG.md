@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Advanced Workflow to the synchronized Durable Workflow `2.0.0-rc.3`
+- Advanced Workflow to the synchronized Durable Workflow `2.0.0-rc.4`
   product train. This is the only supported 2.0 prerelease baseline; earlier
   alphas and beta tuples remain historical and receive no compatibility shim.
 - Replaced the prerelease JSON-in-Avro wrapper with the fixed recursive
@@ -19,7 +19,7 @@
   separate deployment choices; Cloud placement stays behind the namespace
   endpoint.
 - Platform conformance Rust signal/query scenarios continue to install the
-  exact compatible `durable-workflow =2.0.0-rc.3` crates.io artifact.
+  exact compatible `durable-workflow =2.0.0-rc.4` crates.io artifact.
 - Embedded and standalone activity heartbeats now use the same
   attempt-before-execution row-lock order as timeout enforcement. Accepted
   heartbeats renew the current attempt deadline, while stale scanner snapshots
