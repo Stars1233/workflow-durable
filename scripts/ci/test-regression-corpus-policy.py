@@ -13,6 +13,7 @@ from typing import Any
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = Path(__file__).with_name("validate-regression-corpus.py")
+PHP_GOLDEN_REPLAY_WORKFLOW = "Tests\\Fixtures\\V2\\TestGoldenReplayWorkflow"
 
 
 def run(*arguments: str, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -207,10 +208,81 @@ exit(0);
                 {
                     "name": "bad_frame",
                     "error": "invalid_payload_framing",
-                    "wire_base64": "%%%",
+                    "wire_base64": "AQ==",
                 }
             ],
         }
+
+    @classmethod
+    def golden_history_fixture(cls) -> dict[str, Any]:
+        replay = cls.official_history_replay_fixture()
+        history = json.loads(json.dumps(replay["history"]))
+        history[1]["payload"]["result_value"] = "Hello, Ada!"
+        del history[1]["payload"]["result"]
+        del history[1]["payload"]["payload_codec"]
+        for event in history:
+            event.pop("sequence")
+            event.pop("recorded_at")
+        return {
+            "fixture_schema": "durable-workflow.golden-history.v1",
+            "source": {
+                "runtime": "workflow-php",
+                "package": "durable-workflow/workflow",
+                "version": "2.0.0",
+                "worker_protocol_version": "1.0",
+            },
+            "cases": [
+                {
+                    "name": "base-replay",
+                    "family": "activity",
+                    "scenario": replay["workflow"]["arguments"][0],
+                    "history": history,
+                    "expected_state": replay["expected"]["result"],
+                }
+            ],
+        }
+
+    @classmethod
+    def official_history_replay_fixture(cls) -> dict[str, Any]:
+        replay = cls.replay_fixture(
+            "official-history-replay",
+            workflow_type=PHP_GOLDEN_REPLAY_WORKFLOW,
+        )
+        replay["workflow"]["arguments"] = ["single-activity"]
+        replay["history"] = [
+            {
+                "sequence": 1,
+                "event_type": "WorkflowStarted",
+                "payload": {},
+                "recorded_at": "2026-07-29T12:00:00+00:00",
+            },
+            {
+                "sequence": 7,
+                "event_type": "ActivityCompleted",
+                "payload": {
+                    "sequence": 7,
+                    "activity_type": "Tests\\Fixtures\\V2\\TestGreetingActivity",
+                    "result": '"Hello, Ada!"',
+                    "payload_codec": "json",
+                },
+                "recorded_at": "2026-07-29T12:00:01+00:00",
+            },
+        ]
+        replay["expected"] = {
+            "completed": True,
+            "result": {
+                "stage": "completed",
+                "name": None,
+                "greeting": "Hello, Ada!",
+                "approved": False,
+                "version": -1,
+                "version_result": None,
+                "reservation_id": None,
+                "events": ["activity:Hello, Ada!"],
+            },
+            "commands": [{"type": "complete_workflow"}],
+        }
+        return replay
 
     def git(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         result = run("git", *arguments, cwd=self.root)
@@ -439,6 +511,39 @@ exit(0);
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn("duplicate semantic fixtures", result.stderr)
 
+    def test_golden_history_rewrap_cannot_manufacture_growth(self) -> None:
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            self.official_history_replay_fixture(),
+        )
+        self.commit_current_as_base()
+        self.write_json(
+            "tests/Fixtures/V2/GoldenHistory/rewrapped.json",
+            self.golden_history_fixture(),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_genuinely_new_replay_behavior_grows_the_corpus(self) -> None:
+        fixture = self.replay_fixture(
+            "new-replay-behavior",
+            workflow_type="Tests\\Fixtures\\AnotherReplayWorkflow",
+        )
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/new.json",
+            fixture,
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        counts = json.loads(result.stdout)["counts"]["replay"]
+        self.assertEqual(1, counts["base"])
+        self.assertEqual(2, counts["current"])
+
     def test_codec_schema_relabel_cannot_manufacture_growth(self) -> None:
         (self.root / "src/Serializers/Json.php").write_text(
             "<?php\nreturn 'changed';\n",
@@ -529,7 +634,7 @@ exit(0);
         result = self.validate()
 
         self.assertNotEqual(0, result.returncode, result.stdout)
-        self.assertIn("duplicate semantic fixtures", result.stderr)
+        self.assertIn("is not canonical base64", result.stderr)
 
     def test_bytes_value_aliases_share_cross_format_identity(self) -> None:
         self.write_json(
@@ -593,7 +698,20 @@ exit(0);
         result = self.validate()
 
         self.assertNotEqual(0, result.returncode, result.stdout)
-        self.assertIn("duplicate semantic fixtures", result.stderr)
+        self.assertIn("is not canonical base64", result.stderr)
+
+    def test_malformed_golden_wire_must_be_canonical_base64(self) -> None:
+        fixture = self.avro_golden_fixture("AA==")
+        fixture["malformed_frames"][0]["wire_base64"] = "%%%"
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            fixture,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("is not canonical base64", result.stderr)
 
     def test_double_representations_share_cross_format_identity(self) -> None:
         self.write_json(

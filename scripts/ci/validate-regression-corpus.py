@@ -26,6 +26,14 @@ POLICY_SCHEMA = "durable-workflow.regression-corpus-policy/v1"
 CODEC_SCHEMA = "durable-workflow.codec-regression/v1"
 REPLAY_SCHEMA = "durable-workflow.replay-regression/v1"
 GOLDEN_HISTORY_SCHEMA = "durable-workflow.golden-history.v1"
+PHP_GOLDEN_REPLAY_WORKFLOW = "Tests\\Fixtures\\V2\\TestGoldenReplayWorkflow"
+PHP_GOLDEN_HISTORY_FAMILIES = {
+    "activity",
+    "saga-compensation",
+    "signal-update",
+    "version-marker",
+    "wait-condition",
+}
 SUPPORTED_FORMATS = {
     "avro-value-golden-v1",
     "codec-regression-v1",
@@ -189,16 +197,186 @@ def _json(content: bytes, path: str) -> Mapping[str, Any]:
 def _canonical_base64(
     value: str,
     context: str,
-    *,
-    allow_invalid: bool = False,
-) -> str | Mapping[str, str]:
+) -> str:
     try:
         decoded = base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError) as error:
-        if allow_invalid:
-            return {"invalid_base64": value}
         raise CorpusError(f"{context} is not canonical base64") from error
-    return base64.b64encode(decoded).decode("ascii")
+    canonical = base64.b64encode(decoded).decode("ascii")
+    if value != canonical:
+        raise CorpusError(f"{context} is not canonical base64")
+    return canonical
+
+
+def _canonical_wire_migration(base_content: bytes, current_content: bytes) -> bool:
+    """Allow the one-way repair of legacy malformed-frame wire spellings."""
+
+    try:
+        base_document = json.loads(base_content)
+        current_document = json.loads(current_content)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(base_document, dict) or not isinstance(current_document, dict):
+        return False
+    base_frames = base_document.get("malformed_frames")
+    current_frames = current_document.get("malformed_frames")
+    if not isinstance(base_frames, list) or not isinstance(current_frames, list):
+        return False
+    if len(base_frames) != len(current_frames):
+        return False
+
+    migrated = False
+    for index, (base_frame, current_frame) in enumerate(
+        zip(base_frames, current_frames, strict=True)
+    ):
+        if not isinstance(base_frame, dict) or not isinstance(current_frame, dict):
+            return False
+        base_wire = base_frame.get("wire_base64")
+        current_wire = current_frame.get("wire_base64")
+        if base_wire == current_wire:
+            continue
+        if not isinstance(base_wire, str) or not isinstance(current_wire, str):
+            return False
+        try:
+            _canonical_base64(base_wire, f"base.malformed_frames[{index}].wire_base64")
+        except CorpusError:
+            pass
+        else:
+            return False
+        try:
+            _canonical_base64(
+                current_wire,
+                f"current.malformed_frames[{index}].wire_base64",
+            )
+        except CorpusError:
+            return False
+        base_frame["wire_base64"] = current_wire
+        migrated = True
+
+    return migrated and base_document == current_document
+
+
+def _replay_semantic(
+    *,
+    workflow_type: str,
+    workflow_input: Any,
+    history: Any,
+    command_sequence: Any,
+    expected: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Project every replay representation onto consumer-executed values."""
+
+    return {
+        "workflow": {"type": workflow_type, "input": workflow_input},
+        "history": history,
+        "command_sequence": command_sequence,
+        "expected": expected,
+    }
+
+
+def _consumer_payload(
+    value: Mapping[str, Any],
+    context: str,
+    *,
+    default_codec: str,
+    golden_values: bool,
+) -> Mapping[str, Any]:
+    """Return the payload values that reach the replayed workflow."""
+
+    payload = dict(value)
+    decoded_fields: set[str] = set()
+    codec = payload.get("payload_codec", default_codec)
+    for field in ("result", "value", "arguments"):
+        value_field = f"{field}_value"
+        if golden_values and value_field in payload:
+            payload[field] = payload.pop(value_field)
+            decoded_fields.add(field)
+            continue
+        if (
+            field not in payload
+            or codec != "json"
+            or not isinstance(payload[field], str)
+        ):
+            continue
+        try:
+            payload[field] = json.loads(payload[field])
+        except json.JSONDecodeError as error:
+            raise CorpusError(
+                f"{context}.{field} is not valid json payload data"
+            ) from error
+        decoded_fields.add(field)
+
+    if decoded_fields:
+        payload.pop("payload_codec", None)
+    return payload
+
+
+def _consumer_sequence(
+    event: Mapping[str, Any],
+    payload: Mapping[str, Any],
+    *,
+    golden_position: int | None,
+) -> int | None:
+    """Resolve sequence aliases in the same precedence order as the consumers."""
+
+    for value in (
+        payload.get("sequence"),
+        payload.get("workflow_sequence"),
+        golden_position,
+        event.get("sequence"),
+    ):
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isnumeric():
+            return int(value)
+    return None
+
+
+def _consumer_history(
+    value: Any,
+    context: str,
+    *,
+    default_codec: str,
+    golden_values: bool,
+) -> Sequence[Mapping[str, Any]]:
+    """Normalize stored history into the values observed by replay execution."""
+
+    history = _list(value, context, nonempty=True)
+    normalized: list[Mapping[str, Any]] = []
+    for index, raw_event in enumerate(history):
+        event_context = f"{context}[{index}]"
+        event = _object(raw_event, event_context)
+        event_type = _string(event.get("event_type"), f"{event_context}.event_type")
+        payload = _consumer_payload(
+            _object(event.get("payload"), f"{event_context}.payload"),
+            f"{event_context}.payload",
+            default_codec=default_codec,
+            golden_values=golden_values,
+        )
+        canonical_event: dict[str, Any] = {
+            "event_type": event_type,
+            "payload": payload,
+        }
+        sequence = _consumer_sequence(
+            event,
+            payload,
+            golden_position=index + 1 if golden_values else None,
+        )
+        if sequence is not None:
+            canonical_event["sequence"] = sequence
+
+        # Golden-history event ids, timestamps, and namespaces are ignored when
+        # its consumer creates history rows. Keep replay-only identity-bearing
+        # fields when its consumer can observe them, but omit recorded_at: it is
+        # runtime metadata rather than distinct regression behavior.
+        if not golden_values:
+            for field in ("id", "namespace"):
+                if field in event:
+                    canonical_event[field] = event[field]
+        normalized.append(canonical_event)
+    return normalized
 
 
 def _semantic_codec_value(
@@ -463,12 +641,19 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
     history = document.get("history")
     commands = document.get("command_sequence")
     if (history is None) == (commands is None):
-        raise CorpusError(f"{path} must include exactly one of history or command_sequence")
-    if history is not None:
-        for index, raw_event in enumerate(_list(history, f"{path}.history", nonempty=True)):
-            event = _object(raw_event, f"{path}.history[{index}]")
-            _string(event.get("event_type"), f"{path}.history[{index}].event_type")
-            _object(event.get("payload"), f"{path}.history[{index}].payload")
+        raise CorpusError(
+            f"{path} must include exactly one of history or command_sequence"
+        )
+    canonical_history = (
+        _consumer_history(
+            history,
+            f"{path}.history",
+            default_codec=workflow["payload_codec"],
+            golden_values=False,
+        )
+        if history is not None
+        else []
+    )
     if commands is not None:
         steps = _list(commands, f"{path}.command_sequence", nonempty=True)
         for index, raw_step in enumerate(steps):
@@ -498,12 +683,13 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
     )
     if len(supersedes) != len(set(supersedes)) or identity in supersedes:
         raise CorpusError(f"{path}.supersedes is invalid")
-    semantic = {
-        "workflow": workflow,
-        "history": history,
-        "command_sequence": commands,
-        "expected": expected,
-    }
+    semantic = _replay_semantic(
+        workflow_type=workflow["type"],
+        workflow_input=workflow["arguments"],
+        history=canonical_history,
+        command_sequence=commands,
+        expected=expected,
+    )
     return [
         _fixture_evidence(
             category="replay",
@@ -568,7 +754,6 @@ def _avro_golden_fixture(document: Mapping[str, Any], path: str) -> list[Evidenc
                 semantic_wire = _canonical_base64(
                     wire,
                     f"{path}.{section}[{index}].wire_base64",
-                    allow_invalid=True,
                 )
 
             operation = "decode_reject" if section == "malformed" else "round_trip"
@@ -605,6 +790,7 @@ def _golden_history_fixture(
         raise CorpusError(f"{path} must declare fixture_schema={GOLDEN_HISTORY_SCHEMA}")
     source = _object(document.get("source"), f"{path}.source")
     runtime = _string(source.get("runtime"), f"{path}.source.runtime")
+    _string(source.get("package"), f"{path}.source.package")
     version = _string(source.get("version"), f"{path}.source.version")
     protocol_version = _string(
         source.get("worker_protocol_version"),
@@ -612,20 +798,38 @@ def _golden_history_fixture(
     )
     cases = _list(document.get("cases"), f"{path}.cases", nonempty=True)
     if require_single_case and len(cases) != 1:
-        raise CorpusError(f"new golden-history fixture {path} must contain exactly one minimal case")
+        raise CorpusError(
+            f"new golden-history fixture {path} must contain exactly one minimal case"
+        )
     evidence: list[Evidence] = []
     for index, raw_case in enumerate(cases):
         case = _object(raw_case, f"{path}.cases[{index}]")
         name = _string(case.get("name"), f"{path}.cases[{index}].name")
-        history = _list(case.get("history"), f"{path}.cases[{index}].history", nonempty=True)
-        expected = case.get("expected", case.get("expected_state"))
-        _object(expected, f"{path}.cases[{index}].expected")
+        family = _string(case.get("family"), f"{path}.cases[{index}].family")
+        if family not in PHP_GOLDEN_HISTORY_FAMILIES:
+            raise CorpusError(f"{path}.cases[{index}].family is unsupported")
+        history = _consumer_history(
+            case.get("history"),
+            f"{path}.cases[{index}].history",
+            default_codec="avro",
+            golden_values=True,
+        )
+        expected_state = _object(
+            case.get("expected_state"),
+            f"{path}.cases[{index}].expected_state",
+        )
         scenario = _string(case.get("scenario"), f"{path}.cases[{index}].scenario")
-        semantic = {
-            "scenario": scenario,
-            "history": history,
-            "expected": expected,
-        }
+        semantic = _replay_semantic(
+            workflow_type=PHP_GOLDEN_REPLAY_WORKFLOW,
+            workflow_input=[scenario],
+            history=history,
+            command_sequence=None,
+            expected={
+                "completed": True,
+                "result": expected_state,
+                "commands": [{"type": "complete_workflow"}],
+            },
+        )
         evidence.append(
             _fixture_evidence(
                 category="replay",
@@ -1053,7 +1257,12 @@ def validate(
         if raw_base_policy is not None:
             _require_policy_extension(base_policy, policy, str(policy_path))
         for path in _fixture_paths(base_policy, base_files):
-            if current_files.get(path) != base_files[path]:
+            current_content = current_files.get(path)
+            if current_content != base_files[path] and current_content is not None:
+                if _canonical_wire_migration(base_files[path], current_content):
+                    base_files[path] = current_content
+                    continue
+            if current_content != base_files[path]:
                 raise CorpusError(f"immutable fixture file {path} was changed, moved, or removed")
         base_evidence = _inventory(base_policy, base_files)
     current_evidence = _inventory(policy, current_files, new_paths=added_paths)
