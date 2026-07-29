@@ -117,6 +117,17 @@ jobs:
           "${arguments[@]}"
         python scripts/ci/test-component-release-recovery.py ConsumerContractIdentityRegressionTest
 
+    - name: Require durable replay and codec evidence
+      env:
+        CORPUS_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+      run: |
+        arguments=()
+        if [[ "$CORPUS_BASE_REF" =~ ^[0-9a-f]{40}$ ]] && [[ ! "$CORPUS_BASE_REF" =~ ^0+$ ]]; then
+          arguments+=(--base-ref "$CORPUS_BASE_REF")
+        fi
+        python scripts/ci/validate-regression-corpus.py "${arguments[@]}"
+        python scripts/ci/test-regression-corpus-policy.py
+
     - name: Scan public boundary
       shell: bash
       env:
