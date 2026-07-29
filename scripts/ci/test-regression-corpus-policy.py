@@ -53,6 +53,32 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
             (REPOSITORY_ROOT / "regression-corpus-policy.json").read_text(encoding="utf-8")
         )
         self.write_json("regression-corpus-policy.json", policy)
+        consumer = self.root / "vendor/bin/phpunit"
+        consumer.parent.mkdir(parents=True, exist_ok=True)
+        consumer.write_text(
+            """<?php
+$arguments = implode(' ', $argv);
+$codec = str_contains($arguments, 'AvroValueProtocolTest.php');
+$fixtureDirectory = $codec
+    ? __DIR__ . '/../../tests/Fixtures/V2/CodecRegression'
+    : __DIR__ . '/../../tests/Fixtures/V2/ReplayRegression';
+$source = $codec
+    ? __DIR__ . '/../../src/Serializers/Json.php'
+    : __DIR__ . '/../../src/V2/Support/WorkflowFiberRunner.php';
+foreach (glob($fixtureDirectory . '/*.json') ?: [] as $path) {
+    $fixture = json_decode((string) file_get_contents($path), true);
+    if (
+        str_contains((string) ($fixture['id'] ?? ''), 'requires-change')
+        && str_contains((string) file_get_contents($source), "'base'")
+    ) {
+        fwrite(STDERR, "fixture requires the guarded implementation change\\n");
+        exit(1);
+    }
+}
+exit(0);
+""",
+            encoding="utf-8",
+        )
         self.git("init", "--quiet")
         self.git("add", "--all")
         self.git(
@@ -96,6 +122,7 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
         value: str,
         wire_base64: str,
         *,
+        codec: str = "avro",
         schema: str = "example.Value",
         fingerprint: str | None = None,
         tagged_value: dict[str, Any] | None = None,
@@ -106,7 +133,7 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
             "fixture_schema": "durable-workflow.codec-regression/v1",
             "id": identity,
             "protocol": {
-                "codec": "avro",
+                "codec": codec,
                 "schema": schema,
                 "version": "1",
                 "fingerprint": fingerprint,
@@ -122,13 +149,14 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
         identity: str,
         *,
         bindings: list[str] | None = None,
+        protocol_version: str = "2",
         workflow_type: str = "Tests\\Fixtures\\ReplayWorkflow",
     ) -> dict[str, Any]:
         return {
             "$schema": "https://example.invalid/evidence-schema.json",
             "fixture_schema": "durable-workflow.replay-regression/v1",
             "id": identity,
-            "protocol_version": "2",
+            "protocol_version": protocol_version,
             "bindings": bindings or ["php"],
             "workflow": {
                 "type": workflow_type,
@@ -287,14 +315,14 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
             result.stderr,
         )
 
-    def test_codec_change_accepts_new_fixture_evidence(self) -> None:
+    def test_codec_change_accepts_minimal_counterfactual_fixture(self) -> None:
         (self.root / "src/Serializers/Json.php").write_text(
             "<?php\nreturn 'changed';\n",
             encoding="utf-8",
         )
         self.write_json(
             "tests/Fixtures/V2/CodecRegression/new.json",
-            self.codec_fixture("new-codec-case", "2", "BA=="),
+            self.codec_fixture("requires-change-codec-case", "2", "BA=="),
         )
 
         result = self.validate()
@@ -304,7 +332,27 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
         self.assertEqual(1, counts["base"])
         self.assertEqual(2, counts["current"])
         self.assertEqual(1, counts["new_fixture_evidence"])
+        self.assertEqual(1, counts["counterfactual_fixture_paths"])
         self.assertTrue(counts["related_change"])
+
+    def test_already_passing_fixture_cannot_prove_guarded_regression(self) -> None:
+        (self.root / "src/Serializers/Json.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/unrelated.json",
+            self.codec_fixture("unrelated-already-passing-case", "2", "BA=="),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn(
+            "passes the official php codec-regression-v1 consumer at both base "
+            "and current revisions",
+            result.stderr,
+        )
 
     def test_replay_selector_cannot_escape_the_official_consumer(self) -> None:
         (self.root / "src/V2/Support/WorkflowFiberRunner.php").write_text(
@@ -365,6 +413,64 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
             self.replay_fixture(
                 "metadata-rewrapped-replay-case",
                 bindings=["rust", "php"],
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_replay_protocol_version_relabel_cannot_manufacture_growth(self) -> None:
+        (self.root / "src/V2/Support/WorkflowFiberRunner.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/version-relabel.json",
+            self.replay_fixture(
+                "version-relabeled-replay-case",
+                protocol_version="999",
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_codec_schema_relabel_cannot_manufacture_growth(self) -> None:
+        (self.root / "src/Serializers/Json.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/schema-relabel.json",
+            self.codec_fixture(
+                "schema-relabeled-codec-case",
+                "0",
+                "AA==",
+                schema="example.RelabeledValue",
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_codec_name_relabel_cannot_manufacture_growth(self) -> None:
+        (self.root / "src/Serializers/Json.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/codec-relabel.json",
+            self.codec_fixture(
+                "codec-relabeled-codec-case",
+                "0",
+                "AA==",
+                codec="renamed-avro",
             ),
         )
 

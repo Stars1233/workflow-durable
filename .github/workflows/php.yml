@@ -125,7 +125,9 @@ jobs:
         if [[ "$CORPUS_BASE_REF" =~ ^[0-9a-f]{40}$ ]] && [[ ! "$CORPUS_BASE_REF" =~ ^0+$ ]]; then
           arguments+=(--base-ref "$CORPUS_BASE_REF")
         fi
-        python scripts/ci/validate-regression-corpus.py "${arguments[@]}"
+        python scripts/ci/validate-regression-corpus.py \
+          --skip-counterfactual \
+          "${arguments[@]}"
         python scripts/ci/test-regression-corpus-policy.py
 
     - name: Scan public boundary
@@ -162,6 +164,98 @@ jobs:
         PUBLIC_BOUNDARY_GIT_RANGE="$range" \
           PUBLIC_BOUNDARY_GIT_BASELINE="$baseline" \
           scripts/check-public-boundary.sh
+
+  regression-corpus:
+    needs: route
+    if: >-
+      ${{
+        needs.route.outputs.route == 'bounded'
+        || (
+          needs.route.outputs.route == 'complete'
+          && needs.route.outputs.qualification == 'full'
+        )
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+
+    services:
+      redis:
+        image: redis
+        ports:
+        - 6379
+
+    steps:
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+
+    - name: Cache Composer packages
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5
+      with:
+        path: vendor
+        key: ${{ github.event_name }}-${{ runner.os }}-php-${{ hashFiles('**/composer.lock') }}
+        restore-keys: |
+          ${{ github.event_name }}-${{ runner.os }}-php-
+
+    - name: Install dependencies
+      run: composer install --prefer-dist --no-progress
+
+    - name: Prepare official consumer runtime
+      env:
+        REDIS_PUBLISHED_PORT: ${{ job.services.redis.ports[6379] }}
+      run: |
+        if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+          temporary_root=/dev/shm
+        else
+          temporary_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+        fi
+        run_token="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
+        corpus_db="${temporary_root}/workflow-regression-corpus-${run_token}.sqlite"
+        touch "$corpus_db"
+
+        if getent hosts redis > /dev/null 2>&1; then
+          redis_host=redis
+          redis_port=6379
+        elif [ -n "$REDIS_PUBLISHED_PORT" ]; then
+          redis_host=127.0.0.1
+          redis_port="$REDIS_PUBLISHED_PORT"
+        else
+          echo "::error::Unable to resolve Redis service endpoint" >&2
+          exit 1
+        fi
+
+        {
+          echo "CORPUS_DB_PATH=$corpus_db"
+          echo "APP_KEY=base64:i3g6f+dV8FfsIkcxqd7gbiPn2oXk5r00sTmdD6V5utI="
+          echo "DB_CONNECTION=sqlite"
+          echo "DB_DATABASE=$corpus_db"
+          echo "CACHE_DRIVER=redis"
+          echo "CACHE_STORE=redis"
+          echo "QUEUE_CONNECTION=sync"
+          echo "QUEUE_FAILED_DRIVER=null"
+          echo "REDIS_HOST=$redis_host"
+          echo "REDIS_PORT=$redis_port"
+          echo "REDIS_PASSWORD="
+        } >> "$GITHUB_ENV"
+
+    - name: Prove new regression evidence against base and current bindings
+      env:
+        CORPUS_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+      run: |
+        arguments=()
+        if [[ "$CORPUS_BASE_REF" =~ ^[0-9a-f]{40}$ ]] && [[ ! "$CORPUS_BASE_REF" =~ ^0+$ ]]; then
+          arguments+=(--base-ref "$CORPUS_BASE_REF")
+        fi
+        python scripts/ci/validate-regression-corpus.py "${arguments[@]}"
+
+    - name: Remove regression-corpus database
+      if: ${{ always() }}
+      run: |
+        if [ -n "${CORPUS_DB_PATH:-}" ] \
+          && [[ "${CORPUS_DB_PATH##*/}" == workflow-regression-corpus-*.sqlite ]]; then
+          rm -f -- "$CORPUS_DB_PATH"
+        fi
 
   quality:
     needs: route

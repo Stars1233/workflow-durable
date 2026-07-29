@@ -10,9 +10,12 @@ import fnmatch
 import hashlib
 import json
 import math
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -55,6 +58,63 @@ OFFICIAL_BINDING_FIXTURE_SELECTORS = {
         ),
     },
 }
+OFFICIAL_BINDING_CONSUMERS = {
+    (
+        "php",
+        "codec",
+        "resources/protocol/avro-value-v1-golden.json",
+        "avro-value-golden-v1",
+    ): (
+        "php",
+        "vendor/bin/phpunit",
+        "--colors=never",
+        "--filter",
+        "testCanonicalSchemaFingerprintAndGoldenBytes|"
+        "testSharedTrailingBytesFrameIsRejected|"
+        "testSharedAlternateMapOrdersDecodeToTheSameNestedValue",
+        "tests/Unit/Serializers/AvroValueProtocolTest.php",
+    ),
+    (
+        "php",
+        "codec",
+        "tests/Fixtures/V2/CodecRegression/*.json",
+        "codec-regression-v1",
+    ): (
+        "php",
+        "vendor/bin/phpunit",
+        "--colors=never",
+        "--filter",
+        "testCheckedInCodecRegressionCorpusUsesTheOfficialBinding",
+        "tests/Unit/Serializers/AvroValueProtocolTest.php",
+    ),
+    (
+        "php",
+        "replay",
+        "tests/Fixtures/V2/GoldenHistory/*.json",
+        "golden-history-v1",
+    ): (
+        "php",
+        "vendor/bin/phpunit",
+        "--colors=never",
+        "--testsuite",
+        "feature",
+        "--filter",
+        "testPhpGoldenHistoryReplayContract",
+        "tests/Feature/V2/V2GoldenHistoryReplayTest.php",
+    ),
+    (
+        "php",
+        "replay",
+        "tests/Fixtures/V2/ReplayRegression/*.json",
+        "replay-regression-v1",
+    ): (
+        "php",
+        "vendor/bin/phpunit",
+        "--colors=never",
+        "tests/Unit/V2/ReplayRegressionCorpusTest.php",
+    ),
+}
+RUNTIME_DEPENDENCY_PATHS = ("vendor",)
 ZERO_COMMIT = re.compile(r"^0+$")
 
 
@@ -253,9 +313,6 @@ def _semantic_codec_value(
 
 def _codec_semantic(
     *,
-    codec: str,
-    schema: str,
-    fingerprint: str | None,
     value: Mapping[str, Any] | None,
     wire_base64: str | Mapping[str, str] | Sequence[str | Mapping[str, str]] | None,
     operation: str,
@@ -264,11 +321,6 @@ def _codec_semantic(
     """Return one format-neutral identity for payload-codec evidence."""
 
     return {
-        "protocol": {
-            "codec": codec,
-            "schema": schema,
-            "fingerprint": fingerprint,
-        },
         "value": value,
         "wire": wire_base64,
         "failure_policy": {"operation": operation, "error": error},
@@ -300,10 +352,10 @@ def _codec_fixture(document: Mapping[str, Any], path: str, binding: str | None) 
         raise CorpusError(f"{path} must declare fixture_schema={CODEC_SCHEMA}")
     identity = _string(document.get("id"), f"{path}.id")
     protocol = _object(document.get("protocol"), f"{path}.protocol")
-    codec = _string(protocol.get("codec"), f"{path}.protocol.codec")
-    schema = _string(protocol.get("schema"), f"{path}.protocol.schema")
+    _string(protocol.get("codec"), f"{path}.protocol.codec")
+    _string(protocol.get("schema"), f"{path}.protocol.schema")
     version = _string(protocol.get("version"), f"{path}.protocol.version")
-    fingerprint = _nullable_string(protocol.get("fingerprint"), f"{path}.protocol.fingerprint")
+    _nullable_string(protocol.get("fingerprint"), f"{path}.protocol.fingerprint")
     bindings = _unique_strings(
         document.get("bindings"),
         f"{path}.bindings",
@@ -340,9 +392,6 @@ def _codec_fixture(document: Mapping[str, Any], path: str, binding: str | None) 
     if len(supersedes) != len(set(supersedes)) or identity in supersedes:
         raise CorpusError(f"{path}.supersedes is invalid")
     semantic = _codec_semantic(
-        codec=codec,
-        schema=schema,
-        fingerprint=fingerprint,
         value=(
             _semantic_codec_value(
                 value,
@@ -450,7 +499,6 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
     if len(supersedes) != len(set(supersedes)) or identity in supersedes:
         raise CorpusError(f"{path}.supersedes is invalid")
     semantic = {
-        "protocol_version": protocol_version,
         "workflow": workflow,
         "history": history,
         "command_sequence": commands,
@@ -469,8 +517,8 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
 
 
 def _avro_golden_fixture(document: Mapping[str, Any], path: str) -> list[Evidence]:
-    schema = _string(document.get("schema"), f"{path}.schema")
-    fingerprint = _string(document.get("fingerprint"), f"{path}.fingerprint")
+    _string(document.get("schema"), f"{path}.schema")
+    _string(document.get("fingerprint"), f"{path}.fingerprint")
     version = "avro-value-v1"
     evidence: list[Evidence] = []
     sections = {
@@ -530,9 +578,6 @@ def _avro_golden_fixture(document: Mapping[str, Any], path: str) -> list[Evidenc
                 else None
             )
             semantic = _codec_semantic(
-                codec="avro",
-                schema=schema,
-                fingerprint=fingerprint,
                 value=semantic_value,
                 wire_base64=semantic_wire,
                 operation=operation,
@@ -575,13 +620,9 @@ def _golden_history_fixture(
         history = _list(case.get("history"), f"{path}.cases[{index}].history", nonempty=True)
         expected = case.get("expected", case.get("expected_state"))
         _object(expected, f"{path}.cases[{index}].expected")
-        workflow_type = case.get("workflow_type", case.get("scenario"))
-        _string(workflow_type, f"{path}.cases[{index}].workflow identity")
+        scenario = _string(case.get("scenario"), f"{path}.cases[{index}].scenario")
         semantic = {
-            "protocol_version": protocol_version,
-            "runtime": runtime,
-            "workflow": workflow_type,
-            "start_input": case.get("start_input"),
+            "scenario": scenario,
             "history": history,
             "expected": expected,
         }
@@ -732,6 +773,139 @@ def _matches(path: str, pattern: str) -> bool:
     return fnmatch.fnmatchcase(path, pattern)
 
 
+def _official_consumer(
+    policy: Mapping[str, Any],
+    category_name: str,
+    path: str,
+) -> tuple[str, tuple[str, ...]]:
+    binding = policy.get("binding")
+    if not isinstance(binding, str):
+        raise CorpusError(
+            f"{path} cannot prove a counterfactual without an official binding consumer"
+        )
+    category = _object(policy["categories"][category_name], f"categories.{category_name}")
+    for raw_fixture in _list(category["fixtures"], f"categories.{category_name}.fixtures"):
+        fixture = _object(raw_fixture, f"categories.{category_name}.fixtures[]")
+        fixture_glob = _string(fixture["glob"], "fixture.glob")
+        if not _matches(path, fixture_glob):
+            continue
+        fixture_format = _string(fixture["format"], "fixture.format")
+        command = OFFICIAL_BINDING_CONSUMERS.get(
+            (binding, category_name, fixture_glob, fixture_format)
+        )
+        if command is None:
+            raise CorpusError(
+                f"{path} has no registered official {binding} consumer command"
+            )
+        return f"{binding} {fixture_format}", command
+    raise CorpusError(f"{path} is not selected by the {category_name} fixture policy")
+
+
+def _materialize_consumer_tree(
+    source_root: Path,
+    target_root: Path,
+    files: Mapping[str, bytes],
+) -> None:
+    for path, content in files.items():
+        target = target_root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+    for dependency_path in RUNTIME_DEPENDENCY_PATHS:
+        source = source_root / dependency_path
+        target = target_root / dependency_path
+        if target.exists() or not source.is_dir():
+            continue
+        shutil.copytree(
+            source,
+            target,
+            copy_function=os.link,
+            symlinks=True,
+        )
+
+
+def _consumer_result(
+    source_root: Path,
+    files: Mapping[str, bytes],
+    command: Sequence[str],
+) -> subprocess.CompletedProcess[str]:
+    with tempfile.TemporaryDirectory(
+        prefix=".regression-corpus-consumer-",
+        dir=source_root,
+    ) as temporary:
+        consumer_root = Path(temporary)
+        _materialize_consumer_tree(source_root, consumer_root, files)
+        return subprocess.run(
+            command,
+            cwd=consumer_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+
+def _consumer_failure_detail(result: subprocess.CompletedProcess[str]) -> str:
+    detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+    return detail[-2000:]
+
+
+def _require_counterfactual_evidence(
+    root: Path,
+    policy: Mapping[str, Any],
+    base_files: Mapping[str, bytes],
+    current_files: Mapping[str, bytes],
+    current_evidence: Sequence[Evidence],
+    added_fixture_paths: set[str],
+    related_categories: set[str],
+) -> dict[str, int]:
+    verified = {category: 0 for category in related_categories}
+    baseline_consumers: set[tuple[str, ...]] = set()
+
+    for category_name in sorted(related_categories):
+        evidence_paths = sorted(
+            path
+            for path in added_fixture_paths
+            if any(
+                item.path == path and item.category == category_name
+                for item in current_evidence
+            )
+        )
+        for path in evidence_paths:
+            consumer_name, command = _official_consumer(policy, category_name, path)
+            if command not in baseline_consumers:
+                baseline = _consumer_result(root, base_files, command)
+                if baseline.returncode != 0:
+                    raise CorpusError(
+                        f"official {consumer_name} consumer does not pass at the base "
+                        f"revision without new evidence: {_consumer_failure_detail(baseline)}"
+                    )
+                baseline_consumers.add(command)
+
+            isolated_head_files = dict(current_files)
+            for other_path in added_fixture_paths - {path}:
+                isolated_head_files.pop(other_path, None)
+            head = _consumer_result(root, isolated_head_files, command)
+            if head.returncode != 0:
+                raise CorpusError(
+                    f"new {category_name} evidence {path} does not pass the official "
+                    f"{consumer_name} consumer at the current revision: "
+                    f"{_consumer_failure_detail(head)}"
+                )
+
+            base_with_evidence = dict(base_files)
+            base_with_evidence[path] = current_files[path]
+            counterfactual = _consumer_result(root, base_with_evidence, command)
+            if counterfactual.returncode == 0:
+                raise CorpusError(
+                    f"new {category_name} evidence {path} passes the official "
+                    f"{consumer_name} consumer at both base and current revisions; "
+                    "it does not prove the guarded regression"
+                )
+            verified[category_name] += 1
+
+    return verified
+
+
 def _inventory(
     policy: Mapping[str, Any],
     files: Mapping[str, bytes],
@@ -848,7 +1022,13 @@ def _guard_matches(
     return any(re.search(pattern, changed_content) for pattern in patterns)
 
 
-def validate(root: Path, policy_path: Path, base_ref: str | None) -> dict[str, Any]:
+def validate(
+    root: Path,
+    policy_path: Path,
+    base_ref: str | None,
+    *,
+    enforce_counterfactual: bool = True,
+) -> dict[str, Any]:
     policy_file = (policy_path if policy_path.is_absolute() else root / policy_path).resolve()
     try:
         policy_relative_path = policy_file.relative_to(root).as_posix()
@@ -858,6 +1038,7 @@ def validate(root: Path, policy_path: Path, base_ref: str | None) -> dict[str, A
     current_files = _tracked_worktree_files(root)
     changed: set[str] = set()
     added_paths: set[str] = set()
+    base_files: dict[str, bytes] = {}
     base_evidence: list[Evidence] = []
     if base_ref and not ZERO_COMMIT.fullmatch(base_ref):
         _run(["git", "rev-parse", "--verify", f"{base_ref}^{{commit}}"], root)
@@ -896,6 +1077,7 @@ def validate(root: Path, policy_path: Path, base_ref: str | None) -> dict[str, A
                 )
 
     counts: dict[str, dict[str, int | bool]] = {}
+    related_categories: set[str] = set()
     for category_name, raw_category in _object(policy["categories"], "categories").items():
         current_count = sum(item.category == category_name for item in current_evidence)
         base_count = sum(item.category == category_name for item in base_evidence)
@@ -910,6 +1092,8 @@ def validate(root: Path, policy_path: Path, base_ref: str | None) -> dict[str, A
                 _guard_matches(root, base_ref, changed, guard)
                 for guard in _list(category["guards"], f"categories.{category_name}.guards")
             )
+            if related:
+                related_categories.add(category_name)
             if related and current_count <= base_count:
                 raise CorpusError(
                     f"{category_name} implementation changed but its corpus did not grow "
@@ -926,11 +1110,30 @@ def validate(root: Path, policy_path: Path, base_ref: str | None) -> dict[str, A
             "new_fixture_evidence": new_fixture_evidence,
             "related_change": related,
         }
+
+    counterfactual_counts = {category: 0 for category in counts}
+    if related_categories and enforce_counterfactual:
+        added_fixture_paths = added_paths & _fixture_paths(policy, current_files)
+        counterfactual_counts.update(
+            _require_counterfactual_evidence(
+                root,
+                policy,
+                base_files,
+                current_files,
+                current_evidence,
+                added_fixture_paths,
+                related_categories,
+            )
+        )
+    for category_name, count in counterfactual_counts.items():
+        counts[category_name]["counterfactual_fixture_paths"] = count
+
     return {
         "schema": POLICY_SCHEMA,
         "repository": policy["repository"],
         "base_ref": base_ref,
         "changed_paths": len(changed),
+        "counterfactual_enforced": enforce_counterfactual,
         "counts": counts,
         "status": "pass",
     }
@@ -941,9 +1144,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--policy", type=Path, default=Path("regression-corpus-policy.json"))
     parser.add_argument("--base-ref")
+    parser.add_argument(
+        "--skip-counterfactual",
+        action="store_true",
+        help="run structural inventory checks without invoking binding consumers",
+    )
     args = parser.parse_args(argv)
     try:
-        result = validate(args.root.resolve(), args.policy, args.base_ref)
+        result = validate(
+            args.root.resolve(),
+            args.policy,
+            args.base_ref,
+            enforce_counterfactual=not args.skip_counterfactual,
+        )
     except (CorpusError, OSError) as error:
         print(f"regression corpus validation failed: {error}", file=sys.stderr)
         return 1
