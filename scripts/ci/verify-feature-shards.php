@@ -23,7 +23,7 @@ verify_gate_wiring($workflowContents, read_file($publicBoundaryWorkflow));
 
 foreach ($profiles as $profile => $job) {
     verify_workflow_job($workflowContents, $job, $profile);
-    verify_weight_inventory($weights, $profile, $expectedFiles);
+    verify_weight_profile($weights, $profile, $expectedFiles);
     verify_split_inventory($splitter, $featureDirectory, $weightsFile, $profile, $expectedFiles, $root);
 }
 
@@ -187,7 +187,7 @@ function verify_gate_wiring(string $workflow, string $publicBoundaryWorkflow): v
             'route self-tests' => 'resolve-build-route.php --self-test',
             'target qualification self-tests' => 'classify-target-qualification.php --self-test',
             'classification behavior and trust tests' => 'test-build-qualification.py',
-            'exact feature inventory verification' => 'verify-feature-shards.php',
+            'feature execution inventory verification' => 'verify-feature-shards.php',
             'workflow YAML syntax validation' => "yq eval-all '.' .github/workflows/*.yml",
             'release recovery conformance' => 'release_recovery_consumer_conformance.py',
             'public-boundary validation' => 'scripts/check-public-boundary.sh',
@@ -221,7 +221,7 @@ function workflow_job_definition(string $workflow, string $job): string
  * @param array<string, mixed> $weights
  * @param list<string> $expectedFiles
  */
-function verify_weight_inventory(array $weights, string $profile, array $expectedFiles): void
+function verify_weight_profile(array $weights, string $profile, array $expectedFiles): void
 {
     if (! is_array($weights[$profile] ?? null)) {
         fail("Feature timing profile [{$profile}] is missing.");
@@ -229,9 +229,16 @@ function verify_weight_inventory(array $weights, string $profile, array $expecte
 
     $weightedFiles = array_keys($weights[$profile]);
     sort($weightedFiles, SORT_STRING);
+    $unexpected = array_values(array_diff($weightedFiles, $expectedFiles));
 
-    if ($weightedFiles !== $expectedFiles) {
-        report_inventory_difference("Feature timing profile [{$profile}]", $expectedFiles, $weightedFiles);
+    // Timing rows are optional balancing hints. Newly discovered tests use the
+    // splitter's deterministic default and are verified in the shard inventory.
+    if ($unexpected !== []) {
+        fail(sprintf(
+            'Feature timing profile [%s] contains tests outside the discovered feature inventory: [%s].',
+            $profile,
+            implode(', ', $unexpected),
+        ));
     }
 }
 
@@ -252,7 +259,7 @@ function verify_split_inventory(
         $command = [
             PHP_BINARY,
             $splitter,
-            '--dir=' . $featureDirectory,
+            '--dir=' . relative_path($featureDirectory, $root),
             '--shard=' . $shard,
             '--shards=' . FEATURE_SHARDS,
             '--weights=' . $weightsFile,
