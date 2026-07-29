@@ -18,7 +18,7 @@ The machine-readable mirror of the public authority is
 `Workflow\V2\Support\PlatformConformanceSuite`, exported by the
 standalone `workflow-server` from `GET /api/cluster/info` under
 `platform_conformance_suite`. Schema:
-`durable-workflow.v2.platform-conformance.suite`, version `30`. The complete
+`durable-workflow.v2.platform-conformance.suite`, version `37`. The complete
 machine-readable authority is packaged at
 `resources/platform-conformance-contract.json`; the PHP class re-exports that
 document without maintaining a second semantic model.
@@ -114,11 +114,27 @@ Composer package pins, documented environment setup, workflow/activity
 files, the queue worker, and `php artisan app:quickstart-workflow` must
 reach `status=completed` and `output=Hello, Laravel!` within 10 minutes.
 Suite version 29 adds Rust worker signal/query cells and makes replayed
-workflow-instance state a separate mandatory cell. Suite version 33 binds
-every Rust signal/query cell to the synchronized product train by pinning the
-published crates.io `durable-workflow` crate at exactly `2.0.0-rc.5`. The
-replay cell must prove running, cold-restarted, restored, and completed state
-through Rust, PHP, and Python callers without query-side mutation.
+workflow-instance state a separate mandatory cell. Suite version 33 makes the
+exact crates.io `durable-workflow` artifact part of every Rust signal/query
+cell. Suite version 33's initial exact pin was `2.0.0-beta.5`. Before suite
+version 37, product-train advances did not consistently advance the suite
+version, so the suite number alone is not enough to identify a pre-37 run.
+Use the exact artifact tuple and authority source revision recorded for that
+result. The machine-readable authority preserves every observed binding with
+its source revision and authority digest.
+
+| Suite version | Exact Rust artifact introduced by that version |
+| --- | --- |
+| 33 | `durable-workflow =2.0.0-beta.5` |
+| 36 | `durable-workflow =2.0.0-rc.4` |
+| 37 | `durable-workflow =2.0.0-rc.5` (current) |
+
+Suite version 37 begins strict artifact versioning. A new exact product-train
+pin requires a newer suite version and an appended binding in
+`artifact_version_history.rust_signal_query.bindings`; prior bindings are
+immutable. The replay cell must prove running, cold-restarted, restored, and
+completed state through Rust, PHP, and Python callers without query-side
+mutation.
 Skew refusal matrix coverage is stable in suite version 15 and later and
 is required for every target that claims the server, SDK, CLI, worker,
 or Waterline compatibility surface.
@@ -171,7 +187,7 @@ Required scenarios:
 - `published_artifact_install_only` — server image, CLI installer,
   Python package, PHP package, Rust crate, and Waterline package are
   resolved from published channels; no local source checkout is used as
-  the artifact under test. Rust cells use crates.io package
+  the artifact under test. In suite version 37, Rust cells use crates.io package
   `durable-workflow` with the exact Cargo requirement `=2.0.0-rc.5`.
 - `python_worker_cli_and_sdk_baseline` — a Python-authored workflow
   exposes `increment`, `set`, and `current` handlers through CLI and
@@ -208,11 +224,12 @@ Required scenarios:
   applied after replay reaches a consistent point.
 - `query_during_replay` — a query waits for replay consistency and does
   not run against stale state.
-- `rust_replayed_instance_state_query_after_cold_restart` — using the
-  exact published crates.io `durable-workflow =2.0.0-rc.5` crate, start and
-  query a running Rust workflow, stop the worker, start a fresh Rust
-  worker process, restore the workflow instance from durable history,
-  complete the restored workflow, and query the terminal state. Rust,
+- `rust_replayed_instance_state_query_after_cold_restart` — under suite
+  version 37, use the exact published crates.io
+  `durable-workflow =2.0.0-rc.5` crate to start and query a running Rust
+  workflow, stop the worker, start a fresh Rust worker process, restore the
+  workflow instance from durable history, complete the restored workflow,
+  and query the terminal state. Rust,
   PHP, and Python SDK callers must observe equivalent state at each
   checkpoint. Successful and failed replayed queries must each emit no
   workflow commands and append no history, and a failed replayed query

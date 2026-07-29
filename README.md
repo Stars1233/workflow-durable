@@ -30,7 +30,7 @@ There's also a [sample application](https://github.com/durable-workflow/sample-a
 Install the embedded Laravel runtime:
 
 ```bash
-composer require durable-workflow/workflow:2.0.0-rc.5@RC
+composer require durable-workflow/workflow:2.0.0-rc.6@RC
 ```
 
 This package owns Laravel service-provider integration, migrations, Eloquent

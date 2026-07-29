@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- Advanced Workflow to the synchronized Durable Workflow `2.0.0-rc.5`
-  product train. This is the only supported 2.0 prerelease baseline; earlier
-  alphas and beta tuples remain historical and receive no compatibility shim.
+- Advanced the Workflow package source to `2.0.0-rc.6` so suite version 37
+  can ship without changing the immutable RC5 artifact. The aggregate
+  recommended product tuple remains RC5 until the independently published
+  release-candidate artifacts pass exact-current qualification.
 - Historical command-contract gaps remain visible in operator metrics without
   warning fleet correctness once their runs are closed. Open runs still warn
   when operator command forms lack required safety data.
@@ -24,8 +25,9 @@
   Embedded Laravel, independent self-hosted Server, and managed Cloud remain
   separate deployment choices; Cloud placement stays behind the namespace
   endpoint.
-- Platform conformance Rust signal/query scenarios install the exact
-  synchronized `durable-workflow =2.0.0-rc.5` crates.io artifact.
+- Platform conformance suite version 37 Rust signal/query scenarios install
+  the exact synchronized `durable-workflow =2.0.0-rc.5` crates.io artifact,
+  with prior observed bindings preserved by source revision and digest.
 - Embedded and standalone activity heartbeats now use the same
   attempt-before-execution row-lock order as timeout enforcement. Accepted
   heartbeats renew the current attempt deadline, while stale scanner snapshots
