@@ -33,9 +33,17 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
             target = self.root / source_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("<?php\nreturn 'base';\n", encoding="utf-8")
+        for source_path in self.replay_source_paths():
+            target = self.root / source_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("<?php\nreturn 'base';\n", encoding="utf-8")
         self.write_json(
             "tests/Fixtures/V2/CodecRegression/base.json",
             self.codec_fixture("base-codec-case", "0", "AA=="),
+        )
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            self.replay_fixture("base-replay-case"),
         )
         self.write_json(
             "tests/Evidence/existing-codec.json",
@@ -71,21 +79,109 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
         )
 
     @staticmethod
-    def codec_fixture(identity: str, value: str, wire_base64: str) -> dict[str, Any]:
+    def replay_source_paths() -> tuple[str, ...]:
+        return (
+            "src/V2/Support/DefaultWorkflowTaskBridge.php",
+            "src/V2/Support/QueryStateReplayer.php",
+            "src/V2/Support/WorkflowExecution.php",
+            "src/V2/Support/WorkflowExecutor.php",
+            "src/V2/Support/WorkflowFiberRunner.php",
+            "src/V2/Support/WorkflowReplayer.php",
+            "src/V2/Support/WorkflowStepHistory.php",
+        )
+
+    @staticmethod
+    def codec_fixture(
+        identity: str,
+        value: str,
+        wire_base64: str,
+        *,
+        schema: str = "example.Value",
+        fingerprint: str | None = None,
+        tagged_value: dict[str, Any] | None = None,
+        bindings: list[str] | None = None,
+    ) -> dict[str, Any]:
         return {
             "$schema": "https://example.invalid/evidence-schema.json",
             "fixture_schema": "durable-workflow.codec-regression/v1",
             "id": identity,
             "protocol": {
                 "codec": "avro",
-                "schema": "example.Value",
+                "schema": schema,
                 "version": "1",
-                "fingerprint": None,
+                "fingerprint": fingerprint,
             },
-            "bindings": ["php"],
-            "value": {"type": "long", "value": value},
+            "bindings": bindings or ["php"],
+            "value": tagged_value or {"type": "long", "value": value},
             "framing": {"encoding": "base64", "wire_base64": wire_base64},
             "failure_policy": {"operation": "round_trip", "error": None},
+        }
+
+    @staticmethod
+    def replay_fixture(
+        identity: str,
+        *,
+        bindings: list[str] | None = None,
+        workflow_type: str = "Tests\\Fixtures\\ReplayWorkflow",
+    ) -> dict[str, Any]:
+        return {
+            "$schema": "https://example.invalid/evidence-schema.json",
+            "fixture_schema": "durable-workflow.replay-regression/v1",
+            "id": identity,
+            "protocol_version": "2",
+            "bindings": bindings or ["php"],
+            "workflow": {
+                "type": workflow_type,
+                "arguments": [],
+                "payload_codec": "json",
+            },
+            "history": [
+                {
+                    "event_type": "WorkflowStarted",
+                    "payload": {},
+                }
+            ],
+            "expected": {
+                "completed": True,
+                "result": "done",
+                "commands": [],
+            },
+        }
+
+    @staticmethod
+    def avro_golden_fixture(
+        wire_base64: str,
+        *,
+        kind: str = "long",
+        value: Any = "7",
+        value_base64: str | None = None,
+    ) -> dict[str, Any]:
+        case = {
+            "name": f"{kind}_value",
+            "kind": kind,
+            "wire_base64": wire_base64,
+        }
+        if value is not None:
+            case["value"] = value
+        if value_base64 is not None:
+            case["value_base64"] = value_base64
+        return {
+            "schema": "example.CrossFormatValue",
+            "fingerprint": "0123456789abcdef",
+            "cases": [case],
+            "alternate_map_orders": [
+                {
+                    "name": "map_order",
+                    "wire_base64": ["Ag==", "Aw=="],
+                }
+            ],
+            "malformed_frames": [
+                {
+                    "name": "bad_frame",
+                    "error": "invalid_payload_framing",
+                    "wire_base64": "%%%",
+                }
+            ],
         }
 
     def git(self, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -116,6 +212,19 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
             self.base_ref,
             cwd=self.root,
         )
+
+    def commit_current_as_base(self) -> None:
+        self.git("add", "--all")
+        self.git(
+            "-c",
+            "user.name=Regression Corpus Test",
+            "-c",
+            "user.email=regression-corpus@example.invalid",
+            "commit",
+            "--quiet",
+            "--message=expanded-baseline",
+        )
+        self.base_ref = self.git("rev-parse", "HEAD").stdout.strip()
 
     def test_fixture_deletion_cannot_hide_behind_weakened_inventory(self) -> None:
         (self.root / "tests/Fixtures/V2/CodecRegression/base.json").unlink()
@@ -174,7 +283,7 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
 
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn(
-            "codec implementation changed but corpus growth has no newly added fixture evidence",
+            "is not bound to this repository's official php consumer",
             result.stderr,
         )
 
@@ -197,6 +306,216 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
         self.assertEqual(1, counts["new_fixture_evidence"])
         self.assertTrue(counts["related_change"])
 
+    def test_replay_selector_cannot_escape_the_official_consumer(self) -> None:
+        (self.root / "src/V2/Support/WorkflowFiberRunner.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        policy = self.read_policy()
+        policy["categories"]["replay"]["fixtures"].append(
+            {
+                "glob": "tests/Evidence/*.json",
+                "format": "replay-regression-v1",
+            }
+        )
+        self.write_json("regression-corpus-policy.json", policy)
+        self.write_json(
+            "tests/Evidence/new-replay.json",
+            self.replay_fixture(
+                "inert-replay-case",
+                workflow_type="NoSuch\\Workflow",
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn(
+            "is not bound to this repository's official php consumer",
+            result.stderr,
+        )
+
+    def test_codec_binding_metadata_cannot_manufacture_growth(self) -> None:
+        (self.root / "src/Serializers/Json.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/metadata-rewrap.json",
+            self.codec_fixture(
+                "metadata-rewrapped-codec-case",
+                "0",
+                "AA==",
+                bindings=["rust", "php"],
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_replay_binding_metadata_cannot_manufacture_growth(self) -> None:
+        (self.root / "src/V2/Support/WorkflowFiberRunner.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/metadata-rewrap.json",
+            self.replay_fixture(
+                "metadata-rewrapped-replay-case",
+                bindings=["rust", "php"],
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_cross_format_rewrapping_cannot_manufacture_growth(self) -> None:
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.avro_golden_fixture("AA=="),
+        )
+        self.commit_current_as_base()
+        (self.root / "src/Serializers/Json.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/rewrapped.json",
+            self.codec_fixture(
+                "rewrapped-long-seven",
+                "7",
+                "AA==",
+                schema="example.CrossFormatValue",
+                fingerprint="0123456789abcdef",
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_equivalent_base64_bytes_share_cross_format_identity(self) -> None:
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.avro_golden_fixture("AA=="),
+        )
+        self.commit_current_as_base()
+        (self.root / "src/Serializers/Json.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/rewrapped.json",
+            self.codec_fixture(
+                "equivalent-base64-long-seven",
+                "7",
+                "AB==",
+                schema="example.CrossFormatValue",
+                fingerprint="0123456789abcdef",
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_bytes_value_aliases_share_cross_format_identity(self) -> None:
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.avro_golden_fixture(
+                "AA==",
+                kind="bytes",
+                value=None,
+                value_base64="AP8=",
+            ),
+        )
+        self.commit_current_as_base()
+        (self.root / "src/Serializers/Json.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/rewrapped.json",
+            self.codec_fixture(
+                "rewrapped-bytes",
+                "",
+                "AA==",
+                schema="example.CrossFormatValue",
+                fingerprint="0123456789abcdef",
+                tagged_value={"type": "bytes", "base64": "AP8="},
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_equivalent_base64_value_bytes_share_cross_format_identity(self) -> None:
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.avro_golden_fixture(
+                "AA==",
+                kind="bytes",
+                value=None,
+                value_base64="AP8=",
+            ),
+        )
+        self.commit_current_as_base()
+        (self.root / "src/Serializers/Json.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/rewrapped.json",
+            self.codec_fixture(
+                "equivalent-base64-bytes",
+                "",
+                "AB==",
+                schema="example.CrossFormatValue",
+                fingerprint="0123456789abcdef",
+                tagged_value={"type": "bytes", "base64": "AP9="},
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_double_representations_share_cross_format_identity(self) -> None:
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.avro_golden_fixture("AA==", kind="double", value=7.0),
+        )
+        self.commit_current_as_base()
+        (self.root / "src/Serializers/Json.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/rewrapped.json",
+            self.codec_fixture(
+                "rewrapped-double",
+                "",
+                "AA==",
+                schema="example.CrossFormatValue",
+                fingerprint="0123456789abcdef",
+                tagged_value={"type": "double", "value": "7.0"},
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
     def test_active_payload_codec_surfaces_require_corpus_growth(self) -> None:
         for source_path in self.codec_source_paths():
             with self.subTest(source_path=source_path):
@@ -211,6 +530,38 @@ class RegressionCorpusPolicyTest(unittest.TestCase):
                     result.stderr,
                 )
                 target.write_text("<?php\nreturn 'base';\n", encoding="utf-8")
+
+    def test_core_replay_surfaces_require_growth_without_diff_keywords(self) -> None:
+        for source_path in self.replay_source_paths():
+            with self.subTest(source_path=source_path):
+                target = self.root / source_path
+                target.write_text("<?php\nreturn 'changed';\n", encoding="utf-8")
+
+                result = self.validate()
+
+                self.assertNotEqual(0, result.returncode, result.stdout)
+                self.assertIn(
+                    "replay implementation changed but its corpus did not grow",
+                    result.stderr,
+                )
+                target.write_text("<?php\nreturn 'base';\n", encoding="utf-8")
+
+    def test_workflow_step_history_guard_cannot_be_weakened(self) -> None:
+        policy = self.read_policy()
+        policy["categories"]["replay"]["guards"] = [
+            guard
+            for guard in policy["categories"]["replay"]["guards"]
+            if guard["glob"] != "src/V2/Support/WorkflowStepHistory.php"
+        ]
+        self.write_json("regression-corpus-policy.json", policy)
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn(
+            "categories.replay.guards cannot remove or change a base selector",
+            result.stderr,
+        )
 
 
 if __name__ == "__main__":

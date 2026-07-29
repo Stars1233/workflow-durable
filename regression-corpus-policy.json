@@ -46,6 +46,21 @@
           "glob": "src/V2/Support/*Replay*.php"
         },
         {
+          "glob": "src/V2/Support/WorkflowFiberRunner.php"
+        },
+        {
+          "glob": "src/V2/Support/WorkflowStepHistory.php"
+        },
+        {
+          "glob": "src/V2/Support/DefaultWorkflowTaskBridge.php"
+        },
+        {
+          "glob": "src/V2/Support/WorkflowExecutor.php"
+        },
+        {
+          "glob": "src/V2/Support/WorkflowExecution.php"
+        },
+        {
           "glob": "src/V2/Support/*.php",
           "content_patterns": [
             "Replay",

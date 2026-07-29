@@ -9,6 +9,7 @@ import binascii
 import fnmatch
 import hashlib
 import json
+import math
 import re
 import subprocess
 import sys
@@ -30,6 +31,30 @@ SUPPORTED_FORMATS = {
 }
 SUPPORTED_CATEGORIES = {"codec", "replay"}
 SUPPORTED_BINDINGS = {"php", "python", "rust"}
+OFFICIAL_BINDING_FIXTURE_SELECTORS = {
+    "php": {
+        (
+            "codec",
+            "resources/protocol/avro-value-v1-golden.json",
+            "avro-value-golden-v1",
+        ),
+        (
+            "codec",
+            "tests/Fixtures/V2/CodecRegression/*.json",
+            "codec-regression-v1",
+        ),
+        (
+            "replay",
+            "tests/Fixtures/V2/GoldenHistory/*.json",
+            "golden-history-v1",
+        ),
+        (
+            "replay",
+            "tests/Fixtures/V2/ReplayRegression/*.json",
+            "replay-regression-v1",
+        ),
+    },
+}
 ZERO_COMMIT = re.compile(r"^0+$")
 
 
@@ -72,6 +97,12 @@ def _string(value: Any, context: str) -> str:
     return value
 
 
+def _boolean(value: Any, context: str) -> bool:
+    if not isinstance(value, bool):
+        raise CorpusError(f"{context} must be a boolean")
+    return value
+
+
 def _nullable_string(value: Any, context: str) -> str | None:
     if value is None:
         return None
@@ -95,11 +126,153 @@ def _json(content: bytes, path: str) -> Mapping[str, Any]:
     return _object(value, path)
 
 
-def _valid_base64(value: str, context: str) -> None:
+def _canonical_base64(
+    value: str,
+    context: str,
+    *,
+    allow_invalid: bool = False,
+) -> str | Mapping[str, str]:
     try:
-        base64.b64decode(value, validate=True)
+        decoded = base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError) as error:
+        if allow_invalid:
+            return {"invalid_base64": value}
         raise CorpusError(f"{context} is not canonical base64") from error
+    return base64.b64encode(decoded).decode("ascii")
+
+
+def _semantic_codec_value(
+    value: Mapping[str, Any],
+    context: str,
+    *,
+    wire_backed: bool,
+) -> Mapping[str, Any]:
+    """Normalize tagged codec values independently of their fixture format."""
+
+    kind = _string(value.get("type"), f"{context}.type")
+    if kind == "null":
+        return {"type": kind}
+    if kind == "boolean":
+        raw_boolean = value.get("value")
+        if not isinstance(raw_boolean, bool):
+            raise CorpusError(f"{context}.value must be a boolean")
+        return {"type": kind, "value": raw_boolean}
+    if kind == "long":
+        raw_long = value.get("value")
+        if isinstance(raw_long, bool) or not isinstance(raw_long, int | str):
+            raise CorpusError(f"{context}.value must be an integer string")
+        try:
+            parsed_long = int(raw_long)
+        except ValueError as error:
+            raise CorpusError(f"{context}.value must be an integer string") from error
+        if not -(2**63) <= parsed_long < 2**63:
+            raise CorpusError(f"{context}.value must fit a signed 64-bit integer")
+        return {"type": kind, "value": str(parsed_long)}
+    if kind == "double":
+        raw_double = value.get("value")
+        if isinstance(raw_double, bool) or not isinstance(
+            raw_double, int | float | str
+        ):
+            raise CorpusError(f"{context}.value must be a number or numeric string")
+        try:
+            parsed_double = float(raw_double)
+        except ValueError as error:
+            raise CorpusError(
+                f"{context}.value must be a number or numeric string"
+            ) from error
+        if math.isnan(parsed_double):
+            canonical_double = "nan"
+        elif math.isinf(parsed_double):
+            canonical_double = "-infinity" if parsed_double < 0 else "infinity"
+        else:
+            canonical_double = parsed_double.hex()
+        return {"type": kind, "value": canonical_double}
+    if kind == "bytes":
+        aliases = [field for field in ("base64", "value_base64") if field in value]
+        if not aliases:
+            raise CorpusError(f"{context} must include base64 bytes")
+        canonical_bytes: set[str] = set()
+        for field in aliases:
+            encoded = value[field]
+            if not isinstance(encoded, str):
+                raise CorpusError(f"{context}.{field} must be a string")
+            normalized = _canonical_base64(encoded, f"{context}.{field}")
+            if not isinstance(normalized, str):
+                raise CorpusError(f"{context}.{field} must contain valid base64")
+            canonical_bytes.add(normalized)
+        if len(canonical_bytes) != 1:
+            raise CorpusError(f"{context} contains conflicting base64 byte values")
+        return {"type": kind, "base64": canonical_bytes.pop()}
+    if kind == "string":
+        raw_string = value.get("value")
+        if not isinstance(raw_string, str):
+            raise CorpusError(f"{context}.value must be a string")
+        return {"type": kind, "value": raw_string}
+    if kind == "array":
+        if wire_backed:
+            return {"type": kind}
+        items = _list(value.get("items"), f"{context}.items")
+        return {
+            "type": kind,
+            "items": [
+                _semantic_codec_value(
+                    _object(item, f"{context}.items[{index}]"),
+                    f"{context}.items[{index}]",
+                    wire_backed=False,
+                )
+                for index, item in enumerate(items)
+            ],
+        }
+    if kind == "map":
+        if wire_backed:
+            return {"type": kind}
+        entries = _list(value.get("entries"), f"{context}.entries")
+        canonical_entries: dict[str, Mapping[str, Any]] = {}
+        for index, raw_entry in enumerate(entries):
+            entry_context = f"{context}.entries[{index}]"
+            entry = _object(raw_entry, entry_context)
+            key = entry.get("key")
+            if not isinstance(key, str):
+                raise CorpusError(f"{entry_context}.key must be a string")
+            if key in canonical_entries:
+                raise CorpusError(f"{context}.entries contains duplicate key {key!r}")
+            canonical_entries[key] = _semantic_codec_value(
+                _object(entry.get("value"), f"{entry_context}.value"),
+                f"{entry_context}.value",
+                wire_backed=False,
+            )
+        return {
+            "type": kind,
+            "entries": [
+                {"key": key, "value": canonical_entries[key]}
+                for key in sorted(canonical_entries)
+            ],
+        }
+    raise CorpusError(f"{context}.type is unsupported")
+
+
+def _codec_semantic(
+    *,
+    codec: str,
+    schema: str,
+    fingerprint: str | None,
+    value: Mapping[str, Any] | None,
+    wire_base64: str | Mapping[str, str] | Sequence[str | Mapping[str, str]] | None,
+    operation: str,
+    error: str | None,
+) -> Mapping[str, Any]:
+    """Return one format-neutral identity for payload-codec evidence."""
+
+    return {
+        "protocol": {
+            "codec": codec,
+            "schema": schema,
+            "fingerprint": fingerprint,
+        },
+        "value": value,
+        "wire": wire_base64,
+        "failure_policy": {"operation": operation, "error": error},
+    }
 
 
 def _fixture_evidence(
@@ -140,7 +313,6 @@ def _codec_fixture(document: Mapping[str, Any], path: str, binding: str | None) 
         raise CorpusError(f"{path} does not name this repository's {binding} binding")
 
     value = _object(document.get("value"), f"{path}.value")
-    _string(value.get("type"), f"{path}.value.type")
     framing = _object(document.get("framing"), f"{path}.framing")
     _string(framing.get("encoding"), f"{path}.framing.encoding")
     wire = _nullable_string(framing.get("wire_base64"), f"{path}.framing.wire_base64")
@@ -155,8 +327,11 @@ def _codec_fixture(document: Mapping[str, Any], path: str, binding: str | None) 
         raise CorpusError(f"{path} round-trip evidence cannot declare an error")
     if operation != "round_trip" and error is None:
         raise CorpusError(f"{path} rejection evidence must declare its stable error policy")
-    if wire is not None:
-        _valid_base64(wire, f"{path}.framing.wire_base64")
+    canonical_wire = (
+        _canonical_base64(wire, f"{path}.framing.wire_base64")
+        if wire is not None
+        else None
+    )
 
     supersedes = tuple(
         _string(item, f"{path}.supersedes[]")
@@ -164,17 +339,23 @@ def _codec_fixture(document: Mapping[str, Any], path: str, binding: str | None) 
     )
     if len(supersedes) != len(set(supersedes)) or identity in supersedes:
         raise CorpusError(f"{path}.supersedes is invalid")
-    semantic = {
-        "protocol": {
-            "codec": codec,
-            "schema": schema,
-            "version": version,
-            "fingerprint": fingerprint,
-        },
-        "value": value if operation == "encode_reject" else None,
-        "wire_base64": wire,
-        "failure_policy": {"operation": operation, "error": error},
-    }
+    semantic = _codec_semantic(
+        codec=codec,
+        schema=schema,
+        fingerprint=fingerprint,
+        value=(
+            _semantic_codec_value(
+                value,
+                f"{path}.value",
+                wire_backed=operation == "round_trip",
+            )
+            if operation in {"round_trip", "encode_reject"}
+            else None
+        ),
+        wire_base64=canonical_wire,
+        operation=operation,
+        error=error,
+    )
     return [
         _fixture_evidence(
             category="codec",
@@ -185,6 +366,27 @@ def _codec_fixture(document: Mapping[str, Any], path: str, binding: str | None) 
             supersedes=supersedes,
         )
     ]
+
+
+def _replay_expected(
+    value: Any,
+    context: str,
+    *,
+    allow_resume: bool = False,
+) -> Mapping[str, Any]:
+    expected = _object(value, context)
+    required = {"completed", "result", "commands"}
+    allowed = required | ({"resume_with"} if allow_resume else set())
+    if not required <= set(expected) or not set(expected) <= allowed:
+        raise CorpusError(f"{context} must contain exactly {sorted(required)}")
+    _boolean(expected["completed"], f"{context}.completed")
+    commands = _list(expected["commands"], f"{context}.commands")
+    for index, raw_command in enumerate(commands):
+        command = _object(raw_command, f"{context}.commands[{index}]")
+        if not command:
+            raise CorpusError(f"{context}.commands[{index}] must not be empty")
+        _string(command.get("type"), f"{context}.commands[{index}].type")
+    return expected
 
 
 def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None) -> list[Evidence]:
@@ -201,18 +403,46 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
     if binding is not None and binding not in bindings:
         raise CorpusError(f"{path} does not name this repository's {binding} binding")
     workflow = _object(document.get("workflow"), f"{path}.workflow")
+    required_workflow_fields = {"type", "arguments", "payload_codec"}
+    if set(workflow) != required_workflow_fields:
+        raise CorpusError(
+            f"{path}.workflow must contain exactly {sorted(required_workflow_fields)}"
+        )
     _string(workflow.get("type"), f"{path}.workflow.type")
+    _list(workflow.get("arguments"), f"{path}.workflow.arguments")
+    _string(workflow.get("payload_codec"), f"{path}.workflow.payload_codec")
     history = document.get("history")
     commands = document.get("command_sequence")
-    if history is None and commands is None:
-        raise CorpusError(f"{path} must include history or command_sequence")
+    if (history is None) == (commands is None):
+        raise CorpusError(f"{path} must include exactly one of history or command_sequence")
     if history is not None:
-        _list(history, f"{path}.history", nonempty=True)
+        for index, raw_event in enumerate(_list(history, f"{path}.history", nonempty=True)):
+            event = _object(raw_event, f"{path}.history[{index}]")
+            _string(event.get("event_type"), f"{path}.history[{index}].event_type")
+            _object(event.get("payload"), f"{path}.history[{index}].payload")
     if commands is not None:
-        _list(commands, f"{path}.command_sequence", nonempty=True)
-    expected = _object(document.get("expected"), f"{path}.expected")
-    if not expected:
-        raise CorpusError(f"{path}.expected must not be empty")
+        steps = _list(commands, f"{path}.command_sequence", nonempty=True)
+        for index, raw_step in enumerate(steps):
+            step = _object(raw_step, f"{path}.command_sequence[{index}]")
+            allowed_step_fields = {"completed", "result", "commands", "resume_with"}
+            if not set(step) <= allowed_step_fields:
+                raise CorpusError(
+                    f"{path}.command_sequence[{index}] contains unsupported fields"
+                )
+            _replay_expected(
+                step,
+                f"{path}.command_sequence[{index}]",
+                allow_resume=True,
+            )
+            if index < len(steps) - 1 and "resume_with" not in step:
+                raise CorpusError(
+                    f"{path}.command_sequence[{index}] must provide resume_with for the next step"
+                )
+            if index == len(steps) - 1 and "resume_with" in step:
+                raise CorpusError(
+                    f"{path}.command_sequence[{index}] has an unused resume_with value"
+                )
+    expected = _replay_expected(document.get("expected"), f"{path}.expected")
     supersedes = tuple(
         _string(item, f"{path}.supersedes[]")
         for item in _list(document.get("supersedes", []), f"{path}.supersedes")
@@ -221,7 +451,6 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
         raise CorpusError(f"{path}.supersedes is invalid")
     semantic = {
         "protocol_version": protocol_version,
-        "bindings": sorted(bindings),
         "workflow": workflow,
         "history": history,
         "command_sequence": commands,
@@ -254,30 +483,61 @@ def _avro_golden_fixture(document: Mapping[str, Any], path: str) -> list[Evidenc
             entry = _object(raw_entry, f"{path}.{section}[{index}]")
             name = _string(entry.get("name"), f"{path}.{section}[{index}].name")
             wire = entry.get("wire_base64")
-            semantic_wire: Any = wire
+            semantic_wire: str | Mapping[str, str] | Sequence[str | Mapping[str, str]]
+            semantic_value: Mapping[str, Any] | None = None
             if section == "alternate":
-                semantic_wire = list(_unique_strings(wire, f"{path}.{section}[{index}].wire_base64"))
-                for wire_value in semantic_wire:
-                    _valid_base64(wire_value, f"{path}.{section}[{index}].wire_base64[]")
+                wire_values = _unique_strings(
+                    wire,
+                    f"{path}.{section}[{index}].wire_base64",
+                )
+                semantic_wire = [
+                    _canonical_base64(
+                        wire_value,
+                        f"{path}.{section}[{index}].wire_base64[]",
+                    )
+                    for wire_value in wire_values
+                ]
             elif section == "case":
                 wire_value = _string(wire, f"{path}.{section}[{index}].wire_base64")
-                _valid_base64(wire_value, f"{path}.{section}[{index}].wire_base64")
+                semantic_wire = _canonical_base64(
+                    wire_value,
+                    f"{path}.{section}[{index}].wire_base64",
+                )
+                kind = _string(entry.get("kind"), f"{path}.{section}[{index}].kind")
+                canonical_value: dict[str, Any] = {"type": kind}
+                if "value" in entry:
+                    canonical_value["value"] = entry["value"]
+                if "value_base64" in entry:
+                    canonical_value["value_base64"] = entry["value_base64"]
+                semantic_value = _semantic_codec_value(
+                    canonical_value,
+                    f"{path}.{section}[{index}]",
+                    wire_backed=True,
+                )
             elif not isinstance(wire, str):
                 raise CorpusError(f"{path}.{section}[{index}].wire_base64 must be a string")
-            semantic = {
-                "protocol": {
-                    "codec": "avro",
-                    "schema": schema,
-                    "version": version,
-                    "fingerprint": fingerprint,
-                },
-                "framing": semantic_wire,
-                "failure_policy": (
-                    {"operation": "decode_reject", "error": entry.get("error")}
-                    if section == "malformed"
-                    else {"operation": "round_trip", "error": None}
-                ),
-            }
+            else:
+                semantic_wire = _canonical_base64(
+                    wire,
+                    f"{path}.{section}[{index}].wire_base64",
+                    allow_invalid=True,
+                )
+
+            operation = "decode_reject" if section == "malformed" else "round_trip"
+            error = (
+                _string(entry.get("error"), f"{path}.{section}[{index}].error")
+                if section == "malformed"
+                else None
+            )
+            semantic = _codec_semantic(
+                codec="avro",
+                schema=schema,
+                fingerprint=fingerprint,
+                value=semantic_value,
+                wire_base64=semantic_wire,
+                operation=operation,
+                error=error,
+            )
             evidence.append(
                 _fixture_evidence(
                     category="codec",
@@ -359,6 +619,11 @@ def _policy(document: Mapping[str, Any], path: str) -> Mapping[str, Any]:
     binding = document.get("binding")
     if binding is not None and binding not in SUPPORTED_BINDINGS:
         raise CorpusError(f"{path}.binding is unsupported")
+    official_selectors = (
+        OFFICIAL_BINDING_FIXTURE_SELECTORS.get(binding)
+        if isinstance(binding, str)
+        else None
+    )
     categories = _object(document.get("categories"), f"{path}.categories")
     if not categories or not set(categories) <= SUPPORTED_CATEGORIES:
         raise CorpusError(f"{path}.categories must contain only replay and/or codec")
@@ -367,7 +632,10 @@ def _policy(document: Mapping[str, Any], path: str) -> Mapping[str, Any]:
         fixtures = _list(category.get("fixtures"), f"{path}.categories.{name}.fixtures", nonempty=True)
         for index, raw_fixture in enumerate(fixtures):
             fixture = _object(raw_fixture, f"{path}.categories.{name}.fixtures[{index}]")
-            _string(fixture.get("glob"), f"{path}.categories.{name}.fixtures[{index}].glob")
+            fixture_glob = _string(
+                fixture.get("glob"),
+                f"{path}.categories.{name}.fixtures[{index}].glob",
+            )
             fixture_format = _string(
                 fixture.get("format"),
                 f"{path}.categories.{name}.fixtures[{index}].format",
@@ -378,6 +646,14 @@ def _policy(document: Mapping[str, Any], path: str) -> Mapping[str, Any]:
                 name == "codec" and fixture_format == "avro-value-golden-v1"
             ) and not (name == "replay" and fixture_format == "golden-history-v1"):
                 raise CorpusError(f"{path}.categories.{name} contains a fixture for another category")
+            if (
+                official_selectors is not None
+                and (name, fixture_glob, fixture_format) not in official_selectors
+            ):
+                raise CorpusError(
+                    f"{path}.categories.{name}.fixtures[{index}] is not bound to "
+                    f"this repository's official {binding} consumer"
+                )
         guards = _list(category.get("guards"), f"{path}.categories.{name}.guards", nonempty=True)
         for index, raw_guard in enumerate(guards):
             guard = _object(raw_guard, f"{path}.categories.{name}.guards[{index}]")
