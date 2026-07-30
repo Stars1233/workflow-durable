@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -16,13 +17,18 @@ VALIDATOR = Path(__file__).with_name("validate-regression-corpus.py")
 PHP_GOLDEN_REPLAY_WORKFLOW = "Tests\\Fixtures\\V2\\TestGoldenReplayWorkflow"
 
 
-def run(*arguments: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+def run(
+    *arguments: str,
+    cwd: Path,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(arguments),
         cwd=cwd,
         check=False,
         capture_output=True,
         text=True,
+        env=env,
     )
 
 
@@ -213,6 +219,15 @@ exit(0);
             ],
         }
 
+    @staticmethod
+    def shared_avro_fixture() -> dict[str, Any]:
+        return json.loads(
+            (
+                REPOSITORY_ROOT
+                / "resources/protocol/avro-value-v1-golden.json"
+            ).read_text(encoding="utf-8")
+        )
+
     @classmethod
     def golden_history_fixture(cls) -> dict[str, Any]:
         replay = cls.official_history_replay_fixture()
@@ -391,7 +406,11 @@ exit(0);
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
-    def validate(self) -> subprocess.CompletedProcess[str]:
+    def validate(
+        self,
+        *,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         return run(
             sys.executable,
             str(VALIDATOR),
@@ -400,6 +419,7 @@ exit(0);
             "--base-ref",
             self.base_ref,
             cwd=self.root,
+            env=env,
         )
 
     def commit_current_as_base(self) -> None:
@@ -863,6 +883,144 @@ exit(0);
 
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_alternate_avro_map_orders_cannot_manufacture_replay_growth(
+        self,
+    ) -> None:
+        wires = self.shared_avro_fixture()["alternate_map_orders"][0]["wire_base64"]
+        payload_fields = (
+            ("ActivityCompleted", "result"),
+            ("SideEffectRecorded", "result"),
+            ("SignalReceived", "arguments"),
+            ("SignalApplied", "value"),
+            ("SignalApplied", "arguments"),
+            ("UpdateAccepted", "arguments"),
+            ("UpdateApplied", "arguments"),
+            ("ChildRunCompleted", "output"),
+            ("ServiceCallStarted", "response_payload"),
+            ("ServiceCallCompleted", "response_payload"),
+        )
+
+        for event_type, field in payload_fields:
+            with self.subTest(event_type=event_type, field=field):
+                base = self.official_history_replay_fixture()
+                base["history"][1]["event_type"] = event_type
+                base["history"][1]["payload"] = {
+                    "sequence": 7,
+                    "payload_codec": "avro",
+                    field: wires[0],
+                }
+                self.write_json(
+                    "tests/Fixtures/V2/ReplayRegression/base.json",
+                    base,
+                )
+                self.commit_current_as_base()
+
+                duplicate = json.loads(json.dumps(base))
+                duplicate["id"] = f"alternate-avro-map-order-{event_type}-{field}"
+                duplicate["history"][1]["payload"][field] = wires[1]
+                duplicate_path = (
+                    "tests/Fixtures/V2/ReplayRegression/alternate-map-order.json"
+                )
+                self.write_json(duplicate_path, duplicate)
+
+                try:
+                    result = self.validate()
+
+                    self.assertNotEqual(0, result.returncode, result.stdout)
+                    self.assertIn("duplicate semantic fixtures", result.stderr)
+                finally:
+                    (self.root / duplicate_path).unlink(missing_ok=True)
+
+    def test_different_decoded_avro_values_grow_replay_evidence(self) -> None:
+        golden = self.shared_avro_fixture()
+        alternate_wire = golden["alternate_map_orders"][0]["wire_base64"][0]
+        different_wire = next(
+            case["wire_base64"]
+            for case in golden["cases"]
+            if case["name"] == "nested"
+        )
+        base = self.official_history_replay_fixture()
+        base["history"][1]["payload"] = {
+            "sequence": 7,
+            "payload_codec": "avro",
+            "result": alternate_wire,
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            base,
+        )
+        self.commit_current_as_base()
+
+        changed = json.loads(json.dumps(base))
+        changed["id"] = "different-decoded-avro-result"
+        changed["history"][1]["payload"]["result"] = different_wire
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/different-avro-result.json",
+            changed,
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        counts = json.loads(result.stdout)["counts"]["replay"]
+        self.assertEqual(1, counts["base"])
+        self.assertEqual(2, counts["current"])
+
+    def test_malformed_raw_avro_payload_fails_closed(self) -> None:
+        malformed_wire = next(
+            frame["wire_base64"]
+            for frame in self.shared_avro_fixture()["malformed_frames"]
+            if frame["name"] == "trailing_bytes"
+        )
+        fixture = self.official_history_replay_fixture()
+        fixture["id"] = "malformed-raw-avro-result"
+        fixture["history"][1]["payload"] = {
+            "sequence": 7,
+            "payload_codec": "avro",
+            "result": malformed_wire,
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/malformed-raw-avro.json",
+            fixture,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn(
+            "cannot be decoded by the PHP payload consumer",
+            result.stderr,
+        )
+
+    def test_unavailable_php_payload_consumer_fails_closed(self) -> None:
+        fixture = self.official_history_replay_fixture()
+        fixture["id"] = "consumer-unavailable"
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/consumer-unavailable.json",
+            fixture,
+        )
+        fake_bin = self.root / "bin"
+        fake_bin.mkdir()
+        php = fake_bin / "php"
+        php.write_text(
+            "#!/bin/sh\n"
+            "echo 'PHP replay payload consumer is unavailable' >&2\n"
+            "exit 127\n",
+            encoding="utf-8",
+        )
+        php.chmod(0o755)
+        env = dict(os.environ)
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+
+        result = self.validate(env=env)
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn(
+            "cannot be decoded by the PHP payload consumer",
+            result.stderr,
+        )
+        self.assertIn("consumer is unavailable", result.stderr)
 
     def test_payload_codec_precedence_matches_the_runner(self) -> None:
         base = self.official_history_replay_fixture()

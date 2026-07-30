@@ -6,6 +6,8 @@ namespace Tests\Unit\V2;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Tests\Fixtures\V2\TestGreetingWorkflow;
+use Workflow\Serializers\Avro;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Support\WorkflowFiberRunner;
@@ -84,6 +86,46 @@ final class ReplayRegressionCorpusTest extends TestCase
                 "Inline {$codec} history produced a different workflow result.",
             );
         }
+    }
+
+    public function testAlternateAvroMapOrdersReachTheRunnerAsTheSameValue(): void
+    {
+        $golden = json_decode(
+            (string) file_get_contents(__DIR__ . '/../../../resources/protocol/avro-value-v1-golden.json'),
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $results = [];
+
+        foreach ($golden['alternate_map_orders'][0]['wire_base64'] as $blob) {
+            $step = WorkflowFiberRunner::forClass(
+                TestGreetingWorkflow::class,
+                'alternate-avro-map-order',
+                'alternate-avro-map-order-run',
+                ['Ada'],
+                'avro',
+                [[
+                    'sequence' => 1,
+                    'event_type' => 'WorkflowStarted',
+                    'payload' => [],
+                ], [
+                    'sequence' => 7,
+                    'event_type' => 'ActivityCompleted',
+                    'payload' => [
+                        'sequence' => 7,
+                        'payload_codec' => 'avro',
+                        'result' => $blob,
+                    ],
+                ]],
+            )->step();
+
+            self::assertTrue($step->completed);
+            self::assertSame('complete_workflow', $step->command['type']);
+            self::assertEquals(Avro::unserialize($blob), $step->result['greeting']);
+            $results[] = $step->result;
+        }
+
+        self::assertEquals($results[0], $results[1]);
     }
 
     /**

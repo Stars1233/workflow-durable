@@ -43,7 +43,23 @@ try {
         throw new InvalidArgumentException('The replay payload request operation is unsupported.');
     }
 
-    fwrite(STDOUT, base64_encode(serialize($value)));
+    $canonicalize = static function (mixed $candidate) use (&$canonicalize): mixed {
+        if (! is_array($candidate)) {
+            return $candidate;
+        }
+
+        if (! array_is_list($candidate)) {
+            ksort($candidate, SORT_STRING);
+        }
+
+        foreach ($candidate as $key => $item) {
+            $candidate[$key] = $canonicalize($item);
+        }
+
+        return $candidate;
+    };
+
+    fwrite(STDOUT, base64_encode(serialize($canonicalize($value))));
 } catch (Throwable $error) {
     fwrite(STDERR, $error->getMessage() . PHP_EOL);
     exit(1);
