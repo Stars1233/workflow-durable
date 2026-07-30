@@ -219,6 +219,12 @@ exit(0);
             ],
         }
 
+    @classmethod
+    def malformed_avro_golden_fixture(cls, wire_base64: str) -> dict[str, Any]:
+        fixture = cls.avro_golden_fixture("AA==")
+        fixture["malformed_frames"][0]["wire_base64"] = wire_base64
+        return fixture
+
     @staticmethod
     def shared_avro_fixture() -> dict[str, Any]:
         return json.loads(
@@ -1596,6 +1602,52 @@ exit(0);
 
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn("is not canonical base64", result.stderr)
+
+    def test_malformed_wire_migration_rejects_different_decoded_bytes(self) -> None:
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.malformed_avro_golden_fixture("AR=="),
+        )
+        self.commit_current_as_base()
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.malformed_avro_golden_fixture("Ag=="),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("immutable fixture file", result.stderr)
+
+    def test_malformed_wire_migration_accepts_same_decoded_bytes(self) -> None:
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.malformed_avro_golden_fixture("AR=="),
+        )
+        self.commit_current_as_base()
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.malformed_avro_golden_fixture("AQ=="),
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_malformed_wire_migration_accepts_explicit_legacy_repair(self) -> None:
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.malformed_avro_golden_fixture("%%%"),
+        )
+        self.commit_current_as_base()
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.malformed_avro_golden_fixture("JSUl"),
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
 
     def test_double_representations_share_cross_format_identity(self) -> None:
         self.write_json(
