@@ -127,15 +127,17 @@ exit(0);
     def codec_fixture(
         identity: str,
         value: str,
-        wire_base64: str,
+        wire_base64: str | None,
         *,
         codec: str = "avro",
         schema: str = "example.Value",
         fingerprint: str | None = None,
         tagged_value: dict[str, Any] | None = None,
         bindings: list[str] | None = None,
+        operation: str = "round_trip",
+        error: str | None = None,
     ) -> dict[str, Any]:
-        return {
+        fixture = {
             "$schema": "https://example.invalid/evidence-schema.json",
             "fixture_schema": "durable-workflow.codec-regression/v1",
             "id": identity,
@@ -147,9 +149,12 @@ exit(0);
             },
             "bindings": bindings or ["php"],
             "value": tagged_value or {"type": "long", "value": value},
-            "framing": {"encoding": "base64", "wire_base64": wire_base64},
-            "failure_policy": {"operation": "round_trip", "error": None},
+            "framing": {"encoding": "base64"},
+            "failure_policy": {"operation": operation, "error": error},
         }
+        if wire_base64 is not None:
+            fixture["framing"]["wire_base64"] = wire_base64
+        return fixture
 
     @staticmethod
     def replay_fixture(
@@ -595,6 +600,122 @@ exit(0);
 
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_encode_reject_wire_cannot_manufacture_guarded_growth(self) -> None:
+        rejected_value = {"type": "double", "value": "1e309"}
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/base.json",
+            self.codec_fixture(
+                "base-encode-reject",
+                "",
+                None,
+                tagged_value=rejected_value,
+                operation="encode_reject",
+                error="non_finite_float",
+            ),
+        )
+        self.commit_current_as_base()
+        (self.root / "src/Serializers/Json.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+
+        duplicate_path = "tests/Fixtures/V2/CodecRegression/wire-only-growth.json"
+        for wire in ("AA==", "AQ=="):
+            with self.subTest(wire=wire):
+                self.write_json(
+                    duplicate_path,
+                    self.codec_fixture(
+                        f"wire-only-encode-reject-{wire}",
+                        "",
+                        wire,
+                        tagged_value=rejected_value,
+                        operation="encode_reject",
+                        error="non_finite_float",
+                    ),
+                )
+
+                try:
+                    result = self.validate()
+
+                    self.assertNotEqual(0, result.returncode, result.stdout)
+                    self.assertIn("duplicate semantic fixtures", result.stderr)
+                finally:
+                    (self.root / duplicate_path).unlink(missing_ok=True)
+
+    def test_encode_reject_values_and_error_policies_remain_distinct(self) -> None:
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/base.json",
+            self.codec_fixture(
+                "base-encode-reject",
+                "",
+                None,
+                tagged_value={"type": "double", "value": "1e309"},
+                operation="encode_reject",
+                error="non_finite_float",
+            ),
+        )
+        self.commit_current_as_base()
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/different-value.json",
+            self.codec_fixture(
+                "different-rejected-value",
+                "",
+                None,
+                tagged_value={"type": "double", "value": "-1e309"},
+                operation="encode_reject",
+                error="non_finite_float",
+            ),
+        )
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/different-policy.json",
+            self.codec_fixture(
+                "different-rejection-policy",
+                "",
+                None,
+                tagged_value={"type": "double", "value": "1e309"},
+                operation="encode_reject",
+                error="Avro Value doubles must be finite",
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        counts = json.loads(result.stdout)["counts"]["codec"]
+        self.assertEqual(1, counts["base"])
+        self.assertEqual(3, counts["current"])
+
+    def test_wire_consuming_codec_operations_preserve_wire_identity(self) -> None:
+        self.write_json(
+            "tests/Fixtures/V2/CodecRegression/round-trip-alternate-wire.json",
+            self.codec_fixture(
+                "round-trip-alternate-wire",
+                "0",
+                "AQ==",
+            ),
+        )
+        for identity, wire in (
+            ("decode-reject-short", "AQ=="),
+            ("decode-reject-alternate", "Ag=="),
+        ):
+            self.write_json(
+                f"tests/Fixtures/V2/CodecRegression/{identity}.json",
+                self.codec_fixture(
+                    identity,
+                    "",
+                    wire,
+                    operation="decode_reject",
+                    error="invalid_payload_framing",
+                ),
+            )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        counts = json.loads(result.stdout)["counts"]["codec"]
+        self.assertEqual(1, counts["base"])
+        self.assertEqual(4, counts["current"])
 
     def test_replay_binding_metadata_cannot_manufacture_growth(self) -> None:
         (self.root / "src/V2/Support/WorkflowFiberRunner.php").write_text(

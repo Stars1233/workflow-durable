@@ -131,38 +131,40 @@ final class AvroValueProtocolTest extends TestCase
 
         foreach ($paths as $path) {
             $fixture = json_decode((string) file_get_contents($path), true, flags: JSON_THROW_ON_ERROR);
-            self::assertSame('durable-workflow.codec-regression/v1', $fixture['fixture_schema'] ?? null);
-            self::assertContains('php', $fixture['bindings'] ?? []);
-            self::assertSame(Avro::valueSchemaFingerprint(), $fixture['protocol']['fingerprint'] ?? null);
+            self::assertCodecFixtureUsesOfficialBinding($fixture, $path);
+        }
+    }
 
-            $value = self::taggedValue($fixture['value']);
-            $wire = $fixture['framing']['wire_base64'] ?? null;
-            $operation = $fixture['failure_policy']['operation'] ?? null;
-            $error = $fixture['failure_policy']['error'] ?? null;
+    public function testEncodeRejectExecutionDoesNotReadOptionalWire(): void
+    {
+        $fixture = [
+            'fixture_schema' => 'durable-workflow.codec-regression/v1',
+            'id' => 'non-finite-double',
+            'protocol' => [
+                'fingerprint' => Avro::valueSchemaFingerprint(),
+            ],
+            'bindings' => ['php'],
+            'value' => [
+                'type' => 'double',
+                'value' => '1e309',
+            ],
+            'framing' => [
+                'encoding' => 'base64',
+            ],
+            'failure_policy' => [
+                'operation' => 'encode_reject',
+                'error' => 'non_finite_float',
+            ],
+        ];
 
-            if ($operation === 'round_trip') {
-                self::assertIsString($wire);
-                self::assertSame($wire, Avro::serialize($value), $fixture['id']);
-                $decoded = Avro::unserialize($wire);
-                self::assertEquals($value, $decoded, $fixture['id']);
-                self::assertSame($wire, Avro::serialize($decoded), $fixture['id']);
-                continue;
+        foreach ([null, 'AA==', 'AQ=='] as $wire) {
+            if ($wire === null) {
+                unset($fixture['framing']['wire_base64']);
+            } else {
+                $fixture['framing']['wire_base64'] = $wire;
             }
 
-            try {
-                if ($operation === 'decode_reject') {
-                    self::assertIsString($wire);
-                    Avro::unserialize($wire);
-                } elseif ($operation === 'encode_reject') {
-                    Avro::serialize($value);
-                } else {
-                    self::fail("Unsupported failure policy in {$path}.");
-                }
-                self::fail("Expected {$fixture['id']} to be rejected.");
-            } catch (InvalidArgumentException|CodecDecodeException $exception) {
-                self::assertIsString($error);
-                self::assertStringContainsString($error, $exception->getMessage());
-            }
+            self::assertCodecFixtureUsesOfficialBinding($fixture, $wire ?? 'absent wire');
         }
     }
 
@@ -217,6 +219,45 @@ final class AvroValueProtocolTest extends TestCase
             self::assertSame($value, Avro::unserialize(Avro::serialize($value)));
         } finally {
             restore_error_handler();
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     */
+    private static function assertCodecFixtureUsesOfficialBinding(array $fixture, string $context): void
+    {
+        self::assertSame('durable-workflow.codec-regression/v1', $fixture['fixture_schema'] ?? null);
+        self::assertContains('php', $fixture['bindings'] ?? []);
+        self::assertSame(Avro::valueSchemaFingerprint(), $fixture['protocol']['fingerprint'] ?? null);
+
+        $value = self::taggedValue($fixture['value']);
+        $wire = $fixture['framing']['wire_base64'] ?? null;
+        $operation = $fixture['failure_policy']['operation'] ?? null;
+        $error = $fixture['failure_policy']['error'] ?? null;
+
+        if ($operation === 'round_trip') {
+            self::assertIsString($wire);
+            self::assertSame($wire, Avro::serialize($value), $fixture['id']);
+            $decoded = Avro::unserialize($wire);
+            self::assertEquals($value, $decoded, $fixture['id']);
+            self::assertSame($wire, Avro::serialize($decoded), $fixture['id']);
+            return;
+        }
+
+        try {
+            if ($operation === 'decode_reject') {
+                self::assertIsString($wire);
+                Avro::unserialize($wire);
+            } elseif ($operation === 'encode_reject') {
+                Avro::serialize($value);
+            } else {
+                self::fail("Unsupported failure policy in {$context}.");
+            }
+            self::fail("Expected {$fixture['id']} to be rejected.");
+        } catch (InvalidArgumentException|CodecDecodeException $exception) {
+            self::assertIsString($error);
+            self::assertStringContainsString($error, $exception->getMessage());
         }
     }
 

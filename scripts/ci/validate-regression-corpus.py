@@ -93,7 +93,8 @@ OFFICIAL_BINDING_CONSUMERS = {
         "vendor/bin/phpunit",
         "--colors=never",
         "--filter",
-        "testCheckedInCodecRegressionCorpusUsesTheOfficialBinding",
+        "testCheckedInCodecRegressionCorpusUsesTheOfficialBinding|"
+        "testEncodeRejectExecutionDoesNotReadOptionalWire",
         "tests/Unit/Serializers/AvroValueProtocolTest.php",
     ),
     (
@@ -920,11 +921,13 @@ def _codec_semantic(
 ) -> Mapping[str, Any]:
     """Return one format-neutral identity for payload-codec evidence."""
 
-    return {
+    semantic = {
         "value": value,
-        "wire": wire_base64,
         "failure_policy": {"operation": operation, "error": error},
     }
+    if operation != "encode_reject":
+        semantic["wire"] = wire_base64
+    return semantic
 
 
 def _fixture_evidence(
