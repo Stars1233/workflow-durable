@@ -2,10 +2,11 @@
 
 ## Unreleased
 
-- Advanced the Workflow package source to `2.0.0-rc.7` with fail-closed
-  decoding for malformed recognized service-response envelopes. The aggregate
-  recommended product tuple remains RC5 until independently published
-  release-candidate artifacts pass exact-current qualification.
+- Advanced the Workflow package source to `2.0.0-rc.8` with identical
+  fail-closed decoding for malformed recognized service-response envelopes
+  across embedded execution, query replay, and the standalone runner. The
+  aggregate recommended product tuple remains RC5 until independently
+  published release-candidate artifacts pass exact-current qualification.
 - Historical command-contract gaps remain visible in operator metrics without
   warning fleet correctness once their runs are closed. Open runs still warn
   when operator command forms lack required safety data.

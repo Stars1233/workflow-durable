@@ -1562,25 +1562,12 @@ final class WorkflowFiberRunner
 
         $responsePayload = $payload['response_payload'];
 
-        if (! is_string($responsePayload) && ! self::isPayloadEnvelope($responsePayload)) {
-            return $responsePayload;
-        }
-
-        return self::decodePayload(
+        return ServiceResponsePayload::decode(
             $responsePayload,
             $fallbackCodec,
             self::stringValue($payload['payload_codec'] ?? null),
             $namespace,
         );
-    }
-
-    private static function isPayloadEnvelope(mixed $payload): bool
-    {
-        return is_array($payload)
-            && (
-                (isset($payload['blob']) && is_string($payload['blob']))
-                || (isset($payload['external_storage']) && is_array($payload['external_storage']))
-            );
     }
 
     /**

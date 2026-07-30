@@ -29,6 +29,11 @@ REPLAY_SCHEMA = "durable-workflow.replay-regression/v1"
 GOLDEN_HISTORY_SCHEMA = "durable-workflow.golden-history.v1"
 MALFORMED_SERVICE_RESPONSE_ENVELOPE = "malformed_service_response_envelope"
 PHP_GOLDEN_REPLAY_WORKFLOW = "Tests\\Fixtures\\V2\\TestGoldenReplayWorkflow"
+PHP_REPLAY_CONSUMERS = {
+    "query-state-replayer",
+    "workflow-executor",
+    "workflow-fiber-runner",
+}
 PHP_GOLDEN_HISTORY_FAMILIES = {
     "activity",
     "saga-compensation",
@@ -123,6 +128,20 @@ OFFICIAL_BINDING_CONSUMERS = {
         "vendor/bin/phpunit",
         "--colors=never",
         "tests/Unit/V2/ReplayRegressionCorpusTest.php",
+        "tests/Feature/V2/V2EmbeddedReplayRegressionCorpusTest.php",
+    ),
+}
+OFFICIAL_BINDING_CONSUMER_SUPPORT = {
+    OFFICIAL_BINDING_CONSUMERS[
+        (
+            "php",
+            "replay",
+            "tests/Fixtures/V2/ReplayRegression/*.json",
+            "replay-regression-v1",
+        )
+    ]: (
+        "tests/Feature/V2/V2EmbeddedReplayRegressionCorpusTest.php",
+        "tests/Fixtures/V2/TestServiceResponseReplayWorkflow.php",
     ),
 }
 FAILURE_EVENT_FALLBACK_MESSAGES = {
@@ -1131,6 +1150,16 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
     )
     if binding is not None and binding not in bindings:
         raise CorpusError(f"{path} does not name this repository's {binding} binding")
+    consumers = _unique_strings(
+        document.get("consumers", ["workflow-fiber-runner"]),
+        f"{path}.consumers",
+        allowed=PHP_REPLAY_CONSUMERS,
+    )
+    if "workflow-fiber-runner" not in consumers:
+        raise CorpusError(
+            f"{path}.consumers must include workflow-fiber-runner for the "
+            "replay-regression-v1 consumer"
+        )
     workflow = _object(document.get("workflow"), f"{path}.workflow")
     required_workflow_fields = {"type", "arguments", "payload_codec"}
     if set(workflow) != required_workflow_fields:
@@ -1583,6 +1612,18 @@ def _consumer_failure_detail(result: subprocess.CompletedProcess[str]) -> str:
     return detail[-2000:]
 
 
+def _base_consumer_files(
+    base_files: Mapping[str, bytes],
+    current_files: Mapping[str, bytes],
+    command: tuple[str, ...],
+) -> dict[str, bytes]:
+    files = dict(base_files)
+    for path in OFFICIAL_BINDING_CONSUMER_SUPPORT.get(command, ()):
+        if path in current_files:
+            files[path] = current_files[path]
+    return files
+
+
 def _require_counterfactual_evidence(
     root: Path,
     policy: Mapping[str, Any],
@@ -1607,7 +1648,8 @@ def _require_counterfactual_evidence(
         for path in evidence_paths:
             consumer_name, command = _official_consumer(policy, category_name, path)
             if command not in baseline_consumers:
-                baseline = _consumer_result(root, base_files, command)
+                baseline_files = _base_consumer_files(base_files, current_files, command)
+                baseline = _consumer_result(root, baseline_files, command)
                 if baseline.returncode != 0:
                     raise CorpusError(
                         f"official {consumer_name} consumer does not pass at the base "
@@ -1626,7 +1668,7 @@ def _require_counterfactual_evidence(
                     f"{_consumer_failure_detail(head)}"
                 )
 
-            base_with_evidence = dict(base_files)
+            base_with_evidence = _base_consumer_files(base_files, current_files, command)
             base_with_evidence[path] = current_files[path]
             counterfactual = _consumer_result(root, base_with_evidence, command)
             if counterfactual.returncode == 0:

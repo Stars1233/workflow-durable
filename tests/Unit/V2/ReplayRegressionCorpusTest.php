@@ -20,6 +20,8 @@ final class ReplayRegressionCorpusTest extends TestCase
 
     private const FIXTURE_SCHEMA = 'durable-workflow.replay-regression/v1';
 
+    private const REPLAY_CONSUMERS = ['query-state-replayer', 'workflow-executor', 'workflow-fiber-runner'];
+
     /**
      * @param array<string, mixed> $fixture
      */
@@ -174,6 +176,14 @@ final class ReplayRegressionCorpusTest extends TestCase
             self::assertIsArray($fixture['workflow'] ?? null);
             self::assertIsArray($fixture['workflow']['arguments'] ?? null);
             self::assertIsString($fixture['workflow']['payload_codec'] ?? null);
+            $consumers = $fixture['consumers'] ?? ['workflow-fiber-runner'];
+            self::assertIsArray($consumers);
+            self::assertNotSame([], $consumers);
+            self::assertSame(array_values(array_unique($consumers)), $consumers);
+            foreach ($consumers as $consumer) {
+                self::assertContains($consumer, self::REPLAY_CONSUMERS);
+            }
+            self::assertContains('workflow-fiber-runner', $consumers);
             $hasExpected = isset($fixture['expected']);
             $hasExpectedFailure = isset($fixture['expected_failure']);
             self::assertNotSame(

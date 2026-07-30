@@ -69,13 +69,26 @@ $codec = str_contains($arguments, 'AvroValueProtocolTest.php');
 $fixtureDirectory = $codec
     ? __DIR__ . '/../../tests/Fixtures/V2/CodecRegression'
     : __DIR__ . '/../../tests/Fixtures/V2/ReplayRegression';
+$embeddedHarness = __DIR__ . '/../../tests/Feature/V2/V2EmbeddedReplayRegressionCorpusTest.php';
+$embeddedReplay = !$codec
+    && is_file($embeddedHarness)
+    && str_contains((string) file_get_contents($embeddedHarness), 'query-state-replayer');
 $source = $codec
     ? __DIR__ . '/../../src/Serializers/Json.php'
-    : __DIR__ . '/../../src/V2/Support/WorkflowFiberRunner.php';
+    : (
+        $embeddedReplay
+            ? __DIR__ . '/../../src/V2/Support/QueryStateReplayer.php'
+            : __DIR__ . '/../../src/V2/Support/WorkflowFiberRunner.php'
+    );
 foreach (glob($fixtureDirectory . '/*.json') ?: [] as $path) {
     $fixture = json_decode((string) file_get_contents($path), true);
+    $requiresChange = str_contains((string) ($fixture['id'] ?? ''), 'requires-change')
+        || (
+            $embeddedReplay
+            && str_contains((string) ($fixture['id'] ?? ''), 'requires-query-change')
+        );
     if (
-        str_contains((string) ($fixture['id'] ?? ''), 'requires-change')
+        $requiresChange
         && str_contains((string) file_get_contents($source), "'base'")
     ) {
         fwrite(STDERR, "fixture requires the guarded implementation change\\n");
@@ -580,6 +593,39 @@ exit(0);
             "is not bound to this repository's official php consumer",
             result.stderr,
         )
+
+    def test_current_embedded_harness_exercises_merge_base_runtime(self) -> None:
+        (
+            self.root / "src/V2/Support/QueryStateReplayer.php"
+        ).write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+        harness = (
+            self.root
+            / "tests/Feature/V2/V2EmbeddedReplayRegressionCorpusTest.php"
+        )
+        harness.parent.mkdir(parents=True, exist_ok=True)
+        harness.write_text(
+            "<?php\n// query-state-replayer\n",
+            encoding="utf-8",
+        )
+        fixture = self.replay_fixture("requires-query-change-replay-case")
+        fixture["workflow"]["arguments"] = ["embedded"]
+        fixture["consumers"] = [
+            "workflow-fiber-runner",
+            "query-state-replayer",
+        ]
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/embedded.json",
+            fixture,
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        counts = json.loads(result.stdout)["counts"]["replay"]
+        self.assertEqual(1, counts["counterfactual_fixture_paths"])
 
     def test_codec_binding_metadata_cannot_manufacture_growth(self) -> None:
         (self.root / "src/Serializers/Json.php").write_text(

@@ -1330,39 +1330,16 @@ final class QueryStateReplayer
         }
 
         $payload = $event->payload['response_payload'];
+        $fallbackCodec = is_string($run->payload_codec) && $run->payload_codec !== ''
+            ? $run->payload_codec
+            : CodecRegistry::defaultCodec();
 
-        if (! is_string($payload) && ! self::isPayloadEnvelope($payload)) {
-            return $payload;
-        }
-
-        $codec = self::nonEmptyString($event->payload['payload_codec'] ?? null)
-            ?? (is_string($run->payload_codec) && $run->payload_codec !== ''
-                ? $run->payload_codec
-                : CodecRegistry::defaultCodec());
-        $serialized = ExternalPayloads::payloadBlob(
+        return ServiceResponsePayload::decode(
             $payload,
-            $codec,
+            $fallbackCodec,
+            self::nonEmptyString($event->payload['payload_codec'] ?? null),
             is_string($run->namespace) ? $run->namespace : null,
         );
-
-        if ($serialized === null) {
-            return null;
-        }
-
-        try {
-            return Serializer::unserializeWithCodec($codec, $serialized);
-        } catch (Throwable) {
-            return $payload;
-        }
-    }
-
-    private static function isPayloadEnvelope(mixed $payload): bool
-    {
-        return is_array($payload)
-            && (
-                (isset($payload['blob']) && is_string($payload['blob']))
-                || (isset($payload['external_storage']) && is_array($payload['external_storage']))
-            );
     }
 
     private static function serviceOperationStartedEventIsVisible(
