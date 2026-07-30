@@ -80,7 +80,7 @@ final class AvroValueProtocolTest extends TestCase
             self::assertIsString($bytes, "{$case['name']} must use valid Base64.");
             self::assertSame($wire, base64_encode($bytes), "{$case['name']} must use canonical Base64.");
 
-            if ($case['name'] === 'invalid_base64') {
+            if ($case['name'] === 'decoded_non_magic_bytes') {
                 self::assertSame('%%%', $bytes, 'JSUl is valid Base64 containing invalid Avro framing bytes.');
             }
 
@@ -90,7 +90,7 @@ final class AvroValueProtocolTest extends TestCase
             } catch (CodecDecodeException $exception) {
                 self::assertStringContainsString($case['error'], $exception->getMessage());
 
-                if ($case['name'] === 'invalid_base64') {
+                if ($case['name'] === 'decoded_non_magic_bytes') {
                     self::assertStringContainsString(
                         'expected Avro single-object magic c301',
                         $exception->detail,

@@ -220,8 +220,14 @@ exit(0);
         }
 
     @classmethod
-    def malformed_avro_golden_fixture(cls, wire_base64: str) -> dict[str, Any]:
+    def malformed_avro_golden_fixture(
+        cls,
+        wire_base64: str,
+        *,
+        name: str = "bad_frame",
+    ) -> dict[str, Any]:
         fixture = cls.avro_golden_fixture("AA==")
+        fixture["malformed_frames"][0]["name"] = name
         fixture["malformed_frames"][0]["wire_base64"] = wire_base64
         return fixture
 
@@ -1717,6 +1723,40 @@ exit(0);
         result = self.validate()
 
         self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_malformed_name_migration_accepts_decoded_behavior_reclassification(self) -> None:
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.malformed_avro_golden_fixture("JSUl", name="invalid_base64"),
+        )
+        self.commit_current_as_base()
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.malformed_avro_golden_fixture(
+                "JSUl",
+                name="decoded_non_magic_bytes",
+            ),
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_malformed_name_migration_rejects_unrelated_reclassification(self) -> None:
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.malformed_avro_golden_fixture("JSUl", name="invalid_base64"),
+        )
+        self.commit_current_as_base()
+        self.write_json(
+            "resources/protocol/avro-value-v1-golden.json",
+            self.malformed_avro_golden_fixture("JSUl", name="unrelated_name"),
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("immutable fixture file", result.stderr)
 
     def test_double_representations_share_cross_format_identity(self) -> None:
         self.write_json(
