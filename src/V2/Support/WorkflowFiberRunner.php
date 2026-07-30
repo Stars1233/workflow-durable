@@ -1566,16 +1566,12 @@ final class WorkflowFiberRunner
             return $responsePayload;
         }
 
-        try {
-            return self::decodePayload(
-                $responsePayload,
-                $fallbackCodec,
-                self::stringValue($payload['payload_codec'] ?? null),
-                $namespace,
-            );
-        } catch (Throwable) {
-            return $responsePayload;
-        }
+        return self::decodePayload(
+            $responsePayload,
+            $fallbackCodec,
+            self::stringValue($payload['payload_codec'] ?? null),
+            $namespace,
+        );
     }
 
     private static function isPayloadEnvelope(mixed $payload): bool

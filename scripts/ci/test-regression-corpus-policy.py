@@ -1370,6 +1370,40 @@ exit(0);
                     finally:
                         (self.root / path).unlink(missing_ok=True)
 
+    def test_expected_malformed_service_response_failure_grows_replay_corpus(self) -> None:
+        fixture = self.official_history_replay_fixture()
+        fixture["id"] = "malformed-service-response-requires-change"
+        fixture["history"][1]["event_type"] = "ServiceCallCompleted"
+        fixture["history"][1]["payload"] = {
+            "sequence": 7,
+            "response_payload": {
+                "codec": "json",
+                "blob": '{"truncated":',
+            },
+        }
+        del fixture["expected"]
+        fixture["expected_failure"] = {
+            "type": "malformed_service_response_envelope",
+            "exception": "Workflow\\Serializers\\CodecDecodeException",
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/malformed-service-response.json",
+            fixture,
+        )
+        (self.root / "src/V2/Support/WorkflowFiberRunner.php").write_text(
+            "<?php\nreturn 'changed';\n",
+            encoding="utf-8",
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        counts = json.loads(result.stdout)["counts"]["replay"]
+        self.assertEqual(1, counts["base"])
+        self.assertEqual(2, counts["current"])
+        self.assertEqual(1, counts["new_fixture_evidence"])
+        self.assertEqual(1, counts["counterfactual_fixture_paths"])
+
     def test_malformed_payload_envelopes_are_rejected(self) -> None:
         base = self.official_history_replay_fixture()
         self.write_json(

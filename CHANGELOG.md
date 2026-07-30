@@ -2,9 +2,9 @@
 
 ## Unreleased
 
-- Advanced the Workflow package source to `2.0.0-rc.6` so suite version 37
-  can ship without changing the immutable RC5 artifact. The aggregate
-  recommended product tuple remains RC5 until the independently published
+- Advanced the Workflow package source to `2.0.0-rc.7` with fail-closed
+  decoding for malformed recognized service-response envelopes. The aggregate
+  recommended product tuple remains RC5 until independently published
   release-candidate artifacts pass exact-current qualification.
 - Historical command-contract gaps remain visible in operator metrics without
   warning fleet correctness once their runs are closed. Open runs still warn

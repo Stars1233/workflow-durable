@@ -7,6 +7,7 @@ namespace Tests\Unit\V2;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Tests\Fixtures\V2\TestReplayMapOrderWorkflow;
+use Throwable;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Support\WorkflowFiberRunner;
@@ -33,6 +34,25 @@ final class ReplayRegressionCorpusTest extends TestCase
             is_a($workflowClass, Workflow::class, true),
             sprintf('Replay fixture workflow [%s] must be an autoloadable V2 workflow.', $workflowClass),
         );
+
+        if (isset($fixture['expected_failure'])) {
+            try {
+                WorkflowFiberRunner::forClass(
+                    $workflowClass,
+                    'regression-corpus-' . $fixture['id'],
+                    'regression-corpus-run-' . $fixture['id'],
+                    $workflow['arguments'],
+                    $workflow['payload_codec'],
+                    $fixture['history'],
+                )->step();
+            } catch (Throwable $exception) {
+                $this->assertSame($fixture['expected_failure']['exception'], $exception::class);
+
+                return;
+            }
+
+            $this->fail("{$fixture['id']} did not reject its malformed replay history.");
+        }
 
         $runner = WorkflowFiberRunner::forClass(
             $workflowClass,
@@ -154,7 +174,23 @@ final class ReplayRegressionCorpusTest extends TestCase
             self::assertIsArray($fixture['workflow'] ?? null);
             self::assertIsArray($fixture['workflow']['arguments'] ?? null);
             self::assertIsString($fixture['workflow']['payload_codec'] ?? null);
-            self::assertIsArray($fixture['expected'] ?? null);
+            $hasExpected = isset($fixture['expected']);
+            $hasExpectedFailure = isset($fixture['expected_failure']);
+            self::assertNotSame(
+                $hasExpected,
+                $hasExpectedFailure,
+                "{$fixture['id']} must provide exactly one expected outcome.",
+            );
+            if ($hasExpected) {
+                self::assertIsArray($fixture['expected']);
+            } else {
+                self::assertIsArray($fixture['expected_failure']);
+                $failureFields = array_keys($fixture['expected_failure']);
+                sort($failureFields);
+                self::assertSame(['exception', 'type'], $failureFields);
+                self::assertNotSame('', $fixture['expected_failure']['exception'] ?? '');
+                self::assertNotSame('', $fixture['expected_failure']['type'] ?? '');
+            }
 
             $hasHistory = isset($fixture['history']);
             $hasCommandSequence = isset($fixture['command_sequence']);

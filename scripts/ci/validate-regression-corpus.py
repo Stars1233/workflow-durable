@@ -27,6 +27,7 @@ POLICY_SCHEMA = "durable-workflow.regression-corpus-policy/v1"
 CODEC_SCHEMA = "durable-workflow.codec-regression/v1"
 REPLAY_SCHEMA = "durable-workflow.replay-regression/v1"
 GOLDEN_HISTORY_SCHEMA = "durable-workflow.golden-history.v1"
+MALFORMED_SERVICE_RESPONSE_ENVELOPE = "malformed_service_response_envelope"
 PHP_GOLDEN_REPLAY_WORKFLOW = "Tests\\Fixtures\\V2\\TestGoldenReplayWorkflow"
 PHP_GOLDEN_HISTORY_FAMILIES = {
     "activity",
@@ -431,6 +432,8 @@ def _consumer_payload(
     event_type: str,
     default_codec: str,
     golden_values: bool,
+    expected_failure: str | None = None,
+    observed_failures: list[str] | None = None,
 ) -> Mapping[str, Any]:
     """Return the payload values that reach the replayed workflow."""
 
@@ -459,43 +462,70 @@ def _consumer_payload(
             decoded_fields.add(field)
             continue
 
-        envelope_codec = None
-        if isinstance(field_value, Mapping):
-            envelope_codec = _declared_php_codec(
-                field_value,
-                "codec",
-                f"{context}.{field}",
-            )
-            if "blob" not in field_value or not isinstance(field_value["blob"], str):
-                raise CorpusError(
-                    f"{context}.{field} is not a decodable inline payload envelope"
-                )
-            blob = field_value["blob"]
-        elif isinstance(field_value, str):
-            blob = field_value
-        else:
+        if not isinstance(field_value, (Mapping, str)):
             payload[field] = _canonical_php_value(None, f"{context}.{field}")
             decoded_fields.add(field)
             continue
 
-        event_codec = _declared_php_codec(payload, "payload_codec", context)
-        if event_codec is not None and envelope_codec is not None and event_codec != envelope_codec:
-            raise CorpusError(
-                f"{context}.{field} declares conflicting payload codecs "
-                f"{event_codec!r} and {envelope_codec!r}"
-            )
-        codec = event_codec or envelope_codec
-        if codec is None:
-            codec = _canonical_php_codec(
+        service_response_envelope = (
+            field == "response_payload"
+            and event_type in {"ServiceCallStarted", "ServiceCallCompleted"}
+            and _looks_like_service_response_envelope(field_value)
+        )
+        try:
+            payload[field] = _decoded_php_replay_field(
+                field_value,
+                payload,
+                f"{context}.{field}",
                 default_codec,
-                f"{context}.{field} fallback codec",
             )
-        payload[field] = _decode_php_payload(codec, blob, f"{context}.{field}")
+        except CorpusError:
+            if (
+                not service_response_envelope
+                or expected_failure != MALFORMED_SERVICE_RESPONSE_ENVELOPE
+                or observed_failures is None
+            ):
+                raise
+            observed_failures.append(expected_failure)
+            payload[field] = {
+                "expected_failure": expected_failure,
+                "envelope": _canonical_php_value(field_value, f"{context}.{field}"),
+            }
         decoded_fields.add(field)
 
     if decoded_fields:
         payload.pop("payload_codec", None)
     return payload
+
+
+def _decoded_php_replay_field(
+    field_value: Mapping[str, Any] | str,
+    event_payload: Mapping[str, Any],
+    context: str,
+    default_codec: str,
+) -> Mapping[str, str]:
+    """Decode one replay payload field with the PHP consumer's codec precedence."""
+
+    envelope_codec = None
+    if isinstance(field_value, Mapping):
+        envelope_codec = _declared_php_codec(field_value, "codec", context)
+        if "blob" not in field_value or not isinstance(field_value["blob"], str):
+            raise CorpusError(f"{context} is not a decodable inline payload envelope")
+        blob = field_value["blob"]
+    else:
+        blob = field_value
+
+    event_codec = _declared_php_codec(event_payload, "payload_codec", context.rsplit(".", 1)[0])
+    if event_codec is not None and envelope_codec is not None and event_codec != envelope_codec:
+        raise CorpusError(
+            f"{context} declares conflicting payload codecs "
+            f"{event_codec!r} and {envelope_codec!r}"
+        )
+    codec = event_codec or envelope_codec
+    if codec is None:
+        codec = _canonical_php_codec(default_codec, f"{context} fallback codec")
+
+    return _decode_php_payload(codec, blob, context)
 
 
 def _canonical_php_codec(value: str, context: str) -> str:
@@ -747,6 +777,8 @@ def _consumer_history(
     *,
     default_codec: str,
     golden_values: bool,
+    expected_failure: str | None = None,
+    observed_failures: list[str] | None = None,
 ) -> tuple[Sequence[Mapping[str, Any]], str | None]:
     """Normalize stored history into the values observed by replay execution."""
 
@@ -765,6 +797,8 @@ def _consumer_history(
             event_type=event_type,
             default_codec=default_codec,
             golden_values=golden_values,
+            expected_failure=expected_failure,
+            observed_failures=observed_failures,
         )
         if event_type == "WorkflowStarted" and not found_workflow_started:
             found_workflow_started = True
@@ -1067,6 +1101,23 @@ def _replay_expected(
     return canonical
 
 
+def _replay_expected_failure(value: Any, context: str) -> Mapping[str, str]:
+    """Return the one fail-closed replay outcome supported by this corpus format."""
+
+    expected = _object(value, context)
+    required = {"type", "exception"}
+    if set(expected) != required:
+        raise CorpusError(f"{context} must contain exactly {sorted(required)}")
+    failure_type = _string(expected["type"], f"{context}.type")
+    if failure_type != MALFORMED_SERVICE_RESPONSE_ENVELOPE:
+        raise CorpusError(f"{context}.type is unsupported")
+
+    return {
+        "type": failure_type,
+        "exception": _string(expected["exception"], f"{context}.exception"),
+    }
+
+
 def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None) -> list[Evidence]:
     _string(document.get("$schema"), f"{path}.$schema")
     if document.get("fixture_schema") != REPLAY_SCHEMA:
@@ -1095,6 +1146,18 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
         raise CorpusError(
             f"{path} must include exactly one of history or command_sequence"
         )
+    has_expected = "expected" in document
+    has_expected_failure = "expected_failure" in document
+    if has_expected == has_expected_failure:
+        raise CorpusError(f"{path} must include exactly one of expected or expected_failure")
+    expected_failure = (
+        _replay_expected_failure(document["expected_failure"], f"{path}.expected_failure")
+        if has_expected_failure
+        else None
+    )
+    if expected_failure is not None and commands is not None:
+        raise CorpusError(f"{path}.expected_failure requires history replay input")
+    observed_failures: list[str] = []
     replay_namespace = None
     if history is not None:
         canonical_history, replay_namespace = _consumer_history(
@@ -1102,6 +1165,8 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
             f"{path}.history",
             default_codec=workflow["payload_codec"],
             golden_values=False,
+            expected_failure=expected_failure["type"] if expected_failure is not None else None,
+            observed_failures=observed_failures,
         )
     else:
         canonical_history = []
@@ -1131,7 +1196,15 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
                 raise CorpusError(
                     f"{path}.command_sequence[{index}] has an unused resume_with value"
                 )
-    expected = _replay_expected(document.get("expected"), f"{path}.expected")
+    if expected_failure is not None:
+        if observed_failures != [expected_failure["type"]]:
+            raise CorpusError(
+                f"{path}.expected_failure must match exactly one malformed "
+                "service-response envelope"
+            )
+        expected: Mapping[str, Any] = {"failure": expected_failure}
+    else:
+        expected = _replay_expected(document.get("expected"), f"{path}.expected")
     supersedes = tuple(
         _string(item, f"{path}.supersedes[]")
         for item in _list(document.get("supersedes", []), f"{path}.supersedes")

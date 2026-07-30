@@ -6,11 +6,13 @@ namespace Tests\Unit\V2;
 
 use Carbon\CarbonImmutable;
 use Generator;
+use InvalidArgumentException;
 use LogicException;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use Throwable;
 use Workflow\Exceptions\VersionNotSupportedException;
+use Workflow\Serializers\CodecDecodeException;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Enums\ParentClosePolicy;
 use Workflow\V2\Exceptions\RestoredWorkflowException;
@@ -1553,6 +1555,45 @@ final class WorkflowFiberRunnerTest extends TestCase
             $this->assertTrue($fromEnvelope->completed);
             $this->assertSame($responsePayload, $fromDirect->result['response_payload']);
             $this->assertSame($fromDirect->result, $fromEnvelope->result);
+        }
+    }
+
+    public function testRunnerRejectsMalformedServiceResponseEnvelopes(): void
+    {
+        $malformedPayloads = [
+            [
+                'payload' => [
+                    'codec' => 'json',
+                    'blob' => '{"truncated":',
+                ],
+                'exception' => CodecDecodeException::class,
+                'message' => 'Failed to JSON-decode payload',
+            ],
+            [
+                'payload' => [
+                    'codec' => 'json',
+                    'external_storage' => [
+                        'key' => 'payload',
+                    ],
+                ],
+                'exception' => InvalidArgumentException::class,
+                'message' => 'Unsupported external payload reference schema',
+            ],
+        ];
+
+        foreach (['ServiceCallStarted', 'ServiceCallCompleted'] as $eventType) {
+            foreach ($malformedPayloads as $malformed) {
+                try {
+                    $this->runServiceOperationHistory($eventType, $malformed['payload']);
+                } catch (Throwable $exception) {
+                    $this->assertInstanceOf($malformed['exception'], $exception);
+                    $this->assertStringContainsString($malformed['message'], $exception->getMessage());
+
+                    continue;
+                }
+
+                $this->fail(sprintf('%s accepted a malformed recognized service response envelope.', $eventType));
+            }
         }
     }
 
