@@ -2,11 +2,13 @@
 
 ## Unreleased
 
-- Advanced the Workflow package source to `2.0.0-rc.8` with identical
-  fail-closed decoding for malformed recognized service-response envelopes
-  across embedded execution, query replay, and the standalone runner. The
-  aggregate recommended product tuple remains RC5 until independently
-  published release-candidate artifacts pass exact-current qualification.
+- Platform conformance suite version 38 replaces repository-relative stable
+  fixture sources with version-bound public artifact identifiers, deterministic
+  HTTPS resolvers, and SHA-256 byte bindings.
+- Advanced the Workflow package source to `2.0.0-rc.9` for the suite version
+  38 authority. The aggregate recommended product tuple remains RC5 until
+  independently published release-candidate artifacts pass exact-current
+  qualification.
 - Historical command-contract gaps remain visible in operator metrics without
   warning fleet correctness once their runs are closed. Open runs still warn
   when operator command forms lack required safety data.
