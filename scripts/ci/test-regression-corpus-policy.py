@@ -837,6 +837,207 @@ exit(0);
                 finally:
                     (self.root / duplicate_path).unlink(missing_ok=True)
 
+    def test_codec_reencoding_cannot_manufacture_replay_growth(self) -> None:
+        base = self.official_history_replay_fixture()
+        base["history"][1]["payload"]["result"] = '"activity-result"'
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            base,
+        )
+        self.commit_current_as_base()
+
+        duplicate = json.loads(json.dumps(base))
+        duplicate["id"] = "avro-reencoded-activity-result"
+        duplicate_payload = duplicate["history"][1]["payload"]
+        duplicate_payload.pop("payload_codec")
+        duplicate_payload["result"] = {
+            "codec": "avro",
+            "blob": "wwHioz3/VYAiNwoeYWN0aXZpdHktcmVzdWx0",
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/avro-reencoded.json",
+            duplicate,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_payload_codec_precedence_matches_the_runner(self) -> None:
+        base = self.official_history_replay_fixture()
+        base["workflow"]["payload_codec"] = "avro"
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            base,
+        )
+        self.commit_current_as_base()
+
+        duplicate = json.loads(json.dumps(base))
+        duplicate["id"] = "envelope-codec-precedes-workflow-fallback"
+        duplicate_payload = duplicate["history"][1]["payload"]
+        duplicate_payload.pop("payload_codec")
+        duplicate_payload["result"] = {
+            "codec": "json",
+            "blob": '"Hello, Ada!"',
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/envelope-codec-precedence.json",
+            duplicate,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_workflow_codec_is_the_payload_fallback(self) -> None:
+        base = self.official_history_replay_fixture()
+        base["history"][1]["payload"].pop("payload_codec")
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            base,
+        )
+        self.commit_current_as_base()
+
+        duplicate = json.loads(json.dumps(base))
+        duplicate["id"] = "workflow-codec-fallback-envelope"
+        duplicate["history"][1]["payload"]["result"] = {
+            "blob": '"Hello, Ada!"',
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/fallback-codec.json",
+            duplicate,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_direct_and_encoded_service_responses_have_one_identity(self) -> None:
+        base = self.official_history_replay_fixture()
+        base["history"][1]["event_type"] = "ServiceCallCompleted"
+        base["history"][1]["payload"] = {
+            "sequence": 7,
+            "response_payload": {"accepted": True},
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            base,
+        )
+        self.commit_current_as_base()
+
+        duplicate = json.loads(json.dumps(base))
+        duplicate["id"] = "encoded-service-response"
+        duplicate["history"][1]["payload"]["response_payload"] = {
+            "codec": "json",
+            "blob": '{"accepted":true}',
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/encoded-service-response.json",
+            duplicate,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_malformed_payload_envelopes_are_rejected(self) -> None:
+        base = self.official_history_replay_fixture()
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            base,
+        )
+        self.commit_current_as_base()
+        malformed_values = (
+            ({"codec": "json"}, "not a decodable inline payload envelope"),
+            ({"codec": "json", "blob": 42}, "not a decodable inline payload envelope"),
+            (
+                {"codec": "json", "external_storage": {"key": "payload"}},
+                "not a decodable inline payload envelope",
+            ),
+            (
+                {"codec": "unknown", "blob": '"activity-result"'},
+                "declares unsupported payload codec",
+            ),
+            (
+                {"codec": "json", "blob": '{"truncated":'},
+                "cannot be decoded by the PHP payload consumer",
+            ),
+            (
+                {"codec": "avro", "blob": "not-an-avro-frame"},
+                "cannot be decoded by the PHP payload consumer",
+            ),
+        )
+
+        for index, (malformed, expected_error) in enumerate(malformed_values):
+            with self.subTest(index=index):
+                fixture = json.loads(json.dumps(base))
+                fixture["id"] = f"malformed-inline-envelope-{index}"
+                fixture["history"][1]["payload"].pop("payload_codec")
+                fixture["history"][1]["payload"]["result"] = malformed
+                path = "tests/Fixtures/V2/ReplayRegression/malformed-envelope.json"
+                self.write_json(path, fixture)
+
+                try:
+                    result = self.validate()
+
+                    self.assertNotEqual(0, result.returncode, result.stdout)
+                    self.assertIn(expected_error, result.stderr)
+                finally:
+                    (self.root / path).unlink(missing_ok=True)
+
+    def test_conflicting_payload_codec_declarations_are_rejected(self) -> None:
+        fixture = self.official_history_replay_fixture()
+        fixture["id"] = "conflicting-inline-envelope-codecs"
+        fixture["history"][1]["payload"]["result"] = {
+            "codec": "avro",
+            "blob": '"Hello, Ada!"',
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/conflicting-codecs.json",
+            fixture,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("declares conflicting payload codecs", result.stderr)
+
+    def test_equivalent_codec_alias_declarations_are_not_conflicts(self) -> None:
+        base = self.official_history_replay_fixture()
+        base["history"][1]["payload"] = {
+            "sequence": 7,
+            "payload_codec": "\\Workflow\\Serializers\\Base64",
+            "result": "base64:Tjs=",
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            base,
+        )
+        self.commit_current_as_base()
+
+        duplicate = json.loads(json.dumps(base))
+        duplicate["id"] = "equivalent-codec-aliases"
+        duplicate["history"][1]["payload"] = {
+            "sequence": 7,
+            "result": {
+                "codec": "workflow-serializer-base64",
+                "blob": "base64:Tjs=",
+            },
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/equivalent-aliases.json",
+            duplicate,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
     def test_ignored_failure_exception_cannot_manufacture_growth(self) -> None:
         self.write_json(
             "tests/Fixtures/V2/GoldenHistory/failure-base.json",

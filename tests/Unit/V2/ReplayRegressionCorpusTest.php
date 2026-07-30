@@ -6,7 +6,6 @@ namespace Tests\Unit\V2;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
-use ReflectionMethod;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Support\WorkflowFiberRunner;
@@ -58,25 +57,32 @@ final class ReplayRegressionCorpusTest extends TestCase
         $this->assertStepMatches($fixture['expected'], $step, "{$fixture['id']} final outcome");
     }
 
-    public function testRawBlobsAndInlineEnvelopesReachTheRunnerAsTheSameValue(): void
+    public function testRawBlobsAndInlineEnvelopesProduceTheSameWorkflowResult(): void
     {
-        $decodePayload = new ReflectionMethod(WorkflowFiberRunner::class, 'decodePayload');
-        $expected = [
-            'surface' => 'history',
-            'value' => 42,
-        ];
+        $fixture = self::replayRegressionFixtures()['workflow-fiber-activity-history-sequence'][0];
 
         foreach (CodecRegistry::universal() as $codec) {
-            $blob = Serializer::serializeWithCodec($codec, $expected);
-
-            $fromRawBlob = $decodePayload->invoke(null, $blob, 'avro', $codec);
-            $fromInlineEnvelope = $decodePayload->invoke(null, [
+            $blob = Serializer::serializeWithCodec($codec, 'Hello, Ada!');
+            $rawHistory = $fixture['history'];
+            $rawHistory[1]['payload']['payload_codec'] = $codec;
+            $rawHistory[1]['payload']['result'] = $blob;
+            $envelopeHistory = $rawHistory;
+            unset($envelopeHistory[1]['payload']['payload_codec']);
+            $envelopeHistory[1]['payload']['result'] = [
                 'codec' => $codec,
                 'blob' => $blob,
-            ], 'avro',);
+            ];
 
-            $this->assertSame($expected, $fromRawBlob, "Raw {$codec} payload mismatch.");
-            $this->assertSame($fromRawBlob, $fromInlineEnvelope, "Inline {$codec} payload envelope mismatch.");
+            $fromRawBlob = $this->replayStep($fixture, $rawHistory, "{$codec}-raw");
+            $fromInlineEnvelope = $this->replayStep($fixture, $envelopeHistory, "{$codec}-envelope");
+
+            $this->assertStepMatches($fixture['expected'], $fromRawBlob, "Raw {$codec} history");
+            $this->assertStepMatches($fixture['expected'], $fromInlineEnvelope, "Inline {$codec} history");
+            $this->assertSame(
+                $fromRawBlob->result,
+                $fromInlineEnvelope->result,
+                "Inline {$codec} history produced a different workflow result.",
+            );
         }
     }
 
@@ -129,6 +135,24 @@ final class ReplayRegressionCorpusTest extends TestCase
         foreach ($expected['commands'] as $index => $expectedCommand) {
             $this->assertArrayContains($expectedCommand, $actual->commands[$index], "{$context} command {$index}");
         }
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     * @param list<array<string, mixed>> $history
+     */
+    private function replayStep(array $fixture, array $history, string $id): WorkflowStep
+    {
+        $workflow = $fixture['workflow'];
+
+        return WorkflowFiberRunner::forClass(
+            $workflow['type'],
+            "regression-corpus-{$id}",
+            "regression-corpus-run-{$id}",
+            $workflow['arguments'],
+            $workflow['payload_codec'],
+            $history,
+        )->step();
     }
 
     /**

@@ -19,6 +19,7 @@ import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -218,18 +219,29 @@ PHP_NUMERIC_STRING = re.compile(
 PHP_INTEGER_STRING = re.compile(r"[+-]?[0-9]+")
 PHP_INT_MIN = -(2**63)
 PHP_INT_MAX = 2**63 - 1
-PHP_REPLAY_DECODED_FIELDS = (
-    "result",
-    "value",
-    "arguments",
-    "output",
-    "response_payload",
-)
+PHP_REPLAY_DECODED_FIELDS = {
+    "ActivityCompleted": ("result",),
+    "SideEffectRecorded": ("result",),
+    "SignalReceived": ("arguments",),
+    "SignalApplied": ("value", "arguments"),
+    "UpdateAccepted": ("arguments",),
+    "UpdateApplied": ("arguments",),
+    "ChildRunCompleted": ("output",),
+    "ServiceCallStarted": ("response_payload",),
+    "ServiceCallCompleted": ("response_payload",),
+}
 PHP_GOLDEN_VALUE_FIELDS = {"result", "value", "arguments"}
+PHP_CODEC_NAMES = {
+    "avro",
+    "json",
+    "workflow-serializer-y",
+    "workflow-serializer-base64",
+}
 PHP_CODEC_ALIASES = {
     "Workflow\\Serializers\\Y": "workflow-serializer-y",
     "Workflow\\Serializers\\Base64": "workflow-serializer-base64",
 }
+PHP_REPLAY_PAYLOAD_DECODER = Path(__file__).with_name("decode-replay-payload.php")
 RUNTIME_DEPENDENCY_PATHS = ("vendor",)
 ZERO_COMMIT = re.compile(r"^0+$")
 
@@ -391,6 +403,7 @@ def _consumer_payload(
     value: Mapping[str, Any],
     context: str,
     *,
+    event_type: str,
     default_codec: str,
     golden_values: bool,
 ) -> Mapping[str, Any]:
@@ -398,52 +411,61 @@ def _consumer_payload(
 
     payload = dict(value)
     decoded_fields: set[str] = set()
-    event_codec = payload.get("payload_codec")
-    if not isinstance(event_codec, str) or event_codec == "":
-        event_codec = None
-    for field in PHP_REPLAY_DECODED_FIELDS:
+    for field in PHP_REPLAY_DECODED_FIELDS.get(event_type, ()):
         value_field = f"{field}_value"
         if golden_values and field in PHP_GOLDEN_VALUE_FIELDS and value_field in payload:
-            payload[field] = payload.pop(value_field)
+            payload[field] = _canonical_php_value(
+                payload.pop(value_field),
+                f"{context}.{value_field}",
+            )
             decoded_fields.add(field)
             continue
         if field not in payload:
             continue
 
         field_value = payload[field]
-        envelope_codec = (
-            field_value.get("codec")
-            if isinstance(field_value, Mapping)
-            else None
-        )
-        if not isinstance(envelope_codec, str) or envelope_codec == "":
-            envelope_codec = None
-        codec = _canonical_php_codec(event_codec or envelope_codec or default_codec)
-        blob = (
-            field_value
-            if isinstance(field_value, str)
-            else (
-                field_value.get("blob")
-                if isinstance(field_value, Mapping)
-                and isinstance(field_value.get("blob"), str)
-                else None
-            )
-        )
-        if blob is None:
+        if (
+            field == "response_payload"
+            and event_type in {"ServiceCallStarted", "ServiceCallCompleted"}
+            and not isinstance(field_value, str)
+            and not _looks_like_payload_envelope(field_value)
+        ):
+            payload[field] = _canonical_php_value(field_value, f"{context}.{field}")
+            decoded_fields.add(field)
             continue
 
-        if codec == "json":
-            if blob == "":
-                payload[field] = None
-            else:
-                try:
-                    payload[field] = json.loads(blob)
-                except json.JSONDecodeError as error:
-                    raise CorpusError(
-                        f"{context}.{field} is not valid json payload data"
-                    ) from error
+        envelope_codec = None
+        if isinstance(field_value, Mapping):
+            envelope_codec = _declared_php_codec(
+                field_value,
+                "codec",
+                f"{context}.{field}",
+            )
+            if "blob" not in field_value or not isinstance(field_value["blob"], str):
+                raise CorpusError(
+                    f"{context}.{field} is not a decodable inline payload envelope"
+                )
+            blob = field_value["blob"]
+        elif isinstance(field_value, str):
+            blob = field_value
         else:
-            payload[field] = {"codec": codec, "blob": blob}
+            payload[field] = _canonical_php_value(None, f"{context}.{field}")
+            decoded_fields.add(field)
+            continue
+
+        event_codec = _declared_php_codec(payload, "payload_codec", context)
+        if event_codec is not None and envelope_codec is not None and event_codec != envelope_codec:
+            raise CorpusError(
+                f"{context}.{field} declares conflicting payload codecs "
+                f"{event_codec!r} and {envelope_codec!r}"
+            )
+        codec = event_codec or envelope_codec
+        if codec is None:
+            codec = _canonical_php_codec(
+                default_codec,
+                f"{context}.{field} fallback codec",
+            )
+        payload[field] = _decode_php_payload(codec, blob, f"{context}.{field}")
         decoded_fields.add(field)
 
     if decoded_fields:
@@ -451,10 +473,87 @@ def _consumer_payload(
     return payload
 
 
-def _canonical_php_codec(value: str) -> str:
+def _canonical_php_codec(value: str, context: str) -> str:
     """Canonicalize the codec aliases accepted by the PHP replay consumer."""
 
-    return PHP_CODEC_ALIASES.get(value.lstrip("\\"), value)
+    canonical = PHP_CODEC_ALIASES.get(value.lstrip("\\"), value)
+    if canonical not in PHP_CODEC_NAMES:
+        raise CorpusError(f"{context} declares unsupported payload codec {value!r}")
+    return canonical
+
+
+def _declared_php_codec(
+    value: Mapping[str, Any],
+    field: str,
+    context: str,
+) -> str | None:
+    """Return a validated explicit codec declaration, when present."""
+
+    if field not in value:
+        return None
+    codec = value[field]
+    if not isinstance(codec, str) or codec == "":
+        raise CorpusError(f"{context}.{field} must be a non-empty payload codec")
+    return _canonical_php_codec(codec, f"{context}.{field}")
+
+
+def _looks_like_payload_envelope(value: Any) -> bool:
+    """Identify mappings that ask the PHP runner to resolve encoded payload data."""
+
+    return isinstance(value, Mapping) and any(
+        field in value for field in ("blob", "codec", "external_storage")
+    )
+
+
+def _php_payload_identity(request: Mapping[str, Any], context: str) -> Mapping[str, str]:
+    """Project a value through PHP and preserve its exact decoded PHP type."""
+
+    result = _php_payload_consumer(
+        json.dumps(request, ensure_ascii=False, sort_keys=True),
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown decoder failure"
+        raise CorpusError(f"{context} cannot be decoded by the PHP payload consumer: {detail}")
+    identity = result.stdout.strip()
+    try:
+        base64.b64decode(identity, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise CorpusError(
+            f"{context} produced an invalid PHP payload identity"
+        ) from error
+    return {"php_serialized_base64": identity}
+
+
+@lru_cache(maxsize=None)
+def _php_payload_consumer(request: str) -> subprocess.CompletedProcess[str]:
+    """Invoke the PHP identity oracle once for each distinct codec input."""
+
+    result = subprocess.run(
+        ["php", str(PHP_REPLAY_PAYLOAD_DECODER)],
+        input=request,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result
+
+
+def _decode_php_payload(codec: str, blob: str, context: str) -> Mapping[str, str]:
+    """Decode one raw blob or inline envelope with the official PHP codec."""
+
+    return _php_payload_identity(
+        {"operation": "decode", "codec": codec, "blob": blob},
+        context,
+    )
+
+
+def _canonical_php_value(value: Any, context: str) -> Mapping[str, str]:
+    """Represent an already-decoded JSON fixture value as PHP observes it."""
+
+    return _php_payload_identity(
+        {"operation": "value", "value": value},
+        context,
+    )
 
 
 def _consumer_sequence(
@@ -637,6 +736,7 @@ def _consumer_history(
         payload = _consumer_payload(
             _object(event.get("payload"), f"{event_context}.payload"),
             f"{event_context}.payload",
+            event_type=event_type,
             default_codec=default_codec,
             golden_values=golden_values,
         )
