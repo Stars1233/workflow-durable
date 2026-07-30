@@ -1145,34 +1145,103 @@ exit(0);
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn("duplicate semantic fixtures", result.stderr)
 
-    def test_direct_and_encoded_service_responses_have_one_identity(self) -> None:
-        base = self.official_history_replay_fixture()
-        base["history"][1]["event_type"] = "ServiceCallCompleted"
-        base["history"][1]["payload"] = {
-            "sequence": 7,
-            "response_payload": {"accepted": True},
-        }
-        self.write_json(
-            "tests/Fixtures/V2/ReplayRegression/base.json",
-            base,
+    def test_direct_domain_service_responses_match_encoded_identity(self) -> None:
+        direct_responses = (
+            ("codec", {"codec": "preferred", "accepted": True}),
+            ("blob", {"blob": {"domain": "value"}, "accepted": True}),
+            (
+                "external-storage",
+                {"external_storage": "inline", "accepted": True},
+            ),
         )
+        fixtures = []
+
+        for event_type in ("ServiceCallStarted", "ServiceCallCompleted"):
+            for field, response in direct_responses:
+                fixture = self.official_history_replay_fixture()
+                identity = f"{event_type}-{field}"
+                fixture["id"] = f"direct-service-response-{identity}"
+                direct = json.loads(json.dumps(response))
+                direct["identity"] = identity
+                fixture["history"][1]["event_type"] = event_type
+                fixture["history"][1]["payload"] = {
+                    "sequence": 7,
+                    "response_payload": direct,
+                }
+                path = (
+                    "tests/Fixtures/V2/ReplayRegression/"
+                    f"direct-service-response-{identity}.json"
+                )
+                self.write_json(path, fixture)
+                fixtures.append((fixture, identity))
+
         self.commit_current_as_base()
 
-        duplicate = json.loads(json.dumps(base))
-        duplicate["id"] = "encoded-service-response"
-        duplicate["history"][1]["payload"]["response_payload"] = {
-            "codec": "json",
-            "blob": '{"accepted":true}',
-        }
-        self.write_json(
-            "tests/Fixtures/V2/ReplayRegression/encoded-service-response.json",
-            duplicate,
-        )
+        for fixture, identity in fixtures:
+            duplicate = json.loads(json.dumps(fixture))
+            duplicate["id"] = f"encoded-service-response-{identity}"
+            direct = duplicate["history"][1]["payload"]["response_payload"]
+            duplicate["history"][1]["payload"]["response_payload"] = {
+                "codec": "json",
+                "blob": json.dumps(direct, separators=(",", ":")),
+            }
+            self.write_json(
+                (
+                    "tests/Fixtures/V2/ReplayRegression/"
+                    f"encoded-service-response-{identity}.json"
+                ),
+                duplicate,
+            )
 
         result = self.validate()
 
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn("duplicate semantic fixtures", result.stderr)
+        for _, identity in fixtures:
+            self.assertIn(
+                f"direct-service-response-{identity}.json",
+                result.stderr,
+            )
+            self.assertIn(
+                f"encoded-service-response-{identity}.json",
+                result.stderr,
+            )
+
+    def test_malformed_service_response_envelopes_are_rejected(self) -> None:
+        malformed_values = (
+            (
+                {"codec": "json", "blob": '{"truncated":'},
+                "cannot be decoded by the PHP payload consumer",
+            ),
+            (
+                {"codec": "json", "external_storage": {"key": "payload"}},
+                "not a decodable inline payload envelope",
+            ),
+        )
+
+        for event_type in ("ServiceCallStarted", "ServiceCallCompleted"):
+            for index, (malformed, expected_error) in enumerate(malformed_values):
+                with self.subTest(event_type=event_type, index=index):
+                    fixture = self.official_history_replay_fixture()
+                    fixture["id"] = f"malformed-{event_type}-{index}"
+                    fixture["history"][1]["event_type"] = event_type
+                    fixture["history"][1]["payload"] = {
+                        "sequence": 7,
+                        "response_payload": malformed,
+                    }
+                    path = (
+                        "tests/Fixtures/V2/ReplayRegression/"
+                        "malformed-service-response.json"
+                    )
+                    self.write_json(path, fixture)
+
+                    try:
+                        result = self.validate()
+
+                        self.assertNotEqual(0, result.returncode, result.stdout)
+                        self.assertIn(expected_error, result.stderr)
+                    finally:
+                        (self.root / path).unlink(missing_ok=True)
 
     def test_malformed_payload_envelopes_are_rejected(self) -> None:
         base = self.official_history_replay_fixture()

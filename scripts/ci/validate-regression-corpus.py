@@ -439,7 +439,7 @@ def _consumer_payload(
             field == "response_payload"
             and event_type in {"ServiceCallStarted", "ServiceCallCompleted"}
             and not isinstance(field_value, str)
-            and not _looks_like_payload_envelope(field_value)
+            and not _looks_like_service_response_envelope(field_value)
         ):
             payload[field] = _canonical_php_value(field_value, f"{context}.{field}")
             decoded_fields.add(field)
@@ -508,11 +508,12 @@ def _declared_php_codec(
     return _canonical_php_codec(codec, f"{context}.{field}")
 
 
-def _looks_like_payload_envelope(value: Any) -> bool:
-    """Identify mappings that ask the PHP runner to resolve encoded payload data."""
+def _looks_like_service_response_envelope(value: Any) -> bool:
+    """Match the encoded service-response shapes recognized by the PHP runner."""
 
-    return isinstance(value, Mapping) and any(
-        field in value for field in ("blob", "codec", "external_storage")
+    return isinstance(value, Mapping) and (
+        isinstance(value.get("blob"), str)
+        or isinstance(value.get("external_storage"), Mapping)
     )
 
 

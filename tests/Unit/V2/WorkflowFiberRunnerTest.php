@@ -1530,6 +1530,32 @@ final class WorkflowFiberRunnerTest extends TestCase
         $this->assertSame($responsePayload, $completed->result['response_payload']);
     }
 
+    public function testRunnerPreservesServiceResponseAcrossDirectAndEncodedRepresentations(): void
+    {
+        $responsePayload = [
+            'codec' => 'preferred',
+            'blob' => [
+                'domain' => 'value',
+            ],
+            'external_storage' => 'inline',
+            'accepted' => true,
+        ];
+        $encodedPayload = [
+            'codec' => 'json',
+            'blob' => Serializer::serializeWithCodec('json', $responsePayload),
+        ];
+
+        foreach (['ServiceCallStarted', 'ServiceCallCompleted'] as $eventType) {
+            $fromDirect = $this->runServiceOperationHistory($eventType, $responsePayload);
+            $fromEnvelope = $this->runServiceOperationHistory($eventType, $encodedPayload);
+
+            $this->assertTrue($fromDirect->completed);
+            $this->assertTrue($fromEnvelope->completed);
+            $this->assertSame($responsePayload, $fromDirect->result['response_payload']);
+            $this->assertSame($fromDirect->result, $fromEnvelope->result);
+        }
+    }
+
     public function testRunnerWaitsForStartedServiceOperationWhenAdmissionIsNotWorkflowVisible(): void
     {
         $waiting = WorkflowFiberRunner::forClass(
@@ -1649,6 +1675,44 @@ final class WorkflowFiberRunnerTest extends TestCase
     private function runnerFor(string $workflowClass): WorkflowFiberRunner
     {
         return WorkflowFiberRunner::forClass($workflowClass, 'workflow-1', 'run-1', []);
+    }
+
+    /**
+     * @param array<string, mixed> $responsePayload
+     */
+    private function runServiceOperationHistory(string $eventType, array $responsePayload): WorkflowStep
+    {
+        $status = $eventType === 'ServiceCallCompleted' ? 'completed' : 'started';
+
+        return WorkflowFiberRunner::forClass(
+            WorkerProtocolRunnerServiceOperationWorkflow::class,
+            'workflow-1',
+            'run-1',
+            [],
+            'avro',
+            [[
+                'sequence' => 1,
+                'event_type' => 'WorkflowStarted',
+                'payload' => [],
+                'recorded_at' => '2026-05-12T10:11:12+00:00',
+            ], [
+                'sequence' => 2,
+                'event_type' => $eventType,
+                'payload' => [
+                    'sequence' => 1,
+                    'service_call_id' => 'svc-response-1',
+                    'endpoint_name' => 'payments',
+                    'service_name' => 'PythonPayments',
+                    'operation_name' => 'authorize',
+                    'operation_mode' => 'async',
+                    'wait_for' => 'accepted',
+                    'status' => $status,
+                    'outcome' => $status,
+                    'response_payload' => $responsePayload,
+                ],
+                'recorded_at' => '2026-05-12T10:11:13+00:00',
+            ]],
+        )->step();
     }
 }
 
