@@ -884,7 +884,7 @@ exit(0);
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn("duplicate semantic fixtures", result.stderr)
 
-    def test_alternate_avro_map_orders_cannot_manufacture_replay_growth(
+    def test_alternate_avro_map_orders_grow_replay_evidence(
         self,
     ) -> None:
         wires = self.shared_avro_fixture()["alternate_map_orders"][0]["wire_base64"]
@@ -927,10 +927,76 @@ exit(0);
                 try:
                     result = self.validate()
 
-                    self.assertNotEqual(0, result.returncode, result.stdout)
-                    self.assertIn("duplicate semantic fixtures", result.stderr)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    counts = json.loads(result.stdout)["counts"]["replay"]
+                    self.assertEqual(1, counts["base"])
+                    self.assertEqual(2, counts["current"])
                 finally:
                     (self.root / duplicate_path).unlink(missing_ok=True)
+
+    def test_alternate_json_object_orders_grow_replay_evidence(self) -> None:
+        base = self.official_history_replay_fixture()
+        base["history"][1]["payload"] = {
+            "sequence": 7,
+            "payload_codec": "json",
+            "result": '{"outer":{"left":1,"right":"x"},"tail":"done"}',
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            base,
+        )
+        self.commit_current_as_base()
+
+        changed = json.loads(json.dumps(base))
+        changed["id"] = "alternate-json-object-order"
+        changed["history"][1]["payload"]["result"] = (
+            '{"tail":"done","outer":{"right":"x","left":1}}'
+        )
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/alternate-json-order.json",
+            changed,
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        counts = json.loads(result.stdout)["counts"]["replay"]
+        self.assertEqual(1, counts["base"])
+        self.assertEqual(2, counts["current"])
+
+    def test_alternate_inline_object_orders_grow_replay_evidence(self) -> None:
+        base = self.official_history_replay_fixture()
+        base["history"][1]["event_type"] = "ServiceCallCompleted"
+        base["history"][1]["payload"] = {
+            "sequence": 7,
+            "response_payload": {
+                "outer": {"left": 1, "right": "x"},
+                "tail": "done",
+            },
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            base,
+        )
+        self.commit_current_as_base()
+
+        changed = json.loads(json.dumps(base))
+        changed["id"] = "alternate-inline-object-order"
+        changed["history"][1]["payload"]["response_payload"] = {
+            "tail": "done",
+            "outer": {"right": "x", "left": 1},
+        }
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/alternate-inline-order.json",
+            changed,
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        counts = json.loads(result.stdout)["counts"]["replay"]
+        self.assertEqual(1, counts["base"])
+        self.assertEqual(2, counts["current"])
 
     def test_different_decoded_avro_values_grow_replay_evidence(self) -> None:
         golden = self.shared_avro_fixture()

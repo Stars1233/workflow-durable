@@ -6,8 +6,7 @@ namespace Tests\Unit\V2;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
-use Tests\Fixtures\V2\TestGreetingWorkflow;
-use Workflow\Serializers\Avro;
+use Tests\Fixtures\V2\TestReplayMapOrderWorkflow;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Support\WorkflowFiberRunner;
@@ -88,21 +87,30 @@ final class ReplayRegressionCorpusTest extends TestCase
         }
     }
 
-    public function testAlternateAvroMapOrdersReachTheRunnerAsTheSameValue(): void
+    public function testAlternateAvroMapOrdersRemainObservableToTheRunner(): void
     {
         $golden = json_decode(
             (string) file_get_contents(__DIR__ . '/../../../resources/protocol/avro-value-v1-golden.json'),
             true,
             flags: JSON_THROW_ON_ERROR,
         );
-        $results = [];
+        $expectedResults = [
+            [
+                'top_level_keys' => ['outer', 'tail'],
+                'nested_keys' => ['left', 'right'],
+            ],
+            [
+                'top_level_keys' => ['tail', 'outer'],
+                'nested_keys' => ['right', 'left'],
+            ],
+        ];
 
-        foreach ($golden['alternate_map_orders'][0]['wire_base64'] as $blob) {
+        foreach ($golden['alternate_map_orders'][0]['wire_base64'] as $index => $blob) {
             $step = WorkflowFiberRunner::forClass(
-                TestGreetingWorkflow::class,
+                TestReplayMapOrderWorkflow::class,
                 'alternate-avro-map-order',
                 'alternate-avro-map-order-run',
-                ['Ada'],
+                [],
                 'avro',
                 [[
                     'sequence' => 1,
@@ -121,11 +129,8 @@ final class ReplayRegressionCorpusTest extends TestCase
 
             self::assertTrue($step->completed);
             self::assertSame('complete_workflow', $step->command['type']);
-            self::assertEquals(Avro::unserialize($blob), $step->result['greeting']);
-            $results[] = $step->result;
+            self::assertSame($expectedResults[$index], $step->result);
         }
-
-        self::assertEquals($results[0], $results[1]);
     }
 
     /**

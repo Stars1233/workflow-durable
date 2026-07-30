@@ -509,7 +509,7 @@ def _php_payload_identity(request: Mapping[str, Any], context: str) -> Mapping[s
     """Project a value through PHP and preserve its exact decoded PHP type."""
 
     result = _php_payload_consumer(
-        json.dumps(request, ensure_ascii=False, sort_keys=True),
+        json.dumps(request, ensure_ascii=False),
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown decoder failure"
