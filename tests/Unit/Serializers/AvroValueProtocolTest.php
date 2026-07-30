@@ -66,7 +66,7 @@ final class AvroValueProtocolTest extends TestCase
         }
     }
 
-    public function testSharedTrailingBytesFrameIsRejected(): void
+    public function testSharedMalformedFramesUseCanonicalBase64AndFailAsDeclared(): void
     {
         $fixture = json_decode(
             (string) file_get_contents(__DIR__ . '/../../../resources/protocol/avro-value-v1-golden.json'),
@@ -75,11 +75,28 @@ final class AvroValueProtocolTest extends TestCase
         );
 
         foreach ($fixture['malformed_frames'] as $case) {
+            $wire = $case['wire_base64'];
+            $bytes = base64_decode($wire, true);
+            self::assertIsString($bytes, "{$case['name']} must use valid Base64.");
+            self::assertSame($wire, base64_encode($bytes), "{$case['name']} must use canonical Base64.");
+
+            if ($case['name'] === 'invalid_base64') {
+                self::assertSame('%%%', $bytes, 'JSUl is valid Base64 containing invalid Avro framing bytes.');
+            }
+
             try {
-                Avro::unserialize($case['wire_base64']);
-                self::fail("Expected {$case['name']} to fail.");
+                Avro::unserialize($wire);
+                self::fail("Expected {$case['name']} Avro frame to fail.");
             } catch (CodecDecodeException $exception) {
                 self::assertStringContainsString($case['error'], $exception->getMessage());
+
+                if ($case['name'] === 'invalid_base64') {
+                    self::assertStringContainsString(
+                        'expected Avro single-object magic c301',
+                        $exception->detail,
+                        'JSUl must reach Avro framing validation after Base64 decoding.',
+                    );
+                }
             }
         }
     }
