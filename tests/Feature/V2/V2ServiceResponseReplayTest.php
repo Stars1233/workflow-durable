@@ -93,12 +93,12 @@ final class V2ServiceResponseReplayTest extends TestCase
 
                 $this->runReadyWorkflowTask($run);
 
-                $this->assertSame($payload, $workflow->refresh()->output());
-                $this->assertSame(
+                $this->assertSameJsonObject($payload, $workflow->refresh()->output());
+                $this->assertSameJsonObject(
                     $payload,
                     (new QueryStateReplayer())->query($run->fresh(['historyEvents']), 'currentResponsePayload'),
                 );
-                $this->assertSame($payload, $this->runFiberHistory($eventType, $payload));
+                $this->assertSameJsonObject($payload, $this->runFiberHistory($eventType, $payload));
             }
         }
     }
