@@ -781,6 +781,62 @@ exit(0);
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn("duplicate semantic fixtures", result.stderr)
 
+    def test_inline_payload_envelopes_cannot_manufacture_replay_growth(self) -> None:
+        payload_fields = (
+            ("ActivityCompleted", "result", '"activity-result"', "json"),
+            ("SideEffectRecorded", "result", '{"source":"history"}', "json"),
+            ("SignalReceived", "arguments", '["received-signal"]', "json"),
+            ("SignalApplied", "value", '"applied-signal"', "json"),
+            ("SignalApplied", "arguments", '["applied-arguments"]', "json"),
+            ("UpdateAccepted", "arguments", "[true]", "json"),
+            ("UpdateApplied", "arguments", "[true]", "json"),
+            ("ChildRunCompleted", "output", '"child-output"', "json"),
+            ("ServiceCallStarted", "response_payload", '{"accepted":true}', "json"),
+            ("ServiceCallCompleted", "response_payload", '{"completed":true}', "json"),
+            (
+                "ActivityCompleted",
+                "result",
+                "wwHioz3/VYAiNw4CCnZhbHVlBFQA",
+                "avro",
+            ),
+        )
+
+        for event_type, field, blob, codec in payload_fields:
+            with self.subTest(event_type=event_type, field=field, codec=codec):
+                base = self.official_history_replay_fixture()
+                base["history"][1]["event_type"] = event_type
+                base["history"][1]["payload"] = {
+                    "sequence": 7,
+                    "payload_codec": codec,
+                    field: blob,
+                }
+                self.write_json(
+                    "tests/Fixtures/V2/ReplayRegression/base.json",
+                    base,
+                )
+                self.commit_current_as_base()
+
+                duplicate = json.loads(json.dumps(base))
+                duplicate["id"] = f"inline-envelope-{event_type}-{field}-{codec}"
+                duplicate_payload = duplicate["history"][1]["payload"]
+                duplicate_payload.pop("payload_codec")
+                duplicate_payload[field] = {
+                    "codec": codec,
+                    "blob": blob,
+                }
+                duplicate_path = (
+                    "tests/Fixtures/V2/ReplayRegression/inline-envelope.json"
+                )
+                self.write_json(duplicate_path, duplicate)
+
+                try:
+                    result = self.validate()
+
+                    self.assertNotEqual(0, result.returncode, result.stdout)
+                    self.assertIn("duplicate semantic fixtures", result.stderr)
+                finally:
+                    (self.root / duplicate_path).unlink(missing_ok=True)
+
     def test_ignored_failure_exception_cannot_manufacture_growth(self) -> None:
         self.write_json(
             "tests/Fixtures/V2/GoldenHistory/failure-base.json",

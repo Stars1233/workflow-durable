@@ -6,6 +6,9 @@ namespace Tests\Unit\V2;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use ReflectionMethod;
+use Workflow\Serializers\CodecRegistry;
+use Workflow\Serializers\Serializer;
 use Workflow\V2\Support\WorkflowFiberRunner;
 use Workflow\V2\Support\WorkflowStep;
 use Workflow\V2\Workflow;
@@ -53,6 +56,28 @@ final class ReplayRegressionCorpusTest extends TestCase
         }
 
         $this->assertStepMatches($fixture['expected'], $step, "{$fixture['id']} final outcome");
+    }
+
+    public function testRawBlobsAndInlineEnvelopesReachTheRunnerAsTheSameValue(): void
+    {
+        $decodePayload = new ReflectionMethod(WorkflowFiberRunner::class, 'decodePayload');
+        $expected = [
+            'surface' => 'history',
+            'value' => 42,
+        ];
+
+        foreach (CodecRegistry::universal() as $codec) {
+            $blob = Serializer::serializeWithCodec($codec, $expected);
+
+            $fromRawBlob = $decodePayload->invoke(null, $blob, 'avro', $codec);
+            $fromInlineEnvelope = $decodePayload->invoke(null, [
+                'codec' => $codec,
+                'blob' => $blob,
+            ], 'avro',);
+
+            $this->assertSame($expected, $fromRawBlob, "Raw {$codec} payload mismatch.");
+            $this->assertSame($fromRawBlob, $fromInlineEnvelope, "Inline {$codec} payload envelope mismatch.");
+        }
     }
 
     /**

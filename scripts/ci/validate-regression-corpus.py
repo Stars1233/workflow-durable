@@ -218,6 +218,18 @@ PHP_NUMERIC_STRING = re.compile(
 PHP_INTEGER_STRING = re.compile(r"[+-]?[0-9]+")
 PHP_INT_MIN = -(2**63)
 PHP_INT_MAX = 2**63 - 1
+PHP_REPLAY_DECODED_FIELDS = (
+    "result",
+    "value",
+    "arguments",
+    "output",
+    "response_payload",
+)
+PHP_GOLDEN_VALUE_FIELDS = {"result", "value", "arguments"}
+PHP_CODEC_ALIASES = {
+    "Workflow\\Serializers\\Y": "workflow-serializer-y",
+    "Workflow\\Serializers\\Base64": "workflow-serializer-base64",
+}
 RUNTIME_DEPENDENCY_PATHS = ("vendor",)
 ZERO_COMMIT = re.compile(r"^0+$")
 
@@ -386,30 +398,63 @@ def _consumer_payload(
 
     payload = dict(value)
     decoded_fields: set[str] = set()
-    codec = payload.get("payload_codec", default_codec)
-    for field in ("result", "value", "arguments"):
+    event_codec = payload.get("payload_codec")
+    if not isinstance(event_codec, str) or event_codec == "":
+        event_codec = None
+    for field in PHP_REPLAY_DECODED_FIELDS:
         value_field = f"{field}_value"
-        if golden_values and value_field in payload:
+        if golden_values and field in PHP_GOLDEN_VALUE_FIELDS and value_field in payload:
             payload[field] = payload.pop(value_field)
             decoded_fields.add(field)
             continue
-        if (
-            field not in payload
-            or codec != "json"
-            or not isinstance(payload[field], str)
-        ):
+        if field not in payload:
             continue
-        try:
-            payload[field] = json.loads(payload[field])
-        except json.JSONDecodeError as error:
-            raise CorpusError(
-                f"{context}.{field} is not valid json payload data"
-            ) from error
+
+        field_value = payload[field]
+        envelope_codec = (
+            field_value.get("codec")
+            if isinstance(field_value, Mapping)
+            else None
+        )
+        if not isinstance(envelope_codec, str) or envelope_codec == "":
+            envelope_codec = None
+        codec = _canonical_php_codec(event_codec or envelope_codec or default_codec)
+        blob = (
+            field_value
+            if isinstance(field_value, str)
+            else (
+                field_value.get("blob")
+                if isinstance(field_value, Mapping)
+                and isinstance(field_value.get("blob"), str)
+                else None
+            )
+        )
+        if blob is None:
+            continue
+
+        if codec == "json":
+            if blob == "":
+                payload[field] = None
+            else:
+                try:
+                    payload[field] = json.loads(blob)
+                except json.JSONDecodeError as error:
+                    raise CorpusError(
+                        f"{context}.{field} is not valid json payload data"
+                    ) from error
+        else:
+            payload[field] = {"codec": codec, "blob": blob}
         decoded_fields.add(field)
 
     if decoded_fields:
         payload.pop("payload_codec", None)
     return payload
+
+
+def _canonical_php_codec(value: str) -> str:
+    """Canonicalize the codec aliases accepted by the PHP replay consumer."""
+
+    return PHP_CODEC_ALIASES.get(value.lstrip("\\"), value)
 
 
 def _consumer_sequence(
