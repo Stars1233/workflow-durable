@@ -242,6 +242,75 @@ exit(0);
             ],
         }
 
+    @staticmethod
+    def golden_failure_fixture(
+        *,
+        message: str = "payment declined",
+        code: Any = None,
+        exception: Any = None,
+        expected_message: str | None = None,
+    ) -> dict[str, Any]:
+        failure_payload: dict[str, Any] = {
+            "sequence": 2,
+            "message": message,
+        }
+        if code is not None:
+            failure_payload["code"] = code
+        if exception is not None:
+            failure_payload["exception"] = exception
+        return {
+            "fixture_schema": "durable-workflow.golden-history.v1",
+            "source": {
+                "runtime": "workflow-php",
+                "package": "durable-workflow/workflow",
+                "version": "2.0.0",
+                "worker_protocol_version": "1.0",
+            },
+            "cases": [
+                {
+                    "name": "saga-child-failure",
+                    "family": "saga-compensation",
+                    "scenario": "saga-compensation",
+                    "history": [
+                        {
+                            "event_type": "WorkflowStarted",
+                            "payload": {},
+                        },
+                        {
+                            "event_type": "ActivityCompleted",
+                            "payload": {
+                                "sequence": 1,
+                                "result_value": "inventory-id-456",
+                            },
+                        },
+                        {
+                            "event_type": "ChildRunFailed",
+                            "payload": failure_payload,
+                        },
+                        {
+                            "event_type": "ActivityCompleted",
+                            "payload": {
+                                "sequence": 3,
+                                "result_value": "cancelled-inventory-id-456",
+                            },
+                        },
+                    ],
+                    "expected_state": {
+                        "stage": "compensated",
+                        "name": None,
+                        "greeting": None,
+                        "approved": False,
+                        "version": -1,
+                        "version_result": None,
+                        "reservation_id": "inventory-id-456",
+                        "events": [
+                            f"compensated:{expected_message or message}",
+                        ],
+                    },
+                }
+            ],
+        }
+
     @classmethod
     def official_history_replay_fixture(cls) -> dict[str, Any]:
         replay = cls.replay_fixture(
@@ -282,6 +351,26 @@ exit(0);
             },
             "commands": [{"type": "complete_workflow"}],
         }
+        return replay
+
+    @classmethod
+    def official_command_replay_fixture(cls) -> dict[str, Any]:
+        replay = cls.official_history_replay_fixture()
+        del replay["history"]
+        replay["command_sequence"] = [
+            {
+                "completed": False,
+                "result": None,
+                "commands": [
+                    {
+                        "type": "schedule_activity",
+                        "activity_type": "Tests\\Fixtures\\V2\\TestGreetingActivity",
+                    }
+                ],
+                "resume_with": "Hello, Ada!",
+            },
+            json.loads(json.dumps(replay["expected"])),
+        ]
         return replay
 
     def git(self, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -526,6 +615,320 @@ exit(0);
 
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_numeric_sequence_aliases_cannot_manufacture_replay_growth(self) -> None:
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            self.official_history_replay_fixture(),
+        )
+        self.commit_current_as_base()
+
+        for sequence in ("7", "7.0", "7e0"):
+            with self.subTest(sequence=sequence):
+                duplicate = self.official_history_replay_fixture()
+                duplicate["id"] = f"sequence-alias-{sequence}"
+                duplicate["history"][1]["payload"]["sequence"] = sequence
+                self.write_json(
+                    "tests/Fixtures/V2/ReplayRegression/sequence-alias.json",
+                    duplicate,
+                )
+
+                result = self.validate()
+
+                self.assertNotEqual(0, result.returncode, result.stdout)
+                self.assertIn("duplicate semantic fixtures", result.stderr)
+                (
+                    self.root / "tests/Fixtures/V2/ReplayRegression/sequence-alias.json"
+                ).unlink()
+
+    def test_overflowing_numeric_sequence_cannot_manufacture_growth(self) -> None:
+        base = self.official_history_replay_fixture()
+        base["history"][1]["payload"]["sequence"] = 0
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            base,
+        )
+        self.commit_current_as_base()
+        duplicate = self.official_history_replay_fixture()
+        duplicate["id"] = "overflowing-sequence-alias"
+        duplicate["history"][1]["payload"]["sequence"] = "1e309"
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/overflowing-sequence.json",
+            duplicate,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_ignored_activity_metadata_cannot_manufacture_growth(self) -> None:
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            self.official_history_replay_fixture(),
+        )
+        self.commit_current_as_base()
+
+        variants = (
+            ("payload", "activity_type", "RepresentationOnlyActivity"),
+            ("payload", "corpus_note", "representation only"),
+            ("event", "id", "representation-only-event-id"),
+        )
+        for location, field, value in variants:
+            with self.subTest(location=location, field=field):
+                duplicate = self.official_history_replay_fixture()
+                duplicate["id"] = f"ignored-activity-{field}"
+                target = (
+                    duplicate["history"][1]["payload"]
+                    if location == "payload"
+                    else duplicate["history"][1]
+                )
+                target[field] = value
+                self.write_json(
+                    "tests/Fixtures/V2/ReplayRegression/ignored-metadata.json",
+                    duplicate,
+                )
+
+                result = self.validate()
+
+                self.assertNotEqual(0, result.returncode, result.stdout)
+                self.assertIn("duplicate semantic fixtures", result.stderr)
+                (
+                    self.root
+                    / "tests/Fixtures/V2/ReplayRegression/ignored-metadata.json"
+                ).unlink()
+
+    def test_shadowed_event_namespace_cannot_manufacture_growth(self) -> None:
+        base = self.official_history_replay_fixture()
+        base["history"][0]["payload"]["namespace"] = "effective-namespace"
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            base,
+        )
+        self.commit_current_as_base()
+        duplicate = self.official_history_replay_fixture()
+        duplicate["id"] = "shadowed-event-namespace"
+        duplicate["history"][0]["payload"]["namespace"] = "effective-namespace"
+        duplicate["history"][1]["namespace"] = "representation-only-namespace"
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/shadowed-namespace.json",
+            duplicate,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_effective_namespace_representations_cannot_manufacture_growth(
+        self,
+    ) -> None:
+        base = self.official_history_replay_fixture()
+        base["history"][0]["payload"]["namespace"] = "effective-namespace"
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            base,
+        )
+        self.commit_current_as_base()
+        duplicate = self.official_history_replay_fixture()
+        duplicate["id"] = "event-namespace-fallback"
+        duplicate["history"][0]["namespace"] = "effective-namespace"
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/event-namespace-fallback.json",
+            duplicate,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_expected_command_subset_cannot_manufacture_growth(self) -> None:
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            self.official_history_replay_fixture(),
+        )
+        self.commit_current_as_base()
+        duplicate = self.official_history_replay_fixture()
+        duplicate["id"] = "expected-command-subset-rewrap"
+        duplicate["expected"]["commands"][0]["payload_codec"] = "json"
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/expected-command-subset.json",
+            duplicate,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_command_sequence_subset_cannot_manufacture_growth(self) -> None:
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            self.official_command_replay_fixture(),
+        )
+        self.commit_current_as_base()
+        duplicate = self.official_command_replay_fixture()
+        duplicate["id"] = "command-sequence-subset-rewrap"
+        duplicate["command_sequence"][0]["commands"][0]["payload_codec"] = "json"
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/command-sequence-subset.json",
+            duplicate,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_ignored_failure_exception_cannot_manufacture_growth(self) -> None:
+        self.write_json(
+            "tests/Fixtures/V2/GoldenHistory/failure-base.json",
+            self.golden_failure_fixture(),
+        )
+        self.commit_current_as_base()
+        duplicate = self.golden_failure_fixture(exception="representation only")
+        duplicate["cases"][0]["name"] = "ignored-scalar-exception"
+        self.write_json(
+            "tests/Fixtures/V2/GoldenHistory/ignored-exception.json",
+            duplicate,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_overflowing_failure_code_cannot_manufacture_growth(self) -> None:
+        self.write_json(
+            "tests/Fixtures/V2/GoldenHistory/failure-base.json",
+            self.golden_failure_fixture(),
+        )
+        self.commit_current_as_base()
+        duplicate = self.golden_failure_fixture(code="1e309")
+        duplicate["cases"][0]["name"] = "overflowing-failure-code"
+        self.write_json(
+            "tests/Fixtures/V2/GoldenHistory/overflowing-failure-code.json",
+            duplicate,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("duplicate semantic fixtures", result.stderr)
+
+    def test_failure_alias_precedence_and_invalid_values_cannot_grow_evidence(
+        self,
+    ) -> None:
+        self.write_json(
+            "tests/Fixtures/V2/GoldenHistory/failure-defaults.json",
+            self.golden_failure_fixture(),
+        )
+        structured = self.golden_failure_fixture(
+            message="outer fallback is ignored",
+            exception={
+                "class": "RuntimeException",
+                "type": "",
+                "message": "payment processor unavailable",
+                "code": 17,
+            },
+            expected_message="payment processor unavailable",
+        )
+        structured["cases"][0]["name"] = "structured-child-failure"
+        self.write_json(
+            "tests/Fixtures/V2/GoldenHistory/failure-structured.json",
+            structured,
+        )
+        self.commit_current_as_base()
+
+        variants = []
+        invalid = self.golden_failure_fixture(
+            exception={
+                "class": 123,
+                "type": False,
+                "message": ["not", "a", "message"],
+                "code": "not-an-integer",
+                "corpus_note": "representation only",
+            },
+        )
+        invalid["cases"][0]["name"] = "invalid-exception-values"
+        invalid_payload = invalid["cases"][0]["history"][2]["payload"]
+        invalid_payload.update(
+            {
+                "exception_class": [],
+                "exception_type": 123,
+                "code": "not-an-integer",
+            }
+        )
+        variants.append(("invalid", invalid))
+
+        aliases = json.loads(json.dumps(structured))
+        aliases["cases"][0]["name"] = "shadowed-failure-aliases"
+        aliases["cases"][0]["history"][2]["payload"].update(
+            {
+                "exception_class": "LogicException",
+                "exception_type": "shadowed-type",
+                "message": "shadowed message",
+                "code": 99,
+            }
+        )
+        variants.append(("aliases", aliases))
+
+        for name, duplicate in variants:
+            with self.subTest(name=name):
+                duplicate_path = (
+                    f"tests/Fixtures/V2/GoldenHistory/failure-{name}-duplicate.json"
+                )
+                self.write_json(duplicate_path, duplicate)
+
+                result = self.validate()
+
+                self.assertNotEqual(0, result.returncode, result.stdout)
+                self.assertIn("duplicate semantic fixtures", result.stderr)
+                (self.root / duplicate_path).unlink()
+
+    def test_changed_failure_message_grows_replay_evidence(self) -> None:
+        self.write_json(
+            "tests/Fixtures/V2/GoldenHistory/failure-base.json",
+            self.golden_failure_fixture(),
+        )
+        self.commit_current_as_base()
+        changed = self.golden_failure_fixture(message="payment gateway offline")
+        changed["cases"][0]["name"] = "changed-child-failure"
+        self.write_json(
+            "tests/Fixtures/V2/GoldenHistory/changed-failure.json",
+            changed,
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        counts = json.loads(result.stdout)["counts"]["replay"]
+        self.assertEqual(2, counts["base"])
+        self.assertEqual(3, counts["current"])
+
+    def test_changed_activity_result_grows_replay_evidence(self) -> None:
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            self.official_history_replay_fixture(),
+        )
+        self.commit_current_as_base()
+        changed = self.official_history_replay_fixture()
+        changed["id"] = "changed-activity-result"
+        changed["history"][1]["payload"]["result"] = '"Hello, Grace!"'
+        changed["expected"]["result"]["greeting"] = "Hello, Grace!"
+        changed["expected"]["result"]["events"] = ["activity:Hello, Grace!"]
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/changed-result.json",
+            changed,
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        counts = json.loads(result.stdout)["counts"]["replay"]
+        self.assertEqual(1, counts["base"])
+        self.assertEqual(2, counts["current"])
 
     def test_genuinely_new_replay_behavior_grows_the_corpus(self) -> None:
         fixture = self.replay_fixture(

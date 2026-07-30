@@ -122,6 +122,102 @@ OFFICIAL_BINDING_CONSUMERS = {
         "tests/Unit/V2/ReplayRegressionCorpusTest.php",
     ),
 }
+FAILURE_EVENT_FALLBACK_MESSAGES = {
+    "ActivityFailed": "Activity failed",
+    "ActivityCancelled": "Activity cancelled",
+    "ActivityTimedOut": "Activity timed out",
+    "ChildRunFailed": "Child workflow failed",
+    "ChildRunCancelled": "Child workflow cancelled",
+    "ChildRunTerminated": "Child workflow terminated",
+    "ServiceCallFailed": "Service operation failed.",
+    "ServiceCallCancelled": "Service operation cancelled.",
+}
+REPLAY_EVENT_PAYLOAD_FIELDS = {
+    "WorkflowStarted": {"compatibility", "workflow_type"},
+    "ActivityScheduled": set(),
+    "ActivityStarted": set(),
+    "ActivityHeartbeatRecorded": set(),
+    "ActivityRetryScheduled": set(),
+    "ActivityCompleted": {"payload_codec", "result"},
+    "ActivityFailed": set(),
+    "ActivityCancelled": set(),
+    "ActivityTimedOut": set(),
+    "TimerScheduled": {"timer_kind"},
+    "TimerCancelled": {"timer_kind"},
+    "TimerFired": {"signal_name", "signal_wait_id", "timer_kind"},
+    "ConditionWaitOpened": set(),
+    "ConditionWaitSatisfied": set(),
+    "ConditionWaitTimedOut": set(),
+    "SignalWaitOpened": {"signal_name", "signal_wait_id"},
+    "SignalReceived": {
+        "arguments",
+        "payload_codec",
+        "signal_name",
+        "signal_wait_id",
+    },
+    "SignalApplied": {
+        "arguments",
+        "payload_codec",
+        "signal_name",
+        "signal_wait_id",
+        "value",
+    },
+    "ChildWorkflowScheduled": set(),
+    "ChildRunStarted": set(),
+    "ChildRunCompleted": {"output", "payload_codec"},
+    "ChildRunFailed": set(),
+    "ChildRunCancelled": set(),
+    "ChildRunTerminated": set(),
+    "ServiceCallStarted": {
+        "endpoint_name",
+        "operation_mode",
+        "operation_name",
+        "outcome",
+        "payload_codec",
+        "response_payload",
+        "service_call",
+        "service_call_id",
+        "service_name",
+        "status",
+        "wait_for",
+    },
+    "ServiceCallCompleted": {
+        "endpoint_name",
+        "operation_mode",
+        "operation_name",
+        "outcome",
+        "payload_codec",
+        "response_payload",
+        "service_call",
+        "service_call_id",
+        "service_name",
+        "status",
+        "wait_for",
+    },
+    "ServiceCallFailed": set(),
+    "ServiceCallCancelled": set(),
+    "SideEffectRecorded": {"payload_codec", "result"},
+    "VersionMarkerRecorded": {"change_id", "version"},
+    "SearchAttributesUpserted": set(),
+    "UpdateAccepted": {
+        "arguments",
+        "payload_codec",
+        "update_id",
+        "update_name",
+    },
+    "UpdateApplied": {
+        "arguments",
+        "payload_codec",
+        "update_id",
+        "update_name",
+    },
+}
+PHP_NUMERIC_STRING = re.compile(
+    r"[+-]?(?:(?:[0-9]+(?:\.[0-9]*)?)|(?:\.[0-9]+))(?:[eE][+-]?[0-9]+)?"
+)
+PHP_INTEGER_STRING = re.compile(r"[+-]?[0-9]+")
+PHP_INT_MIN = -(2**63)
+PHP_INT_MAX = 2**63 - 1
 RUNTIME_DEPENDENCY_PATHS = ("vendor",)
 ZERO_COMMIT = re.compile(r"^0+$")
 
@@ -260,6 +356,7 @@ def _replay_semantic(
     *,
     workflow_type: str,
     workflow_input: Any,
+    replay_namespace: str | None,
     history: Any,
     command_sequence: Any,
     expected: Mapping[str, Any],
@@ -267,7 +364,11 @@ def _replay_semantic(
     """Project every replay representation onto consumer-executed values."""
 
     return {
-        "workflow": {"type": workflow_type, "input": workflow_input},
+        "workflow": {
+            "type": workflow_type,
+            "input": workflow_input,
+            "namespace": replay_namespace,
+        },
         "history": history,
         "command_sequence": command_sequence,
         "expected": expected,
@@ -325,13 +426,149 @@ def _consumer_sequence(
         golden_position,
         event.get("sequence"),
     ):
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, int):
-            return value
-        if isinstance(value, str) and value.isnumeric():
-            return int(value)
+        normalized = _php_int_value(value)
+        if normalized is not None:
+            return normalized
     return None
+
+
+def _php_int_value(value: Any) -> int | None:
+    """Match the runner's integer-or-numeric-string coercion."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if PHP_INT_MIN <= value <= PHP_INT_MAX else None
+    if not isinstance(value, str):
+        return None
+    numeric = value.strip()
+    if not PHP_NUMERIC_STRING.fullmatch(numeric):
+        return None
+
+    if PHP_INTEGER_STRING.fullmatch(numeric):
+        negative = numeric.startswith("-")
+        digits = numeric.lstrip("+-").lstrip("0") or "0"
+        limit = str(-PHP_INT_MIN if negative else PHP_INT_MAX)
+        if len(digits) > len(limit) or (len(digits) == len(limit) and digits > limit):
+            return PHP_INT_MIN if negative else PHP_INT_MAX
+        normalized = int(digits)
+        return -normalized if negative else normalized
+
+    parsed_float = float(numeric)
+    if not math.isfinite(parsed_float):
+        return 0
+    normalized = int(parsed_float)
+    return min(max(normalized, PHP_INT_MIN), PHP_INT_MAX)
+
+
+def _php_array(value: Any) -> bool:
+    return isinstance(value, Mapping) or (
+        isinstance(value, Sequence) and not isinstance(value, str | bytes)
+    )
+
+
+def _php_array_items(value: Any) -> Sequence[Any]:
+    if isinstance(value, Mapping):
+        items = value.values()
+    elif _php_array(value):
+        items = value
+    else:
+        return []
+    return [item for item in items if _php_array(item)]
+
+
+def _consumer_failure_payload(
+    event_type: str,
+    payload: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Resolve failure aliases and invalid values exactly as the PHP runner."""
+
+    raw_exception = payload.get("exception")
+    exception = raw_exception if isinstance(raw_exception, Mapping) else {}
+
+    outer_class = payload.get("exception_class")
+    fallback_class = (
+        outer_class
+        if isinstance(outer_class, str) and outer_class != ""
+        else "RuntimeException"
+    )
+    outer_message = payload.get("message")
+    fallback_message = (
+        outer_message
+        if isinstance(outer_message, str) and outer_message != ""
+        else FAILURE_EVENT_FALLBACK_MESSAGES[event_type]
+    )
+    fallback_code = _php_int_value(payload.get("code"))
+    if fallback_code is None:
+        fallback_code = 0
+
+    exception_class = exception.get("class")
+    exception_type = exception.get("type")
+    exception_message = exception.get("message")
+    exception_code = exception.get("code")
+    resolved: dict[str, Any] = {
+        "class": (
+            exception_class if isinstance(exception_class, str) else fallback_class
+        ),
+        "type": (
+            exception_type
+            if isinstance(exception_type, str)
+            else (
+                payload.get("exception_type")
+                if isinstance(payload.get("exception_type"), str)
+                else None
+            )
+        ),
+        "message": (
+            exception_message
+            if isinstance(exception_message, str)
+            else fallback_message
+        ),
+        "code": (
+            exception_code
+            if isinstance(exception_code, int)
+            and not isinstance(exception_code, bool)
+            and PHP_INT_MIN <= exception_code <= PHP_INT_MAX
+            else fallback_code
+        ),
+    }
+
+    optional_string = exception.get("file")
+    if isinstance(optional_string, str) and optional_string != "":
+        resolved["file"] = optional_string
+    optional_int = exception.get("line")
+    if (
+        isinstance(optional_int, int)
+        and not isinstance(optional_int, bool)
+        and PHP_INT_MIN <= optional_int <= PHP_INT_MAX
+    ):
+        resolved["line"] = optional_int
+    for field in ("trace", "properties"):
+        if field in exception:
+            resolved[field] = _php_array_items(exception[field])
+    if "details" in exception:
+        resolved["details"] = exception["details"]
+    if isinstance(exception.get("non_retryable"), bool):
+        resolved["non_retryable"] = exception["non_retryable"]
+    details_codec = exception.get("details_payload_codec")
+    if isinstance(details_codec, str) and details_codec != "":
+        resolved["details_payload_codec"] = details_codec
+    for field in ("diagnostics", "runtime_diagnostics"):
+        if _php_array(exception.get(field)):
+            resolved[field] = exception[field]
+    return resolved
+
+
+def _consumer_event_payload(
+    event_type: str,
+    payload: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Keep only payload values the cold replay consumer observes."""
+
+    if event_type in FAILURE_EVENT_FALLBACK_MESSAGES:
+        return {"exception": _consumer_failure_payload(event_type, payload)}
+    fields = REPLAY_EVENT_PAYLOAD_FIELDS.get(event_type, set())
+    return {field: payload[field] for field in fields if field in payload}
 
 
 def _consumer_history(
@@ -340,11 +577,14 @@ def _consumer_history(
     *,
     default_codec: str,
     golden_values: bool,
-) -> Sequence[Mapping[str, Any]]:
+) -> tuple[Sequence[Mapping[str, Any]], str | None]:
     """Normalize stored history into the values observed by replay execution."""
 
     history = _list(value, context, nonempty=True)
     normalized: list[Mapping[str, Any]] = []
+    found_workflow_started = False
+    started_namespace = None
+    history_namespace = None
     for index, raw_event in enumerate(history):
         event_context = f"{context}[{index}]"
         event = _object(raw_event, event_context)
@@ -355,6 +595,15 @@ def _consumer_history(
             default_codec=default_codec,
             golden_values=golden_values,
         )
+        if event_type == "WorkflowStarted" and not found_workflow_started:
+            found_workflow_started = True
+            raw_namespace = payload.get("namespace")
+            if isinstance(raw_namespace, str) and raw_namespace:
+                started_namespace = raw_namespace
+        if not golden_values and history_namespace is None:
+            raw_namespace = event.get("namespace")
+            if isinstance(raw_namespace, str) and raw_namespace:
+                history_namespace = raw_namespace
         canonical_event: dict[str, Any] = {
             "event_type": event_type,
             "payload": payload,
@@ -364,19 +613,22 @@ def _consumer_history(
             payload,
             golden_position=index + 1 if golden_values else None,
         )
+        payload = dict(payload)
+        payload.pop("sequence", None)
+        payload.pop("workflow_sequence", None)
+        canonical_event["payload"] = _consumer_event_payload(event_type, payload)
         if sequence is not None:
             canonical_event["sequence"] = sequence
 
         # Golden-history event ids, timestamps, and namespaces are ignored when
-        # its consumer creates history rows. Keep replay-only identity-bearing
-        # fields when its consumer can observe them, but omit recorded_at: it is
-        # runtime metadata rather than distinct regression behavior.
+        # its consumer creates history rows. UpdateApplied ids prevent applying
+        # the same event twice; other event ids do not affect replay.
         if not golden_values:
-            for field in ("id", "namespace"):
-                if field in event:
-                    canonical_event[field] = event[field]
+            event_id = event.get("id")
+            if event_type == "UpdateApplied" and isinstance(event_id, str) and event_id:
+                canonical_event["id"] = event_id
         normalized.append(canonical_event)
-    return normalized
+    return normalized, started_namespace or history_namespace
 
 
 def _semantic_codec_value(
@@ -601,19 +853,45 @@ def _replay_expected(
     *,
     allow_resume: bool = False,
 ) -> Mapping[str, Any]:
+    """Return the observable step shape, independent of assertion subsets.
+
+    ReplayRegressionCorpusTest compares each declared command recursively as a
+    subset of the command emitted by WorkflowFiberRunner. Adding another field
+    that already exists on that emitted command strengthens the assertion but
+    does not change execution. Completion, result, command order/type, and
+    resume values are the consumer-observed step identity; command payload
+    values are determined by the workflow/input/history/resume execution
+    inputs already included in the replay semantic.
+    """
+
     expected = _object(value, context)
     required = {"completed", "result", "commands"}
     allowed = required | ({"resume_with"} if allow_resume else set())
     if not required <= set(expected) or not set(expected) <= allowed:
         raise CorpusError(f"{context} must contain exactly {sorted(required)}")
-    _boolean(expected["completed"], f"{context}.completed")
+    completed = _boolean(expected["completed"], f"{context}.completed")
     commands = _list(expected["commands"], f"{context}.commands")
+    canonical_commands = []
     for index, raw_command in enumerate(commands):
         command = _object(raw_command, f"{context}.commands[{index}]")
         if not command:
             raise CorpusError(f"{context}.commands[{index}] must not be empty")
-        _string(command.get("type"), f"{context}.commands[{index}].type")
-    return expected
+        canonical_commands.append(
+            {
+                "type": _string(
+                    command.get("type"),
+                    f"{context}.commands[{index}].type",
+                )
+            }
+        )
+    canonical: dict[str, Any] = {
+        "completed": completed,
+        "result": expected["result"],
+        "commands": canonical_commands,
+    }
+    if "resume_with" in expected:
+        canonical["resume_with"] = expected["resume_with"]
+    return canonical
 
 
 def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None) -> list[Evidence]:
@@ -644,18 +922,20 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
         raise CorpusError(
             f"{path} must include exactly one of history or command_sequence"
         )
-    canonical_history = (
-        _consumer_history(
+    replay_namespace = None
+    if history is not None:
+        canonical_history, replay_namespace = _consumer_history(
             history,
             f"{path}.history",
             default_codec=workflow["payload_codec"],
             golden_values=False,
         )
-        if history is not None
-        else []
-    )
+    else:
+        canonical_history = []
+    canonical_steps = None
     if commands is not None:
         steps = _list(commands, f"{path}.command_sequence", nonempty=True)
+        canonical_steps = []
         for index, raw_step in enumerate(steps):
             step = _object(raw_step, f"{path}.command_sequence[{index}]")
             allowed_step_fields = {"completed", "result", "commands", "resume_with"}
@@ -663,10 +943,12 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
                 raise CorpusError(
                     f"{path}.command_sequence[{index}] contains unsupported fields"
                 )
-            _replay_expected(
-                step,
-                f"{path}.command_sequence[{index}]",
-                allow_resume=True,
+            canonical_steps.append(
+                _replay_expected(
+                    step,
+                    f"{path}.command_sequence[{index}]",
+                    allow_resume=True,
+                )
             )
             if index < len(steps) - 1 and "resume_with" not in step:
                 raise CorpusError(
@@ -686,8 +968,9 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
     semantic = _replay_semantic(
         workflow_type=workflow["type"],
         workflow_input=workflow["arguments"],
+        replay_namespace=replay_namespace,
         history=canonical_history,
-        command_sequence=commands,
+        command_sequence=canonical_steps,
         expected=expected,
     )
     return [
@@ -808,7 +1091,7 @@ def _golden_history_fixture(
         family = _string(case.get("family"), f"{path}.cases[{index}].family")
         if family not in PHP_GOLDEN_HISTORY_FAMILIES:
             raise CorpusError(f"{path}.cases[{index}].family is unsupported")
-        history = _consumer_history(
+        history, replay_namespace = _consumer_history(
             case.get("history"),
             f"{path}.cases[{index}].history",
             default_codec="avro",
@@ -822,6 +1105,7 @@ def _golden_history_fixture(
         semantic = _replay_semantic(
             workflow_type=PHP_GOLDEN_REPLAY_WORKFLOW,
             workflow_input=[scenario],
+            replay_namespace=replay_namespace,
             history=history,
             command_sequence=None,
             expected={
