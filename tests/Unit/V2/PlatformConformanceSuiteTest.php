@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Tests\Unit\V2;
 
 use PHPUnit\Framework\TestCase;
+use ReflectionMethod;
+use RuntimeException;
 use Workflow\V2\Support\PlatformConformanceSuite;
 use Workflow\V2\Support\SurfaceStabilityContract;
 
@@ -199,6 +201,63 @@ final class PlatformConformanceSuiteTest extends TestCase
                 "{$categoryName} has an unknown stability status.",
             );
             $this->assertNotEmpty($category['sources'], "{$categoryName} must declare a source.");
+        }
+    }
+
+    public function testStableFixtureSourcesUseImmutableRevisionAndMatchVendoredBytes(): void
+    {
+        $manifest = PlatformConformanceSuite::manifest();
+        $sourcePrefix = sprintf(
+            'https://raw.githubusercontent.com/durable-workflow/workflow/%s/',
+            PlatformConformanceSuite::FIXTURE_SOURCE_REVISION,
+        );
+
+        foreach ($manifest['fixture_catalog'] as $category) {
+            if ($category['status'] !== PlatformConformanceSuite::CATEGORY_STATUS_STABLE) {
+                continue;
+            }
+
+            foreach ($category['sources'] as $source) {
+                $this->assertStringStartsWith($sourcePrefix, $source['resolver_url']);
+                $this->assertMatchesRegularExpression(
+                    '#^' . preg_quote($sourcePrefix, '#')
+                        . 'resources/conformance/suite-v38/platform-(?:conformance|protocol-specs)/'
+                        . '[a-z0-9.-]+\.(?:json|ya?ml)$#',
+                    $source['resolver_url'],
+                );
+            }
+        }
+    }
+
+    public function testStableFixtureSourceQualificationRejectsMutableAndUnboundSources(): void
+    {
+        $validator = new ReflectionMethod(PlatformConformanceSuite::class, 'assertStableFixtureSources');
+
+        foreach ([
+            'mutable resolver' => static function (array &$source): void {
+                $source['resolver_url'] =
+                    'https://durable-workflow.github.io/platform-conformance/signal-query-runtime-scenarios.json';
+            },
+            'short revision' => static function (array &$source): void {
+                $source['resolver_url'] = str_replace(
+                    PlatformConformanceSuite::FIXTURE_SOURCE_REVISION,
+                    substr(PlatformConformanceSuite::FIXTURE_SOURCE_REVISION, 0, 12),
+                    $source['resolver_url'],
+                );
+            },
+            'incorrect digest' => static function (array &$source): void {
+                $source['sha256'] = 'sha256:' . str_repeat('0', 64);
+            },
+        ] as $case => $mutate) {
+            $manifest = PlatformConformanceSuite::manifest();
+            $mutate($manifest['fixture_catalog']['signal_query_runtime_contract']['sources'][0]);
+
+            try {
+                $validator->invoke(null, $manifest);
+                $this->fail("Stable fixture qualification accepted {$case}.");
+            } catch (RuntimeException) {
+                $this->addToAssertionCount(1);
+            }
         }
     }
 
