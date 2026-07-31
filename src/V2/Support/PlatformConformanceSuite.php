@@ -24,9 +24,9 @@ final class PlatformConformanceSuite
 {
     public const SCHEMA = 'durable-workflow.v2.platform-conformance.suite';
 
-    public const VERSION = 39;
+    public const VERSION = 40;
 
-    public const MIRROR_SHA256 = '45c9ddf5f7557208e2996509b9907d54d9b1efe59bbf9636b882e8335cefa321';
+    public const MIRROR_SHA256 = 'f6104fce69d7d86e2f8a56850536a92e2412a818e3ce5ac5a2a7f9276b73d53a';
 
     public const RUNTIME_SOURCE_REVISION = '75dfd5c869823409ef3d6c4b009a7882159ae9a2';
 
@@ -67,13 +67,15 @@ final class PlatformConformanceSuite
 
     private const RUNTIME_SOURCE_DIRECTORY = self::SUITE_SOURCE_DIRECTORY . 'platform-conformance/';
 
-    private const CLI_FIXTURE_BASE_URL = 'https://durable-workflow.github.io/cli-json-envelopes/v2';
+    private const CLI_FIXTURE_BASE_URL = 'https://durable-workflow.github.io/cli-json-envelopes/v3';
 
-    private const CLI_FIXTURE_DIRECTORY = 'resources/conformance/suite-v39/cli-json-envelopes/';
+    private const CLI_FIXTURE_DIRECTORY = 'resources/conformance/suite-v40/cli-json-envelopes/';
 
-    private const CLI_MANIFEST_ARTIFACT_ID = 'durable-workflow.cli.output-schema-manifest@2';
+    private const CLI_MANIFEST_ARTIFACT_ID = 'durable-workflow.cli.output-schema-manifest@3';
 
     private const CLI_SCHEMA_ARTIFACT_PREFIX = 'durable-workflow.cli.output-schema/';
+
+    private const CLI_SCHEMA_ARTIFACT_SUFFIX = '@3';
 
     /**
      * @var array<string, mixed>|null
@@ -247,7 +249,7 @@ final class PlatformConformanceSuite
             if (
                 $artifactId !== self::CLI_MANIFEST_ARTIFACT_ID
                 && preg_match(
-                    '/\Adurable-workflow\.cli\.output-schema\/[a-z0-9.-]+\.schema\.json@2\z/D',
+                    '/\Adurable-workflow\.cli\.output-schema\/[a-z0-9.-]+\.schema\.json@3\z/D',
                     $artifactId,
                 ) !== 1
             ) {
@@ -286,11 +288,13 @@ final class PlatformConformanceSuite
         if (
             ! is_array($manifest)
             || ($manifest['schema'] ?? null) !== 'durable-workflow.cli.output-schema-manifest'
-            || ($manifest['version'] ?? null) !== 2
+            || ($manifest['version'] ?? null) !== 3
             || ($manifest['artifact_id'] ?? null) !== self::CLI_MANIFEST_ARTIFACT_ID
             || ($manifest['resolver_url'] ?? null) !== $manifestUrl
             || ! is_array($manifest['commands'] ?? null)
             || $manifest['commands'] === []
+            || ! is_array($manifest['jsonl_commands'] ?? null)
+            || $manifest['jsonl_commands'] === []
         ) {
             throw new RuntimeException('The vendored CLI output-schema manifest identity is invalid.');
         }
@@ -298,10 +302,9 @@ final class PlatformConformanceSuite
         $expectedClosureUrls = [
             $manifestUrl => true,
         ];
-        foreach ($manifest['commands'] as $command => $entry) {
-            if (! is_string($command) || ! is_array($entry)) {
-                throw new RuntimeException('The CLI output-schema manifest contains an invalid command mapping.');
-            }
+        foreach (self::cliManifestMappings($manifest) as $mapping) {
+            $command = $mapping['command'];
+            $entry = $mapping['entry'];
 
             $schemaPath = $entry['schema'] ?? null;
             if (
@@ -325,7 +328,7 @@ final class PlatformConformanceSuite
             }
 
             $source = $sourcesByUrl[$resolverUrl] ?? null;
-            $expectedArtifactId = self::CLI_SCHEMA_ARTIFACT_PREFIX . $filename . '@2';
+            $expectedArtifactId = self::CLI_SCHEMA_ARTIFACT_PREFIX . $filename . self::CLI_SCHEMA_ARTIFACT_SUFFIX;
             if (
                 ! is_array($source)
                 || ($source['artifact_id'] ?? null) !== $expectedArtifactId
@@ -357,6 +360,10 @@ final class PlatformConformanceSuite
                 throw new RuntimeException("Vendored CLI output schema [{$filename}] has an invalid identity.");
             }
 
+            if ($mapping['jsonl']) {
+                self::assertCliJsonlRecordSchema($command, $entry, $schema, $sourcesByUrl);
+            }
+
             $expectedClosureUrls[$resolverUrl] = true;
         }
 
@@ -381,6 +388,116 @@ final class PlatformConformanceSuite
                     'The CLI JSON envelope suite sources do not exactly match the manifest dependency closure.'
                 );
             }
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $manifest
+     * @return list<array{command: string, entry: array<string, mixed>, jsonl: bool}>
+     */
+    private static function cliManifestMappings(array $manifest): array
+    {
+        $commands = $manifest['commands'];
+        $jsonlCommands = $manifest['jsonl_commands'];
+        $mappings = [];
+
+        foreach ($commands as $command => $entry) {
+            if (! is_string($command) || ! is_array($entry)) {
+                throw new RuntimeException('The CLI output-schema manifest contains an invalid JSON command mapping.');
+            }
+
+            $mappings[] = [
+                'command' => $command,
+                'entry' => $entry,
+                'jsonl' => false,
+            ];
+        }
+
+        foreach ($jsonlCommands as $command => $entry) {
+            if (
+                ! is_string($command)
+                || ! is_array($entry)
+                || ! isset($commands[$command])
+                || ($entry['output'] ?? null) !== '--output=jsonl'
+                || ! is_string($entry['stream_items_from'] ?? null)
+                || trim($entry['stream_items_from']) === ''
+            ) {
+                throw new RuntimeException('The CLI output-schema manifest contains an invalid JSONL command mapping.');
+            }
+
+            $mappings[] = [
+                'command' => $command,
+                'entry' => $entry,
+                'jsonl' => true,
+            ];
+        }
+
+        return $mappings;
+    }
+
+    /**
+     * @param  array<string, mixed>  $entry
+     * @param  array<string, mixed>  $schema
+     * @param  array<string, array<string, mixed>>  $sourcesByUrl
+     */
+    private static function assertCliJsonlRecordSchema(
+        string $command,
+        array $entry,
+        array $schema,
+        array $sourcesByUrl,
+    ): void {
+        $reference = $schema['$ref'] ?? null;
+        if (
+            ! is_string($reference)
+            || preg_match(
+                '/\A([a-z0-9.-]+\.schema\.json)#\/properties\/([a-z_]+)\/items\z/D',
+                $reference,
+                $matches,
+            ) !== 1
+            || ($entry['stream_items_from'] ?? null) !== $matches[2]
+        ) {
+            throw new RuntimeException(
+                "CLI JSONL command [{$command}] does not bind its emitted envelope item schema."
+            );
+        }
+
+        $referencedFilename = $matches[1];
+        $referencedUrl = self::CLI_FIXTURE_BASE_URL . '/schemas/' . $referencedFilename;
+        $referencedSource = $sourcesByUrl[$referencedUrl] ?? null;
+        $referencedArtifactId = self::CLI_SCHEMA_ARTIFACT_PREFIX
+            . $referencedFilename
+            . self::CLI_SCHEMA_ARTIFACT_SUFFIX;
+        if (
+            ! is_array($referencedSource)
+            || ($referencedSource['artifact_id'] ?? null) !== $referencedArtifactId
+        ) {
+            throw new RuntimeException("CLI JSONL command [{$command}] is missing its referenced envelope schema.");
+        }
+
+        $referencedPath = self::localFixtureSourcePath($referencedArtifactId, $referencedUrl);
+        $referencedJson = file_get_contents($referencedPath);
+        if ($referencedJson === false) {
+            throw new RuntimeException("CLI JSONL command [{$command}] referenced envelope schema is missing.");
+        }
+
+        try {
+            /** @var mixed $referencedSchema */
+            $referencedSchema = json_decode($referencedJson, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            throw new RuntimeException(
+                "CLI JSONL command [{$command}] referenced envelope schema is invalid.",
+                0,
+                $exception,
+            );
+        }
+
+        $itemSchema = is_array($referencedSchema)
+            ? ($referencedSchema['properties'][$matches[2]]['items'] ?? null)
+            : null;
+        if (! is_array($itemSchema) || ($itemSchema['type'] ?? null) !== 'object') {
+            throw new RuntimeException(
+                "CLI JSONL command [{$command}] referenced envelope item must describe an object."
+            );
         }
     }
 
@@ -774,9 +891,12 @@ final class PlatformConformanceSuite
         }
 
         $targetPath = implode('/', $segments);
-        if (! str_starts_with($targetPath, self::PROTOCOL_SPEC_DIRECTORY)) {
+        $referenceDirectory = str_starts_with($sourcePath, self::CLI_FIXTURE_DIRECTORY)
+            ? self::CLI_FIXTURE_DIRECTORY
+            : self::PROTOCOL_SPEC_DIRECTORY;
+        if (! str_starts_with($targetPath, $referenceDirectory)) {
             throw new RuntimeException(
-                "Stable source [{$artifactId}] local reference [{$referencePath}] escapes the suite-v38 protocol directory."
+                "Stable source [{$artifactId}] local reference [{$referencePath}] escapes its retained directory."
             );
         }
 
@@ -895,9 +1015,9 @@ final class PlatformConformanceSuite
             $relativePath = self::PROTOCOL_SPEC_DIRECTORY . $filename;
         } elseif (
             ($url['host'] ?? null) === 'durable-workflow.github.io'
-            && str_starts_with($url['path'], '/cli-json-envelopes/v2/')
+            && str_starts_with($url['path'], '/cli-json-envelopes/v3/')
         ) {
-            $filename = substr($url['path'], strlen('/cli-json-envelopes/v2/'));
+            $filename = substr($url['path'], strlen('/cli-json-envelopes/v3/'));
             $relativePath = self::CLI_FIXTURE_DIRECTORY . $filename;
 
             if (

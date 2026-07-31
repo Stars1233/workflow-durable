@@ -2,11 +2,12 @@
 
 ## Unreleased
 
-- Platform conformance suite version 39 publishes the revision-bound CLI
-  output-schema manifest and its complete per-command JSON envelope schema
-  closure with HTTPS identities and SHA-256 byte bindings.
-- Advanced the Workflow package source to `2.0.0-rc.11` for the suite version
-  39 authority. The aggregate recommended product tuple remains RC5 until
+- Platform conformance suite version 40 publishes the revision-bound CLI
+  output-schema manifest and its complete JSON envelope plus JSONL record
+  schema closure with HTTPS identities and SHA-256 byte bindings. The
+  suite-39 revision remains retained with its original bytes.
+- Advanced the Workflow package source to `2.0.0-rc.12` for the suite version
+  40 authority. The aggregate recommended product tuple remains RC5 until
   independently published release-candidate artifacts pass exact-current
   qualification.
 - Historical command-contract gaps remain visible in operator metrics without

@@ -158,7 +158,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $authority = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
 
         $this->assertSame($authority, PlatformConformanceSuite::manifest());
-        $this->assertSame(39, $authority['version']);
+        $this->assertSame(40, $authority['version']);
         $this->assertSame(PlatformConformanceSuite::VERSION, $authority['version']);
         $this->assertSame(PlatformConformanceSuite::SCHEMA, $authority['schema']);
         $this->assertSame(SurfaceStabilityContract::SCHEMA, $authority['surface_stability_authority']);
@@ -225,10 +225,10 @@ final class PlatformConformanceSuiteTest extends TestCase
             foreach ($category['sources'] as $source) {
                 if (str_starts_with(
                     $source['resolver_url'],
-                    'https://durable-workflow.github.io/cli-json-envelopes/v2/',
+                    'https://durable-workflow.github.io/cli-json-envelopes/v3/',
                 )) {
                     $this->assertMatchesRegularExpression(
-                        '#^https://durable-workflow\.github\.io/cli-json-envelopes/v2/'
+                        '#^https://durable-workflow\.github\.io/cli-json-envelopes/v3/'
                             . '(?:manifest\.json|schemas/[a-z0-9.-]+\.schema\.json)$#',
                         $source['resolver_url'],
                     );
@@ -256,7 +256,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $manifestSource = array_values(array_filter(
             $category['sources'],
             static fn (array $source): bool =>
-                $source['artifact_id'] === 'durable-workflow.cli.output-schema-manifest@2',
+                $source['artifact_id'] === 'durable-workflow.cli.output-schema-manifest@3',
         ));
         $schemaSources = array_values(array_filter(
             $category['sources'],
@@ -265,18 +265,23 @@ final class PlatformConformanceSuiteTest extends TestCase
         ));
 
         $this->assertCount(1, $manifestSource);
-        $this->assertCount(51, $schemaSources);
+        $this->assertCount(61, $schemaSources);
 
         $publishedManifest = json_decode(
             file_get_contents(
                 dirname(__DIR__, 3)
-                    . '/resources/conformance/suite-v39/cli-json-envelopes/manifest.json',
+                    . '/resources/conformance/suite-v40/cli-json-envelopes/manifest.json',
             ),
             true,
             512,
             JSON_THROW_ON_ERROR,
         );
         $this->assertCount(79, $publishedManifest['commands']);
+        $this->assertCount(12, $publishedManifest['jsonl_commands']);
+        $this->assertSame(
+            ['--output=jsonl'],
+            array_values(array_unique(array_column($publishedManifest['jsonl_commands'], 'output'))),
+        );
 
         $validator = new ReflectionMethod(PlatformConformanceSuite::class, 'assertCliJsonEnvelopeClosure');
         $validator->invoke(null, $manifest);
@@ -288,11 +293,11 @@ final class PlatformConformanceSuiteTest extends TestCase
         $validator = new ReflectionMethod(PlatformConformanceSuite::class, 'assertCliJsonEnvelopeClosure');
 
         foreach ([
-            'missing schema' => static function (array &$manifest): void {
+            'missing JSONL schema' => static function (array &$manifest): void {
                 $manifest['fixture_catalog']['cli_json_envelopes']['sources'] = array_values(array_filter(
                     $manifest['fixture_catalog']['cli_json_envelopes']['sources'],
                     static fn (array $source): bool =>
-                        ! str_contains($source['artifact_id'], 'workflow-start.schema.json'),
+                        ! str_contains($source['artifact_id'], 'workflow-list-record.schema.json'),
                 ));
             },
             'incorrect schema digest' => static function (array &$manifest): void {
@@ -305,7 +310,7 @@ final class PlatformConformanceSuiteTest extends TestCase
             },
             'mutable manifest resolver' => static function (array &$manifest): void {
                 foreach ($manifest['fixture_catalog']['cli_json_envelopes']['sources'] as &$source) {
-                    if ($source['artifact_id'] === 'durable-workflow.cli.output-schema-manifest@2') {
+                    if ($source['artifact_id'] === 'durable-workflow.cli.output-schema-manifest@3') {
                         $source['resolver_url'] =
                             'https://durable-workflow.github.io/cli-json-envelopes/current/manifest.json';
                     }
@@ -675,7 +680,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $suiteManifest = PlatformConformanceSuite::manifest();
         $contracts = $suiteManifest['fixture_catalog']['signal_query_runtime_contract']['required_scenario_contracts'];
 
-        $this->assertSame('2.0.0-rc.11', $workflowSourceRelease);
+        $this->assertSame('2.0.0-rc.12', $workflowSourceRelease);
 
         foreach ($sdkCompatibility as $sdk) {
             $this->assertSame('2.0.0-rc.5', $sdk['release_line']);
