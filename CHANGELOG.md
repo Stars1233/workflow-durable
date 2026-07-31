@@ -4,8 +4,9 @@
 
 - Platform conformance suite version 38 replaces repository-relative stable
   fixture sources with version-bound public artifact identifiers, deterministic
-  HTTPS resolvers, and SHA-256 byte bindings.
-- Advanced the Workflow package source to `2.0.0-rc.9` for the suite version
+  HTTPS resolvers, SHA-256 byte bindings, and qualified local-reference closure
+  for its JSON Schema, OpenAPI, and AsyncAPI sources.
+- Advanced the Workflow package source to `2.0.0-rc.10` for the suite version
   38 authority. The aggregate recommended product tuple remains RC5 until
   independently published release-candidate artifacts pass exact-current
   qualification.

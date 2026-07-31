@@ -6,6 +6,8 @@ namespace Workflow\V2\Support;
 
 use JsonException;
 use RuntimeException;
+use Symfony\Component\Yaml\Exception\ParseException;
+use Symfony\Component\Yaml\Yaml;
 
 /**
  * Canonical, machine-readable mirror of the public platform conformance suite.
@@ -24,9 +26,13 @@ final class PlatformConformanceSuite
 
     public const VERSION = 38;
 
-    public const MIRROR_SHA256 = 'b577595319219280fbc8e460ba42790363ab63f78d4eec1ce1cf0b9846562db9';
+    public const MIRROR_SHA256 = 'a67e781c4d681ebaffb2f64565828a67e39f960a16bfdf8f27efe2fe37445026';
 
-    public const FIXTURE_SOURCE_REVISION = 'c600505a0c39b2b2220b2f2426053315aa61f1f2';
+    public const RUNTIME_SOURCE_REVISION = '75dfd5c869823409ef3d6c4b009a7882159ae9a2';
+
+    public const FIXTURE_SOURCE_REVISION = self::RUNTIME_SOURCE_REVISION;
+
+    public const PROTOCOL_SOURCE_REVISION = '91bde245162b61d371feeef5648a4befae8d755a';
 
     public const RESULT_SCHEMA = 'durable-workflow.v2.platform-conformance.result';
 
@@ -54,6 +60,12 @@ final class PlatformConformanceSuite
         self::CONFORMANCE_LEVEL_PROVISIONAL,
         self::CONFORMANCE_LEVEL_NONCONFORMING,
     ];
+
+    private const SUITE_SOURCE_DIRECTORY = 'resources/conformance/suite-v38/';
+
+    private const PROTOCOL_SPEC_DIRECTORY = self::SUITE_SOURCE_DIRECTORY . 'platform-protocol-specs/';
+
+    private const RUNTIME_SOURCE_DIRECTORY = self::SUITE_SOURCE_DIRECTORY . 'platform-conformance/';
 
     /**
      * @var array<string, mixed>|null
@@ -96,6 +108,7 @@ final class PlatformConformanceSuite
         }
 
         self::assertStableFixtureSources($decoded);
+        self::assertStableSourceReferenceClosure($decoded);
 
         self::$manifest = $decoded;
 
@@ -186,8 +199,166 @@ final class PlatformConformanceSuite
 
     private static function localFixtureSourcePath(string $artifactId, string $resolverUrl): string
     {
+        $relativePath = self::relativeFixtureSourcePath($artifactId, $resolverUrl);
+
+        $sourcePath = dirname(__DIR__, 3) . '/' . $relativePath;
+        if (! is_file($sourcePath)) {
+            throw new RuntimeException("Vendored stable fixture source [{$artifactId}] is missing.");
+        }
+
+        return $sourcePath;
+    }
+
+    /**
+     * @param  array<string, mixed>  $manifest
+     */
+    private static function assertStableSourceReferenceClosure(array $manifest): void
+    {
+        $stableSources = self::stableReferenceSources($manifest);
+        $boundSources = $stableSources + self::sourceDependencies($manifest);
+
+        /** @var array<string, array<string, mixed>> $parsedDocuments */
+        $parsedDocuments = [];
+
+        foreach ($stableSources as $sourcePath => $source) {
+            if (! self::isReferenceDocument($sourcePath)) {
+                continue;
+            }
+
+            /** @var array<string, bool> $visited */
+            $visited = [];
+            self::assertDocumentReferenceClosure(
+                $sourcePath,
+                $source['artifact_id'],
+                $boundSources,
+                $visited,
+                $parsedDocuments,
+            );
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $manifest
+     * @return array<string, array{artifact_id: string, resolver_url: string, source_path: string}>
+     */
+    private static function stableReferenceSources(array $manifest): array
+    {
+        $sources = [];
+
+        foreach ($manifest['fixture_catalog'] as $category) {
+            if (! is_array($category) || ($category['status'] ?? null) !== self::CATEGORY_STATUS_STABLE) {
+                continue;
+            }
+
+            foreach ($category['sources'] as $source) {
+                if (! is_array($source)) {
+                    continue;
+                }
+
+                $artifactId = $source['artifact_id'];
+                $resolverUrl = $source['resolver_url'];
+                $sourcePath = self::relativeFixtureSourcePath($artifactId, $resolverUrl);
+
+                if (isset($sources[$sourcePath])) {
+                    throw new RuntimeException(
+                        "Stable fixture source [{$artifactId}] duplicates the bound path [{$sourcePath}]."
+                    );
+                }
+
+                $sources[$sourcePath] = [
+                    'artifact_id' => $artifactId,
+                    'resolver_url' => $resolverUrl,
+                    'source_path' => $sourcePath,
+                ];
+            }
+        }
+
+        return $sources;
+    }
+
+    /**
+     * @param  array<string, mixed>  $manifest
+     * @return array<string, array{artifact_id: string, resolver_url: string, source_path: string}>
+     */
+    private static function sourceDependencies(array $manifest): array
+    {
+        $declaredDependencies = $manifest['source_dependencies'] ?? null;
+        if (! is_array($declaredDependencies) || $declaredDependencies === []) {
+            throw new RuntimeException('Platform conformance suite source dependencies are missing.');
+        }
+
+        $dependencies = [];
+
+        foreach ($declaredDependencies as $filename => $dependency) {
+            if (
+                ! is_string($filename)
+                || preg_match('/\A[a-z0-9.-]+\.schema\.json\z/D', $filename) !== 1
+                || ! is_array($dependency)
+            ) {
+                throw new RuntimeException('Platform conformance suite has an invalid source dependency.');
+            }
+
+            $artifactId = $dependency['artifact_id'] ?? null;
+            if (! is_string($artifactId) || trim($artifactId) === '') {
+                throw new RuntimeException(
+                    "Stable source dependency [{$filename}] must declare an artifact identity."
+                );
+            }
+
+            $sourcePath = $dependency['source_path'] ?? null;
+            $expectedSourcePath = self::PROTOCOL_SPEC_DIRECTORY . $filename;
+            if (! is_string($sourcePath) || $sourcePath !== $expectedSourcePath) {
+                throw new RuntimeException(
+                    "Stable source dependency [{$artifactId}] must stay inside the suite-v38 protocol directory."
+                );
+            }
+
+            $resolverUrl = $dependency['resolver_url'] ?? null;
+            if (! is_string($resolverUrl)) {
+                throw new RuntimeException(
+                    "Stable source dependency [{$artifactId}] must declare an immutable resolver URL."
+                );
+            }
+
+            self::assertImmutableDependencyResolver($artifactId, $filename, $resolverUrl);
+
+            $absolutePath = dirname(__DIR__, 3) . '/' . $sourcePath;
+            if (! is_file($absolutePath)) {
+                throw new RuntimeException("Vendored stable source dependency [{$artifactId}] is missing.");
+            }
+
+            $declaredDigest = $dependency['sha256'] ?? null;
+            if (! is_string($declaredDigest) || preg_match('/\Asha256:[0-9a-f]{64}\z/D', $declaredDigest) !== 1) {
+                throw new RuntimeException(
+                    "Stable source dependency [{$artifactId}] must declare a SHA-256 byte binding."
+                );
+            }
+
+            $actualDigest = hash_file('sha256', $absolutePath);
+            if ($actualDigest === false || ! hash_equals($declaredDigest, 'sha256:' . $actualDigest)) {
+                throw new RuntimeException(
+                    "Stable source dependency [{$artifactId}] does not match its declared SHA-256 byte binding."
+                );
+            }
+
+            $dependencies[$sourcePath] = [
+                'artifact_id' => $artifactId,
+                'resolver_url' => $resolverUrl,
+                'source_path' => $sourcePath,
+            ];
+        }
+
+        return $dependencies;
+    }
+
+    private static function assertImmutableDependencyResolver(
+        string $artifactId,
+        string $filename,
+        string $resolverUrl,
+    ): void {
         $url = parse_url($resolverUrl);
-        $expectedPrefix = '/durable-workflow/workflow/' . self::FIXTURE_SOURCE_REVISION . '/';
+        $expectedPath = '/durable-workflow/durable-workflow.github.io/' . self::PROTOCOL_SOURCE_REVISION
+            . '/static/platform-protocol-specs/' . $filename;
 
         if (
             ! is_array($url)
@@ -200,17 +371,359 @@ final class PlatformConformanceSuite
             || isset($url['fragment'])
             || ! isset($url['path'])
             || ! is_string($url['path'])
-            || ! str_starts_with($url['path'], $expectedPrefix)
+            || $url['path'] !== $expectedPath
+        ) {
+            throw new RuntimeException(
+                "Stable source dependency [{$artifactId}] must use an immutable raw GitHub resolver."
+            );
+        }
+    }
+
+    /**
+     * @param  array<string, array{artifact_id: string, resolver_url: string, source_path: string}>  $boundSources
+     * @param  array<string, bool>  $visited
+     * @param  array<string, array<string, mixed>>  $parsedDocuments
+     */
+    private static function assertDocumentReferenceClosure(
+        string $sourcePath,
+        string $artifactId,
+        array $boundSources,
+        array &$visited,
+        array &$parsedDocuments,
+    ): void {
+        if (isset($visited[$sourcePath])) {
+            return;
+        }
+
+        $visited[$sourcePath] = true;
+        $document = self::parseReferenceDocument($sourcePath, $artifactId, $parsedDocuments);
+
+        foreach (self::referencesIn($document, $artifactId) as $reference) {
+            [$targetPath, $fragment] = self::referenceTarget($sourcePath, $artifactId, $reference, $boundSources);
+
+            $target = $boundSources[$targetPath] ?? null;
+            if ($target === null) {
+                throw new RuntimeException(
+                    "Stable source [{$artifactId}] references an unbound or missing local dependency [{$targetPath}]."
+                );
+            }
+
+            $targetDocument = self::parseReferenceDocument($targetPath, $target['artifact_id'], $parsedDocuments);
+            self::assertReferenceFragmentExists($targetDocument, $fragment, $artifactId, $reference);
+
+            self::assertDocumentReferenceClosure(
+                $targetPath,
+                $target['artifact_id'],
+                $boundSources,
+                $visited,
+                $parsedDocuments,
+            );
+        }
+    }
+
+    private static function isReferenceDocument(string $sourcePath): bool
+    {
+        return preg_match('/\.(?:schema\.json|openapi\.ya?ml|asyncapi\.ya?ml)\z/D', $sourcePath) === 1;
+    }
+
+    /**
+     * @param  array<string, array<string, mixed>>  $parsedDocuments
+     * @return array<string, mixed>
+     */
+    private static function parseReferenceDocument(
+        string $sourcePath,
+        string $artifactId,
+        array &$parsedDocuments,
+    ): array {
+        if (isset($parsedDocuments[$sourcePath])) {
+            return $parsedDocuments[$sourcePath];
+        }
+
+        if (! self::isReferenceDocument($sourcePath)) {
+            throw new RuntimeException(
+                "Stable source [{$artifactId}] references an unsupported document type [{$sourcePath}]."
+            );
+        }
+
+        $absolutePath = dirname(__DIR__, 3) . '/' . $sourcePath;
+        $contents = file_get_contents($absolutePath);
+        if ($contents === false) {
+            throw new RuntimeException("Stable source reference document [{$artifactId}] is missing.");
+        }
+
+        try {
+            /** @var mixed $parsed */
+            $parsed = str_ends_with($sourcePath, '.json')
+                ? json_decode($contents, true, 512, JSON_THROW_ON_ERROR)
+                : Yaml::parse($contents);
+        } catch (JsonException|ParseException $exception) {
+            throw new RuntimeException(
+                "Stable source reference document [{$artifactId}] cannot be parsed.",
+                0,
+                $exception,
+            );
+        }
+
+        if (! is_array($parsed)) {
+            throw new RuntimeException("Stable source reference document [{$artifactId}] must contain an object.");
+        }
+
+        return $parsedDocuments[$sourcePath] = $parsed;
+    }
+
+    /**
+     * @param  array<string, mixed>  $document
+     * @return array<int, string>
+     */
+    private static function referencesIn(array $document, string $artifactId): array
+    {
+        $references = [];
+        self::collectReferences($document, $artifactId, $references);
+
+        return array_values(array_unique($references));
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $node
+     * @param  array<int, string>  $references
+     */
+    private static function collectReferences(array $node, string $artifactId, array &$references): void
+    {
+        foreach ($node as $key => $value) {
+            if ($key === '$ref') {
+                if (! is_string($value) || trim($value) === '') {
+                    throw new RuntimeException("Stable source [{$artifactId}] contains an invalid reference.");
+                }
+
+                $references[] = $value;
+
+                continue;
+            }
+
+            if (is_array($value)) {
+                self::collectReferences($value, $artifactId, $references);
+            }
+        }
+    }
+
+    /**
+     * @param  array<string, array{artifact_id: string, resolver_url: string, source_path: string}>  $boundSources
+     * @return array{string, string}
+     */
+    private static function referenceTarget(
+        string $sourcePath,
+        string $artifactId,
+        string $reference,
+        array $boundSources,
+    ): array {
+        [$referencePath, $fragment] = array_pad(explode('#', $reference, 2), 2, '');
+
+        if ($referencePath === '') {
+            return [$sourcePath, $fragment];
+        }
+
+        $url = parse_url($referencePath);
+        if (is_array($url) && isset($url['scheme'])) {
+            self::assertImmutableReferenceUrl($artifactId, $referencePath);
+
+            foreach ($boundSources as $boundSource) {
+                if ($boundSource['resolver_url'] === $referencePath) {
+                    return [$boundSource['source_path'], $fragment];
+                }
+            }
+
+            throw new RuntimeException(
+                "Stable source [{$artifactId}] references an unbound immutable source [{$referencePath}]."
+            );
+        }
+
+        return [self::localReferencePath($sourcePath, $artifactId, $referencePath), $fragment];
+    }
+
+    private static function assertImmutableReferenceUrl(string $artifactId, string $referenceUrl): void
+    {
+        $url = parse_url($referenceUrl);
+
+        if (
+            ! is_array($url)
+            || ($url['scheme'] ?? null) !== 'https'
+            || ($url['host'] ?? null) !== 'raw.githubusercontent.com'
+            || isset($url['user'])
+            || isset($url['pass'])
+            || isset($url['port'])
+            || isset($url['query'])
+            || ! isset($url['path'])
+            || ! is_string($url['path'])
+            || preg_match(
+                '/\A\/durable-workflow\/[a-z0-9.-]+\/[0-9a-f]{40}\/[a-z0-9.\/-]+\z/D',
+                $url['path'],
+            ) !== 1
+        ) {
+            throw new RuntimeException(
+                "Stable source [{$artifactId}] references a mutable or non-HTTPS source [{$referenceUrl}]."
+            );
+        }
+    }
+
+    private static function localReferencePath(
+        string $sourcePath,
+        string $artifactId,
+        string $referencePath,
+    ): string {
+        $decodedPath = rawurldecode($referencePath);
+        if (
+            $decodedPath === ''
+            || str_starts_with($decodedPath, '/')
+            || str_contains($decodedPath, '\\')
+            || str_contains($decodedPath, '?')
+            || str_contains($decodedPath, "\0")
+        ) {
+            throw new RuntimeException(
+                "Stable source [{$artifactId}] contains an invalid local reference [{$referencePath}]."
+            );
+        }
+
+        $segments = [];
+        foreach (explode('/', dirname($sourcePath) . '/' . $decodedPath) as $segment) {
+            if ($segment === '' || $segment === '.') {
+                continue;
+            }
+
+            if ($segment === '..') {
+                array_pop($segments);
+
+                continue;
+            }
+
+            $segments[] = $segment;
+        }
+
+        $targetPath = implode('/', $segments);
+        if (! str_starts_with($targetPath, self::PROTOCOL_SPEC_DIRECTORY)) {
+            throw new RuntimeException(
+                "Stable source [{$artifactId}] local reference [{$referencePath}] escapes the suite-v38 protocol directory."
+            );
+        }
+
+        return $targetPath;
+    }
+
+    /**
+     * @param  array<string, mixed>  $document
+     */
+    private static function assertReferenceFragmentExists(
+        array $document,
+        string $fragment,
+        string $artifactId,
+        string $reference,
+    ): void {
+        $decodedFragment = rawurldecode($fragment);
+        if ($decodedFragment === '') {
+            return;
+        }
+
+        if (! str_starts_with($decodedFragment, '/')) {
+            if (self::containsAnchor($document, $decodedFragment)) {
+                return;
+            }
+
+            throw new RuntimeException(
+                "Stable source [{$artifactId}] reference [{$reference}] contains an unresolved anchor."
+            );
+        }
+
+        /** @var mixed $value */
+        $value = $document;
+
+        foreach (explode('/', substr($decodedFragment, 1)) as $encodedToken) {
+            if (preg_match('/~(?:[^01]|$)/', $encodedToken) === 1) {
+                throw new RuntimeException(
+                    "Stable source [{$artifactId}] reference [{$reference}] contains an invalid JSON pointer."
+                );
+            }
+
+            $token = str_replace(['~1', '~0'], ['/', '~'], $encodedToken);
+            if (! is_array($value)) {
+                throw new RuntimeException(
+                    "Stable source [{$artifactId}] reference [{$reference}] contains an unresolved fragment."
+                );
+            }
+
+            $key = $token;
+            if (! array_key_exists($key, $value) && ctype_digit($token)) {
+                $key = (int) $token;
+            }
+
+            if (! array_key_exists($key, $value)) {
+                throw new RuntimeException(
+                    "Stable source [{$artifactId}] reference [{$reference}] contains an unresolved fragment."
+                );
+            }
+
+            $value = $value[$key];
+        }
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $node
+     */
+    private static function containsAnchor(array $node, string $anchor): bool
+    {
+        foreach ($node as $key => $value) {
+            if (($key === '$anchor' || $key === '$dynamicAnchor') && $value === $anchor) {
+                return true;
+            }
+
+            if (is_array($value) && self::containsAnchor($value, $anchor)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static function relativeFixtureSourcePath(string $artifactId, string $resolverUrl): string
+    {
+        $url = parse_url($resolverUrl);
+        $runtimePrefix = '/durable-workflow/workflow/' . self::RUNTIME_SOURCE_REVISION
+            . '/' . self::RUNTIME_SOURCE_DIRECTORY;
+        $protocolPrefix = '/durable-workflow/durable-workflow.github.io/' . self::PROTOCOL_SOURCE_REVISION
+            . '/static/platform-protocol-specs/';
+
+        if (
+            ! is_array($url)
+            || ($url['scheme'] ?? null) !== 'https'
+            || ($url['host'] ?? null) !== 'raw.githubusercontent.com'
+            || isset($url['user'])
+            || isset($url['pass'])
+            || isset($url['port'])
+            || isset($url['query'])
+            || isset($url['fragment'])
+            || ! isset($url['path'])
+            || ! is_string($url['path'])
         ) {
             throw new RuntimeException(
                 "Stable fixture source [{$artifactId}] must use an immutable raw GitHub resolver with a full revision."
             );
         }
 
-        $relativePath = substr($url['path'], strlen($expectedPrefix));
+        if (str_starts_with($url['path'], $runtimePrefix)) {
+            $filename = substr($url['path'], strlen($runtimePrefix));
+            $relativePath = self::RUNTIME_SOURCE_DIRECTORY . $filename;
+        } elseif (str_starts_with($url['path'], $protocolPrefix)) {
+            $filename = substr($url['path'], strlen($protocolPrefix));
+            $relativePath = self::PROTOCOL_SPEC_DIRECTORY . $filename;
+        } else {
+            throw new RuntimeException(
+                "Stable fixture source [{$artifactId}] must use the declared runtime or protocol carrier."
+            );
+        }
+
         if (
-            preg_match(
-                '/\Aresources\/conformance\/suite-v38\/platform-(?:conformance|protocol-specs)\/[a-z0-9.-]+\.(?:json|ya?ml)\z/D',
+            preg_match('/\A[a-z0-9.-]+\.(?:json|ya?ml)\z/D', $filename) !== 1
+            || preg_match(
+                '/\Aresources\/conformance\/suite-v38\/platform-(?:conformance|protocol-specs)\/'
+                    . '[a-z0-9.-]+\.(?:json|ya?ml)\z/D',
                 $relativePath,
             ) !== 1
         ) {
@@ -219,11 +732,6 @@ final class PlatformConformanceSuite
             );
         }
 
-        $sourcePath = dirname(__DIR__, 3) . '/' . $relativePath;
-        if (! is_file($sourcePath)) {
-            throw new RuntimeException("Vendored stable fixture source [{$artifactId}] is missing.");
-        }
-
-        return $sourcePath;
+        return $relativePath;
     }
 }

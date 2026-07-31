@@ -6,6 +6,32 @@
   "surface_stability_authority": "durable-workflow.v2.surface-stability.contract",
   "result_schema": "durable-workflow.v2.platform-conformance.result",
   "result_version": 1,
+  "source_dependencies": {
+    "cluster-info-envelope.schema.json": {
+      "artifact_id": "durable-workflow.v2.cluster-info-envelope@catalog-15",
+      "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/91bde245162b61d371feeef5648a4befae8d755a/static/platform-protocol-specs/cluster-info-envelope.schema.json",
+      "source_path": "resources/conformance/suite-v38/platform-protocol-specs/cluster-info-envelope.schema.json",
+      "sha256": "sha256:89bf5b7a72026890a0ae890a9437d50fd485a512837a8f291c8aeb8dc7a6b1a3"
+    },
+    "history-export-bundle.schema.json": {
+      "artifact_id": "durable-workflow.v2.history-export-bundle@catalog-15",
+      "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/91bde245162b61d371feeef5648a4befae8d755a/static/platform-protocol-specs/history-export-bundle.schema.json",
+      "source_path": "resources/conformance/suite-v38/platform-protocol-specs/history-export-bundle.schema.json",
+      "sha256": "sha256:a198a935781ce7c031d873e99d6fb7f4ebd6da7428553c0117e25c247744e409"
+    },
+    "local-activity-runtime.schema.json": {
+      "artifact_id": "durable-workflow.v2.local-activity-runtime@catalog-15",
+      "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/91bde245162b61d371feeef5648a4befae8d755a/static/platform-protocol-specs/local-activity-runtime.schema.json",
+      "source_path": "resources/conformance/suite-v38/platform-protocol-specs/local-activity-runtime.schema.json",
+      "sha256": "sha256:aba1b06d0775658920b1dbbd4953301ae55f671ba09d22402c67594b929150a4"
+    },
+    "worker-sessions-runtime.schema.json": {
+      "artifact_id": "durable-workflow.v2.worker-sessions-runtime@catalog-15",
+      "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/91bde245162b61d371feeef5648a4befae8d755a/static/platform-protocol-specs/worker-sessions-runtime.schema.json",
+      "source_path": "resources/conformance/suite-v38/platform-protocol-specs/worker-sessions-runtime.schema.json",
+      "sha256": "sha256:dc7c3d62d9cd2b09088960558a19c0bc972bc16988b50cf71ca6af75dc709dc1"
+    }
+  },
   "artifact_version_history": {
     "rust_signal_query": {
       "history_mode": "observed_bindings_with_provenance",
@@ -411,7 +437,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.control-plane-api@catalog-15",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-protocol-specs/control-plane-api.openapi.yaml",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/91bde245162b61d371feeef5648a4befae8d755a/static/platform-protocol-specs/control-plane-api.openapi.yaml",
           "sha256": "sha256:3eae0fd69a79414dbc1079e9d06129884c35feba3f95439a62e73efb38543813"
         }
       ],
@@ -423,12 +449,12 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.worker-protocol-api@catalog-15",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-protocol-specs/worker-protocol-api.openapi.yaml",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/91bde245162b61d371feeef5648a4befae8d755a/static/platform-protocol-specs/worker-protocol-api.openapi.yaml",
           "sha256": "sha256:4e33be4fad463f00f5a2bf0362ca5df1181d26cf429b06108d74475ec484cdc8"
         },
         {
           "artifact_id": "durable-workflow.v2.worker-protocol-stream@catalog-15",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-protocol-specs/worker-protocol-stream.asyncapi.yaml",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/91bde245162b61d371feeef5648a4befae8d755a/static/platform-protocol-specs/worker-protocol-stream.asyncapi.yaml",
           "sha256": "sha256:08e9f580928e5f8946ce61f2ebdca3adb45022577a46a5c50196654b3c9350d1"
         }
       ],
@@ -440,7 +466,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/signal_query_runtime_contract@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/signal-query-runtime-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/signal-query-runtime-scenarios.json",
           "sha256": "sha256:f4104a67fdc307e5470c8272aa76971ae152fc22b526505cf149457c04a4c42d"
         }
       ],
@@ -572,7 +598,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/workflow_update_runtime_contract@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/workflow-update-runtime-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/workflow-update-runtime-scenarios.json",
           "sha256": "sha256:24c0bdb1cca0ea6f7cc68daf1a62e1ca41a20bfbf0d0419aa80a3bfd5b4bb385"
         }
       ],
@@ -601,7 +627,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/search_attribute_runtime_contract@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/search-attribute-runtime-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/search-attribute-runtime-scenarios.json",
           "sha256": "sha256:41db9910236025878bdb2aa000d295ea58b4a53369c065a07eba037f7b256e5e"
         }
       ],
@@ -632,7 +658,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/schedules_runtime_contract@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/schedules-runtime-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/schedules-runtime-scenarios.json",
           "sha256": "sha256:9f4850ffb627f0f5afb3a12de41f60d7a35761b73c42868529b81d3a44e74513"
         }
       ],
@@ -661,17 +687,17 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/history_replay_bundles@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/replay-runtime-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/replay-runtime-scenarios.json",
           "sha256": "sha256:ce540ae887e0ef4ac2065a108c60e885458563e55a2fedf7291cea8835468945"
         },
         {
           "artifact_id": "durable-workflow.v2.history-event-payloads@catalog-15",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-protocol-specs/history-event-payloads.schema.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/91bde245162b61d371feeef5648a4befae8d755a/static/platform-protocol-specs/history-event-payloads.schema.json",
           "sha256": "sha256:23e124f6c9efcdea44e16ab80f3b2ad525ee759b1b1c5f503e2c0135a58e9d3e"
         },
         {
           "artifact_id": "durable-workflow.v2.replay-bundle@catalog-15",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-protocol-specs/replay-bundle.schema.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/91bde245162b61d371feeef5648a4befae8d755a/static/platform-protocol-specs/replay-bundle.schema.json",
           "sha256": "sha256:0e49aeb7d0ef64786697e747d5378c4298c4cf04a0c5aabc218086dc02926ef7"
         }
       ],
@@ -714,7 +740,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/namespace_runtime_contract@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/namespace-runtime-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/namespace-runtime-scenarios.json",
           "sha256": "sha256:78458d791b2ad1cb457c85c6e1395553ea5752ed252d8516d5b71bd0701f853d"
         }
       ],
@@ -752,7 +778,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/child_workflow_runtime_contract@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/child-workflow-runtime-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/child-workflow-runtime-scenarios.json",
           "sha256": "sha256:8519047688cebc87594ab1dd185f55437f20bd9d9ec362856cb62edfe74fe9b0"
         }
       ],
@@ -777,7 +803,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/worker_versioning_runtime_contract@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/worker-versioning-runtime-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/worker-versioning-runtime-scenarios.json",
           "sha256": "sha256:a5546f1c610bf7c34e793ff35fb28d1033a8ab37244eeba0e8aa02354cbba9a5"
         }
       ],
@@ -804,7 +830,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/saga_runtime_contract@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/saga-runtime-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/saga-runtime-scenarios.json",
           "sha256": "sha256:d11d7966813eed10c7869196db72e56ab994cf86ee4bb0f33c8d68a9013959af"
         }
       ],
@@ -830,7 +856,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/migration_runtime_contract@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/migration-runtime-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/migration-runtime-scenarios.json",
           "sha256": "sha256:79a0ecac7afec6efdfd089326b63f20d689797cc181a7a6d441d29699f7055f7"
         }
       ],
@@ -857,7 +883,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/skew_refusal_matrix_contract@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/skew-refusal-matrix-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/skew-refusal-matrix-scenarios.json",
           "sha256": "sha256:578a327454b83a891e73d9966546b362c7a5bf94f4a29dc35eae2b110271ea93"
         }
       ],
@@ -879,7 +905,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/prerelease_readiness_contract@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/prerelease-readiness-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/prerelease-readiness-scenarios.json",
           "sha256": "sha256:f2ee2bded2f34ceedb00b55177bfbfc03074fc86555d0b90493f75046d6a93f7"
         }
       ],
@@ -905,7 +931,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.repair-actionability-objects@catalog-15",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-protocol-specs/repair-actionability-objects.schema.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/91bde245162b61d371feeef5648a4befae8d755a/static/platform-protocol-specs/repair-actionability-objects.schema.json",
           "sha256": "sha256:c52238b20502e256f3e0ca681105368d642e27a6725ecfeb9f0571ccf6a01132"
         }
       ],
@@ -917,7 +943,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.cli-json-envelopes@catalog-15",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-protocol-specs/cli-json-envelopes.schema.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/91bde245162b61d371feeef5648a4befae8d755a/static/platform-protocol-specs/cli-json-envelopes.schema.json",
           "sha256": "sha256:af67ec2f21d905a200f603c73fd0aa038081798a99b818b2eff8ce093e4bebc9"
         }
       ],
@@ -955,7 +981,7 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.platform-conformance.runtime-scenarios/principal_attribution_contract@38",
-          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/c600505a0c39b2b2220b2f2426053315aa61f1f2/resources/conformance/suite-v38/platform-conformance/principal-attribution-scenarios.json",
+          "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/75dfd5c869823409ef3d6c4b009a7882159ae9a2/resources/conformance/suite-v38/platform-conformance/principal-attribution-scenarios.json",
           "sha256": "sha256:257dbaaa0c16b62f86f19e304a3de54347da1e0cf03642639c159e0dfac8c19f"
         }
       ],

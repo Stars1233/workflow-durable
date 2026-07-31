@@ -207,9 +207,14 @@ final class PlatformConformanceSuiteTest extends TestCase
     public function testStableFixtureSourcesUseImmutableRevisionAndMatchVendoredBytes(): void
     {
         $manifest = PlatformConformanceSuite::manifest();
-        $sourcePrefix = sprintf(
+        $runtimeSourcePrefix = sprintf(
             'https://raw.githubusercontent.com/durable-workflow/workflow/%s/',
-            PlatformConformanceSuite::FIXTURE_SOURCE_REVISION,
+            PlatformConformanceSuite::RUNTIME_SOURCE_REVISION,
+        );
+        $protocolSourcePrefix = sprintf(
+            'https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/%s/'
+                . 'static/platform-protocol-specs/',
+            PlatformConformanceSuite::PROTOCOL_SOURCE_REVISION,
         );
 
         foreach ($manifest['fixture_catalog'] as $category) {
@@ -218,14 +223,144 @@ final class PlatformConformanceSuiteTest extends TestCase
             }
 
             foreach ($category['sources'] as $source) {
-                $this->assertStringStartsWith($sourcePrefix, $source['resolver_url']);
-                $this->assertMatchesRegularExpression(
-                    '#^' . preg_quote($sourcePrefix, '#')
-                        . 'resources/conformance/suite-v38/platform-(?:conformance|protocol-specs)/'
-                        . '[a-z0-9.-]+\.(?:json|ya?ml)$#',
-                    $source['resolver_url'],
-                );
+                if (str_contains($source['resolver_url'], '/platform-conformance/')) {
+                    $this->assertMatchesRegularExpression(
+                        '#^' . preg_quote($runtimeSourcePrefix, '#')
+                            . 'resources/conformance/suite-v38/platform-conformance/'
+                            . '[a-z0-9.-]+\.json$#',
+                        $source['resolver_url'],
+                    );
+                } else {
+                    $this->assertMatchesRegularExpression(
+                        '#^' . preg_quote($protocolSourcePrefix, '#') . '[a-z0-9.-]+\.(?:json|ya?ml)$#',
+                        $source['resolver_url'],
+                    );
+                }
             }
+        }
+    }
+
+    public function testStableSourceDependenciesUseImmutableResolversAndMatchVendoredBytes(): void
+    {
+        $dependencies = PlatformConformanceSuite::manifest()['source_dependencies'];
+        $expectedDigests = [
+            'cluster-info-envelope.schema.json' =>
+                '89bf5b7a72026890a0ae890a9437d50fd485a512837a8f291c8aeb8dc7a6b1a3',
+            'history-export-bundle.schema.json' =>
+                'a198a935781ce7c031d873e99d6fb7f4ebd6da7428553c0117e25c247744e409',
+            'local-activity-runtime.schema.json' =>
+                'aba1b06d0775658920b1dbbd4953301ae55f671ba09d22402c67594b929150a4',
+            'worker-sessions-runtime.schema.json' =>
+                'dc7c3d62d9cd2b09088960558a19c0bc972bc16988b50cf71ca6af75dc709dc1',
+        ];
+
+        $this->assertSame(array_keys($expectedDigests), array_keys($dependencies));
+
+        foreach ($expectedDigests as $filename => $expectedDigest) {
+            $dependency = $dependencies[$filename];
+            $this->assertSame(
+                sprintf(
+                    'https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/%s/'
+                        . 'static/platform-protocol-specs/%s',
+                    PlatformConformanceSuite::PROTOCOL_SOURCE_REVISION,
+                    $filename,
+                ),
+                $dependency['resolver_url'],
+            );
+            $this->assertSame('sha256:' . $expectedDigest, $dependency['sha256']);
+            $this->assertSame(
+                $expectedDigest,
+                hash('sha256', file_get_contents(dirname(__DIR__, 3) . '/' . $dependency['source_path'])),
+            );
+        }
+    }
+
+    public function testStableSourceReferenceClosureIsCompleteAndBound(): void
+    {
+        $validator = new ReflectionMethod(PlatformConformanceSuite::class, 'assertStableSourceReferenceClosure');
+
+        $validator->invoke(null, PlatformConformanceSuite::manifest());
+
+        $this->addToAssertionCount(1);
+    }
+
+    public function testStableSourceReferenceClosureRejectsInvalidDependencyBindings(): void
+    {
+        $validator = new ReflectionMethod(PlatformConformanceSuite::class, 'assertStableSourceReferenceClosure');
+
+        foreach ([
+            'missing immediate dependency' => static function (array &$manifest): void {
+                unset($manifest['source_dependencies']['cluster-info-envelope.schema.json']);
+            },
+            'missing transitive dependency' => static function (array &$manifest): void {
+                unset($manifest['source_dependencies']['local-activity-runtime.schema.json']);
+            },
+            'path escape' => static function (array &$manifest): void {
+                $manifest['source_dependencies']['cluster-info-envelope.schema.json']['source_path'] =
+                    'resources/conformance/suite-v38/platform-protocol-specs/../cluster-info-envelope.schema.json';
+            },
+            'mutable resolver' => static function (array &$manifest): void {
+                $manifest['source_dependencies']['cluster-info-envelope.schema.json']['resolver_url'] =
+                    'https://durable-workflow.github.io/platform-protocol-specs/cluster-info-envelope.schema.json';
+            },
+            'non-HTTPS resolver' => static function (array &$manifest): void {
+                $manifest['source_dependencies']['cluster-info-envelope.schema.json']['resolver_url'] =
+                    str_replace(
+                        'https://',
+                        'http://',
+                        $manifest['source_dependencies']['cluster-info-envelope.schema.json']['resolver_url'],
+                    );
+            },
+            'incorrect digest' => static function (array &$manifest): void {
+                $manifest['source_dependencies']['cluster-info-envelope.schema.json']['sha256'] =
+                    'sha256:' . str_repeat('0', 64);
+            },
+        ] as $case => $mutate) {
+            $manifest = PlatformConformanceSuite::manifest();
+            $mutate($manifest);
+
+            try {
+                $validator->invoke(null, $manifest);
+                $this->fail("Stable source reference qualification accepted {$case}.");
+            } catch (RuntimeException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
+    public function testStableSourceReferenceClosureRejectsEscapesAndUnresolvedFragments(): void
+    {
+        $pathResolver = new ReflectionMethod(PlatformConformanceSuite::class, 'localReferencePath');
+        $fragmentValidator = new ReflectionMethod(
+            PlatformConformanceSuite::class,
+            'assertReferenceFragmentExists',
+        );
+
+        try {
+            $pathResolver->invoke(
+                null,
+                'resources/conformance/suite-v38/platform-protocol-specs/control-plane-api.openapi.yaml',
+                'durable-workflow.v2.control-plane-api@catalog-15',
+                '../../../../composer.json',
+            );
+            $this->fail('Stable source reference qualification accepted a path escape.');
+        } catch (RuntimeException) {
+            $this->addToAssertionCount(1);
+        }
+
+        try {
+            $fragmentValidator->invoke(
+                null,
+                [
+                    '$defs' => [],
+                ],
+                '/$defs/missing',
+                'durable-workflow.v2.worker-protocol-api@catalog-15',
+                './worker-sessions-runtime.schema.json#/$defs/missing',
+            );
+            $this->fail('Stable source reference qualification accepted an unresolved fragment.');
+        } catch (RuntimeException) {
+            $this->addToAssertionCount(1);
         }
     }
 
@@ -237,6 +372,9 @@ final class PlatformConformanceSuiteTest extends TestCase
             'mutable resolver' => static function (array &$source): void {
                 $source['resolver_url'] =
                     'https://durable-workflow.github.io/platform-conformance/signal-query-runtime-scenarios.json';
+            },
+            'non-HTTPS resolver' => static function (array &$source): void {
+                $source['resolver_url'] = str_replace('https://', 'http://', $source['resolver_url']);
             },
             'short revision' => static function (array &$source): void {
                 $source['resolver_url'] = str_replace(
@@ -447,7 +585,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $suiteManifest = PlatformConformanceSuite::manifest();
         $contracts = $suiteManifest['fixture_catalog']['signal_query_runtime_contract']['required_scenario_contracts'];
 
-        $this->assertSame('2.0.0-rc.9', $workflowSourceRelease);
+        $this->assertSame('2.0.0-rc.10', $workflowSourceRelease);
 
         foreach ($sdkCompatibility as $sdk) {
             $this->assertSame('2.0.0-rc.5', $sdk['release_line']);
