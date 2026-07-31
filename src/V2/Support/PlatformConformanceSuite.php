@@ -24,9 +24,9 @@ final class PlatformConformanceSuite
 {
     public const SCHEMA = 'durable-workflow.v2.platform-conformance.suite';
 
-    public const VERSION = 38;
+    public const VERSION = 39;
 
-    public const MIRROR_SHA256 = 'a67e781c4d681ebaffb2f64565828a67e39f960a16bfdf8f27efe2fe37445026';
+    public const MIRROR_SHA256 = '45c9ddf5f7557208e2996509b9907d54d9b1efe59bbf9636b882e8335cefa321';
 
     public const RUNTIME_SOURCE_REVISION = '75dfd5c869823409ef3d6c4b009a7882159ae9a2';
 
@@ -66,6 +66,14 @@ final class PlatformConformanceSuite
     private const PROTOCOL_SPEC_DIRECTORY = self::SUITE_SOURCE_DIRECTORY . 'platform-protocol-specs/';
 
     private const RUNTIME_SOURCE_DIRECTORY = self::SUITE_SOURCE_DIRECTORY . 'platform-conformance/';
+
+    private const CLI_FIXTURE_BASE_URL = 'https://durable-workflow.github.io/cli-json-envelopes/v2';
+
+    private const CLI_FIXTURE_DIRECTORY = 'resources/conformance/suite-v39/cli-json-envelopes/';
+
+    private const CLI_MANIFEST_ARTIFACT_ID = 'durable-workflow.cli.output-schema-manifest@2';
+
+    private const CLI_SCHEMA_ARTIFACT_PREFIX = 'durable-workflow.cli.output-schema/';
 
     /**
      * @var array<string, mixed>|null
@@ -108,6 +116,7 @@ final class PlatformConformanceSuite
         }
 
         self::assertStableFixtureSources($decoded);
+        self::assertCliJsonEnvelopeClosure($decoded);
         self::assertStableSourceReferenceClosure($decoded);
 
         self::$manifest = $decoded;
@@ -207,6 +216,172 @@ final class PlatformConformanceSuite
         }
 
         return $sourcePath;
+    }
+
+    /**
+     * @param  array<string, mixed>  $suite
+     */
+    private static function assertCliJsonEnvelopeClosure(array $suite): void
+    {
+        $category = $suite['fixture_catalog']['cli_json_envelopes'] ?? null;
+        if (! is_array($category) || ($category['status'] ?? null) !== self::CATEGORY_STATUS_STABLE) {
+            throw new RuntimeException('The CLI JSON envelope fixture category must be stable.');
+        }
+
+        $sources = $category['sources'] ?? null;
+        if (! is_array($sources) || $sources === []) {
+            throw new RuntimeException('The CLI JSON envelope fixture closure is missing.');
+        }
+
+        /** @var array<string, array<string, mixed>> $sourcesByUrl */
+        $sourcesByUrl = [];
+        foreach ($sources as $source) {
+            $artifactId = is_array($source) ? ($source['artifact_id'] ?? null) : null;
+            if (
+                ! is_array($source)
+                || ! is_string($artifactId)
+                || ! is_string($source['resolver_url'] ?? null)
+            ) {
+                throw new RuntimeException('The CLI JSON envelope fixture closure contains an invalid source.');
+            }
+            if (
+                $artifactId !== self::CLI_MANIFEST_ARTIFACT_ID
+                && preg_match(
+                    '/\Adurable-workflow\.cli\.output-schema\/[a-z0-9.-]+\.schema\.json@2\z/D',
+                    $artifactId,
+                ) !== 1
+            ) {
+                throw new RuntimeException(
+                    "The CLI JSON envelope fixture source [{$artifactId}] is not part of the manifest dependency closure."
+                );
+            }
+            if (isset($sourcesByUrl[$source['resolver_url']])) {
+                throw new RuntimeException('The CLI JSON envelope fixture closure repeats a resolver URL.');
+            }
+            $sourcesByUrl[$source['resolver_url']] = $source;
+        }
+
+        $manifestUrl = self::CLI_FIXTURE_BASE_URL . '/manifest.json';
+        $manifestSource = $sourcesByUrl[$manifestUrl] ?? null;
+        if (
+            ! is_array($manifestSource)
+            || ($manifestSource['artifact_id'] ?? null) !== self::CLI_MANIFEST_ARTIFACT_ID
+        ) {
+            throw new RuntimeException('The CLI output-schema manifest source binding is missing.');
+        }
+
+        $manifestPath = self::localFixtureSourcePath(self::CLI_MANIFEST_ARTIFACT_ID, $manifestUrl);
+        $manifestJson = file_get_contents($manifestPath);
+        if ($manifestJson === false) {
+            throw new RuntimeException('The vendored CLI output-schema manifest is missing.');
+        }
+
+        try {
+            /** @var mixed $manifest */
+            $manifest = json_decode($manifestJson, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            throw new RuntimeException('The vendored CLI output-schema manifest is invalid.', 0, $exception);
+        }
+
+        if (
+            ! is_array($manifest)
+            || ($manifest['schema'] ?? null) !== 'durable-workflow.cli.output-schema-manifest'
+            || ($manifest['version'] ?? null) !== 2
+            || ($manifest['artifact_id'] ?? null) !== self::CLI_MANIFEST_ARTIFACT_ID
+            || ($manifest['resolver_url'] ?? null) !== $manifestUrl
+            || ! is_array($manifest['commands'] ?? null)
+            || $manifest['commands'] === []
+        ) {
+            throw new RuntimeException('The vendored CLI output-schema manifest identity is invalid.');
+        }
+
+        $expectedClosureUrls = [
+            $manifestUrl => true,
+        ];
+        foreach ($manifest['commands'] as $command => $entry) {
+            if (! is_string($command) || ! is_array($entry)) {
+                throw new RuntimeException('The CLI output-schema manifest contains an invalid command mapping.');
+            }
+
+            $schemaPath = $entry['schema'] ?? null;
+            if (
+                ! is_string($schemaPath)
+                || preg_match('/\Aschemas\/output\/([a-z0-9.-]+\.schema\.json)\z/D', $schemaPath, $matches) !== 1
+            ) {
+                throw new RuntimeException(
+                    "CLI output-schema manifest command [{$command}] has an invalid bundled schema path."
+                );
+            }
+
+            $filename = $matches[1];
+            $resolverUrl = self::CLI_FIXTURE_BASE_URL . '/schemas/' . $filename;
+            if (
+                ($entry['schema_id'] ?? null) !== $resolverUrl
+                || ($entry['resolver_url'] ?? null) !== $resolverUrl
+            ) {
+                throw new RuntimeException(
+                    "CLI output-schema manifest command [{$command}] has an invalid public schema identity."
+                );
+            }
+
+            $source = $sourcesByUrl[$resolverUrl] ?? null;
+            $expectedArtifactId = self::CLI_SCHEMA_ARTIFACT_PREFIX . $filename . '@2';
+            if (
+                ! is_array($source)
+                || ($source['artifact_id'] ?? null) !== $expectedArtifactId
+                || ($source['sha256'] ?? null) !== ($entry['sha256'] ?? null)
+            ) {
+                throw new RuntimeException(
+                    "CLI output-schema manifest command [{$command}] is missing its suite byte binding."
+                );
+            }
+
+            $publishedSchemaPath = self::localFixtureSourcePath($expectedArtifactId, $resolverUrl);
+            $publishedSchemaJson = file_get_contents($publishedSchemaPath);
+            if ($publishedSchemaJson === false) {
+                throw new RuntimeException("Vendored CLI output schema [{$filename}] is missing.");
+            }
+
+            try {
+                /** @var mixed $schema */
+                $schema = json_decode($publishedSchemaJson, true, 512, JSON_THROW_ON_ERROR);
+            } catch (JsonException $exception) {
+                throw new RuntimeException("Vendored CLI output schema [{$filename}] is invalid.", 0, $exception);
+            }
+
+            if (
+                ! is_array($schema)
+                || ($schema['$schema'] ?? null) !== 'https://json-schema.org/draft/2020-12/schema'
+                || ($schema['$id'] ?? null) !== $resolverUrl
+            ) {
+                throw new RuntimeException("Vendored CLI output schema [{$filename}] has an invalid identity.");
+            }
+
+            $expectedClosureUrls[$resolverUrl] = true;
+        }
+
+        $actualClosureUrls = [];
+        foreach ($sources as $source) {
+            $artifactId = $source['artifact_id'] ?? null;
+            if (
+                $artifactId === self::CLI_MANIFEST_ARTIFACT_ID
+                || (is_string($artifactId) && str_starts_with($artifactId, self::CLI_SCHEMA_ARTIFACT_PREFIX))
+            ) {
+                $actualClosureUrls[$source['resolver_url']] = true;
+            }
+        }
+
+        if (array_keys($actualClosureUrls) !== array_keys($expectedClosureUrls)) {
+            $actual = array_keys($actualClosureUrls);
+            $expected = array_keys($expectedClosureUrls);
+            sort($actual);
+            sort($expected);
+            if ($actual !== $expected) {
+                throw new RuntimeException(
+                    'The CLI JSON envelope suite sources do not exactly match the manifest dependency closure.'
+                );
+            }
+        }
     }
 
     /**
@@ -693,7 +868,6 @@ final class PlatformConformanceSuite
         if (
             ! is_array($url)
             || ($url['scheme'] ?? null) !== 'https'
-            || ($url['host'] ?? null) !== 'raw.githubusercontent.com'
             || isset($url['user'])
             || isset($url['pass'])
             || isset($url['port'])
@@ -703,19 +877,42 @@ final class PlatformConformanceSuite
             || ! is_string($url['path'])
         ) {
             throw new RuntimeException(
-                "Stable fixture source [{$artifactId}] must use an immutable raw GitHub resolver with a full revision."
+                "Stable fixture source [{$artifactId}] must use an immutable HTTPS resolver."
             );
         }
 
-        if (str_starts_with($url['path'], $runtimePrefix)) {
+        if (
+            ($url['host'] ?? null) === 'raw.githubusercontent.com'
+            && str_starts_with($url['path'], $runtimePrefix)
+        ) {
             $filename = substr($url['path'], strlen($runtimePrefix));
             $relativePath = self::RUNTIME_SOURCE_DIRECTORY . $filename;
-        } elseif (str_starts_with($url['path'], $protocolPrefix)) {
+        } elseif (
+            ($url['host'] ?? null) === 'raw.githubusercontent.com'
+            && str_starts_with($url['path'], $protocolPrefix)
+        ) {
             $filename = substr($url['path'], strlen($protocolPrefix));
             $relativePath = self::PROTOCOL_SPEC_DIRECTORY . $filename;
+        } elseif (
+            ($url['host'] ?? null) === 'durable-workflow.github.io'
+            && str_starts_with($url['path'], '/cli-json-envelopes/v2/')
+        ) {
+            $filename = substr($url['path'], strlen('/cli-json-envelopes/v2/'));
+            $relativePath = self::CLI_FIXTURE_DIRECTORY . $filename;
+
+            if (
+                $filename !== 'manifest.json'
+                && preg_match('/\Aschemas\/[a-z0-9.-]+\.schema\.json\z/D', $filename) !== 1
+            ) {
+                throw new RuntimeException(
+                    "Stable CLI fixture source [{$artifactId}] has an invalid retained path."
+                );
+            }
+
+            return $relativePath;
         } else {
             throw new RuntimeException(
-                "Stable fixture source [{$artifactId}] must use the declared runtime or protocol carrier."
+                "Stable fixture source [{$artifactId}] must use the declared runtime, protocol, or CLI carrier."
             );
         }
 

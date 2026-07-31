@@ -2,12 +2,11 @@
 
 ## Unreleased
 
-- Platform conformance suite version 38 replaces repository-relative stable
-  fixture sources with version-bound public artifact identifiers, deterministic
-  HTTPS resolvers, SHA-256 byte bindings, and qualified local-reference closure
-  for its JSON Schema, OpenAPI, and AsyncAPI sources.
-- Advanced the Workflow package source to `2.0.0-rc.10` for the suite version
-  38 authority. The aggregate recommended product tuple remains RC5 until
+- Platform conformance suite version 39 publishes the revision-bound CLI
+  output-schema manifest and its complete per-command JSON envelope schema
+  closure with HTTPS identities and SHA-256 byte bindings.
+- Advanced the Workflow package source to `2.0.0-rc.11` for the suite version
+  39 authority. The aggregate recommended product tuple remains RC5 until
   independently published release-candidate artifacts pass exact-current
   qualification.
 - Historical command-contract gaps remain visible in operator metrics without
