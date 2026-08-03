@@ -26,13 +26,13 @@ final class PlatformConformanceSuite
 
     public const VERSION = 40;
 
-    public const MIRROR_SHA256 = 'f6104fce69d7d86e2f8a56850536a92e2412a818e3ce5ac5a2a7f9276b73d53a';
+    public const MIRROR_SHA256 = 'bd57756a1432ac3c6087fcc9f7b2e95d6dcc25813e58c9a839a4f877f2bf9049';
 
     public const RUNTIME_SOURCE_REVISION = '75dfd5c869823409ef3d6c4b009a7882159ae9a2';
 
     public const FIXTURE_SOURCE_REVISION = self::RUNTIME_SOURCE_REVISION;
 
-    public const PROTOCOL_SOURCE_REVISION = '91bde245162b61d371feeef5648a4befae8d755a';
+    public const PROTOCOL_SOURCE_REVISION = 'e990bc36731463cc5b2cb2a9175dbccfdea61704';
 
     public const RESULT_SCHEMA = 'durable-workflow.v2.platform-conformance.result';
 

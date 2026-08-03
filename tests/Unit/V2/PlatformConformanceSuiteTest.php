@@ -340,13 +340,13 @@ final class PlatformConformanceSuiteTest extends TestCase
         $dependencies = PlatformConformanceSuite::manifest()['source_dependencies'];
         $expectedDigests = [
             'cluster-info-envelope.schema.json' =>
-                '89bf5b7a72026890a0ae890a9437d50fd485a512837a8f291c8aeb8dc7a6b1a3',
+                '7f761da2eda221a6240d1250b6dd774a36c2077642405f0f036e8124121ea4bc',
             'history-export-bundle.schema.json' =>
-                'a198a935781ce7c031d873e99d6fb7f4ebd6da7428553c0117e25c247744e409',
+                'e8d6ef0af49a2570007062215d1332c96910743c1449cd8ca2c702bfac6c181c',
             'local-activity-runtime.schema.json' =>
-                'aba1b06d0775658920b1dbbd4953301ae55f671ba09d22402c67594b929150a4',
+                'de74d7175cda4f761a57263aae2b32046e617783acf0677d4c5aa6c5358619ef',
             'worker-sessions-runtime.schema.json' =>
-                'dc7c3d62d9cd2b09088960558a19c0bc972bc16988b50cf71ca6af75dc709dc1',
+                '36b16340fe9524653baef7de0a32b2f744562bfc57e91853579a2c94dd512581',
         ];
 
         $this->assertSame(array_keys($expectedDigests), array_keys($dependencies));
@@ -435,7 +435,7 @@ final class PlatformConformanceSuiteTest extends TestCase
             $pathResolver->invoke(
                 null,
                 'resources/conformance/suite-v38/platform-protocol-specs/control-plane-api.openapi.yaml',
-                'durable-workflow.v2.control-plane-api@catalog-15',
+                'durable-workflow.v2.control-plane-api@catalog-16',
                 '../../../../composer.json',
             );
             $this->fail('Stable source reference qualification accepted a path escape.');
@@ -450,7 +450,7 @@ final class PlatformConformanceSuiteTest extends TestCase
                     '$defs' => [],
                 ],
                 '/$defs/missing',
-                'durable-workflow.v2.worker-protocol-api@catalog-15',
+                'durable-workflow.v2.worker-protocol-api@catalog-16',
                 './worker-sessions-runtime.schema.json#/$defs/missing',
             );
             $this->fail('Stable source reference qualification accepted an unresolved fragment.');
@@ -680,7 +680,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $suiteManifest = PlatformConformanceSuite::manifest();
         $contracts = $suiteManifest['fixture_catalog']['signal_query_runtime_contract']['required_scenario_contracts'];
 
-        $this->assertSame('2.0.0-rc.12', $workflowSourceRelease);
+        $this->assertSame('2.0.0-rc.13', $workflowSourceRelease);
 
         foreach ($sdkCompatibility as $sdk) {
             $this->assertSame('2.0.0-rc.5', $sdk['release_line']);

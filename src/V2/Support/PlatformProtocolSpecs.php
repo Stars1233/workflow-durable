@@ -30,11 +30,11 @@ final class PlatformProtocolSpecs
 {
     public const SCHEMA = 'durable-workflow.v2.platform-protocol-specs.catalog';
 
-    public const VERSION = 15;
+    public const VERSION = 16;
 
     public const PACKAGE_CONTRACT_PATH = 'resources/platform-protocol-specs.json';
 
-    public const MIRROR_SHA256 = 'bf5474fd46d9a570352133fff88197afcb9b75d312b773572b01f81b4591d335';
+    public const MIRROR_SHA256 = '5b7e9887b8ea341f7bbb4a656293ddd148a7b9c986f84d4124b0580474c25c7d';
 
     public const CATALOG_URL = 'https://durable-workflow.github.io/platform-protocol-specs.json';
 

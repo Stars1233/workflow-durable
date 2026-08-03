@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Tests\Unit\V2;
 
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\Yaml\Yaml;
+use Workflow\V2\Support\PlatformConformanceSuite;
 use Workflow\V2\Support\PlatformProtocolSpecs;
 use Workflow\V2\Support\SurfaceStabilityContract;
 
@@ -30,7 +32,7 @@ final class PlatformProtocolSpecsTest extends TestCase
         $manifest = PlatformProtocolSpecs::manifest();
 
         $this->assertSame(PlatformProtocolSpecs::SCHEMA, $manifest['schema']);
-        $this->assertSame(15, $manifest['version']);
+        $this->assertSame(16, $manifest['version']);
         $this->assertSame(PlatformProtocolSpecs::CATALOG_URL, $manifest['catalog_url']);
         $this->assertSame(PlatformProtocolSpecs::AUTHORITY_URL, $manifest['authority_url']);
     }
@@ -199,6 +201,104 @@ final class PlatformProtocolSpecsTest extends TestCase
         $families = array_column($entry['object_families'], 'name');
         $this->assertContains('worker_query_task_poll_request', $families);
         $this->assertContains('worker_query_task_result', $families);
+    }
+
+    public function testWorkerDeregistrationOpenApiMatchesCatalogAndImmutableMirror(): void
+    {
+        $root = dirname(__DIR__, 3);
+        $workerSpecPath = $root
+            . '/resources/conformance/suite-v38/platform-protocol-specs/worker-protocol-api.openapi.yaml';
+        $workerSpec = Yaml::parseFile($workerSpecPath);
+
+        $this->assertIsArray($workerSpec);
+        $this->assertSame('7', $workerSpec['info']['version']);
+        $this->assertSame(16, $workerSpec['x-durable-workflow-catalog-version']);
+
+        $route = $workerSpec['paths']['/worker/registrations/{workerId}'];
+        $this->assertSame(['delete'], array_keys($route));
+
+        $operation = $route['delete'];
+        $this->assertSame('deregisterWorker', $operation['operationId']);
+        $this->assertSame(['worker-lifecycle'], $operation['tags']);
+        $this->assertSame('worker', $operation['x-durable-workflow-required-role']);
+        $this->assertArrayNotHasKey('requestBody', $operation);
+        $this->assertSame(
+            ['#/components/parameters/WorkerProtocolVersionHeader', '#/components/parameters/WorkerIdPath'],
+            array_column($operation['parameters'], '$ref'),
+        );
+        $this->assertSame(
+            ['200', '400', '401', '403', '404', '409'],
+            array_map('strval', array_keys($operation['responses'])),
+        );
+        $this->assertSame(
+            '#/components/responses/WorkerDeregistrationEnvelope',
+            $operation['responses']['200']['$ref'],
+        );
+        foreach (['400', '401', '403', '404', '409'] as $status) {
+            $this->assertSame('#/components/responses/WorkerError', $operation['responses'][$status]['$ref']);
+        }
+
+        $this->assertSame(
+            [
+                'name' => 'workerId',
+                'in' => 'path',
+                'required' => true,
+                'description' => 'Worker registration identity in the resolved namespace.',
+                'schema' => [
+                    'type' => 'string',
+                    'minLength' => 1,
+                    'maxLength' => 255,
+                ],
+            ],
+            $workerSpec['components']['parameters']['WorkerIdPath'],
+        );
+        $this->assertSame(
+            [
+                [
+                    '$ref' => '#/components/schemas/WorkerEnvelope',
+                ],
+                [
+                    '$ref' => '#/components/schemas/WorkerDeregistrationResult',
+                ],
+            ],
+            $workerSpec['components']['responses']['WorkerDeregistrationEnvelope']['content']['application/json']['schema']['allOf'],
+        );
+        $this->assertSame(
+            ['worker_id', 'outcome', 'recovered_workflow_task_count'],
+            $workerSpec['components']['schemas']['WorkerDeregistrationResult']['required'],
+        );
+        $this->assertSame(
+            'deregistered',
+            $workerSpec['components']['schemas']['WorkerDeregistrationResult']['properties']['outcome']['const'],
+        );
+
+        $catalogFamilies = PlatformProtocolSpecs::manifest()['specs']['worker_protocol_api']['object_families'];
+        $this->assertContains('worker_deregistration_result', array_column($catalogFamilies, 'name'));
+        $this->assertSame($catalogFamilies, $workerSpec['x-durable-workflow-object-families']);
+
+        $workerSources = PlatformConformanceSuite::manifest()['fixture_catalog']['worker_task_lifecycle']['sources'];
+        $workerApiSources = array_values(array_filter(
+            $workerSources,
+            static fn (array $source): bool => str_contains($source['artifact_id'], 'worker-protocol-api'),
+        ));
+        $this->assertCount(1, $workerApiSources);
+        $this->assertSame('durable-workflow.v2.worker-protocol-api@catalog-16', $workerApiSources[0]['artifact_id']);
+        $this->assertSame(
+            sprintf(
+                'https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/%s/'
+                    . 'static/platform-protocol-specs/worker-protocol-api.openapi.yaml',
+                PlatformConformanceSuite::PROTOCOL_SOURCE_REVISION,
+            ),
+            $workerApiSources[0]['resolver_url'],
+        );
+        $this->assertSame('sha256:' . hash_file('sha256', $workerSpecPath), $workerApiSources[0]['sha256']);
+
+        $controlPlaneSpec = Yaml::parseFile(
+            $root . '/resources/conformance/suite-v38/platform-protocol-specs/control-plane-api.openapi.yaml',
+        );
+        $this->assertIsArray($controlPlaneSpec);
+        $this->assertSame('deleteWorker', $controlPlaneSpec['paths']['/workers/{workerId}']['delete']['operationId']);
+        $this->assertArrayNotHasKey('/workers/{workerId}', $workerSpec['paths']);
     }
 
     public function testFrozenBundlesUseTheParallelPrimitiveRule(): void

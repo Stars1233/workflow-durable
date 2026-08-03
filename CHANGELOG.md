@@ -6,10 +6,11 @@
   output-schema manifest and its complete JSON envelope plus JSONL record
   schema closure with HTTPS identities and SHA-256 byte bindings. The
   suite-39 revision remains retained with its original bytes.
-- Advanced the Workflow package source to `2.0.0-rc.12` for the suite version
-  40 authority. The aggregate recommended product tuple remains RC5 until
-  independently published release-candidate artifacts pass exact-current
-  qualification.
+- Advanced the Workflow package source to `2.0.0-rc.13` for platform protocol
+  catalog 16. Its conformance bindings resolve the catalog and protocol-spec
+  bytes through immutable public documentation provenance. The aggregate
+  recommended product tuple remains RC5 until independently published
+  release-candidate artifacts pass exact-current qualification.
 - Historical command-contract gaps remain visible in operator metrics without
   warning fleet correctness once their runs are closed. Open runs still warn
   when operator command forms lack required safety data.
