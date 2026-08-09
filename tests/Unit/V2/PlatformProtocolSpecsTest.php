@@ -207,7 +207,7 @@ final class PlatformProtocolSpecsTest extends TestCase
     {
         $root = dirname(__DIR__, 3);
         $workerSpecPath = $root
-            . '/resources/conformance/suite-v38/platform-protocol-specs/worker-protocol-api.openapi.yaml';
+            . '/resources/conformance/suite-v41/platform-protocol-specs/worker-protocol-api.openapi.yaml';
         $workerSpec = Yaml::parseFile($workerSpecPath);
 
         $this->assertIsArray($workerSpec);
@@ -301,6 +301,28 @@ final class PlatformProtocolSpecsTest extends TestCase
         $this->assertArrayNotHasKey('/workers/{workerId}', $workerSpec['paths']);
     }
 
+    public function testCurrentWorkerProtocolChangesNoWireShapeOrProtocolVersion(): void
+    {
+        $root = dirname(__DIR__, 3) . '/resources/conformance';
+        $historical = Yaml::parseFile(
+            $root . '/suite-v38/platform-protocol-specs/worker-protocol-api.openapi.yaml',
+        );
+        $current = Yaml::parseFile($root . '/suite-v41/platform-protocol-specs/worker-protocol-api.openapi.yaml');
+
+        $this->assertIsArray($historical);
+        $this->assertIsArray($current);
+        $this->assertSame('1.13', $current['components']['schemas']['AdvertisedWorkerProtocolVersion']['const']);
+        $this->assertSame(
+            $this->withoutDescriptionMetadata($historical),
+            $this->withoutDescriptionMetadata($current),
+            'The lifecycle correction must not change OpenAPI wire structure or behavior.',
+        );
+        $this->assertNotSame(
+            hash_file('sha256', $root . '/suite-v38/platform-protocol-specs/worker-protocol-api.openapi.yaml'),
+            hash_file('sha256', $root . '/suite-v41/platform-protocol-specs/worker-protocol-api.openapi.yaml'),
+        );
+    }
+
     public function testFrozenBundlesUseTheParallelPrimitiveRule(): void
     {
         foreach (['history_event_payloads', 'history_export_bundle'] as $name) {
@@ -361,5 +383,22 @@ final class PlatformProtocolSpecsTest extends TestCase
         foreach (array_keys($referenced) as $family) {
             $this->assertContains($family, $surfaceFamilies);
         }
+    }
+
+    /**
+     * @param  array<array-key, mixed>  $node
+     * @return array<array-key, mixed>
+     */
+    private function withoutDescriptionMetadata(array $node): array
+    {
+        unset($node['description']);
+
+        foreach ($node as $key => $value) {
+            if (is_array($value)) {
+                $node[$key] = $this->withoutDescriptionMetadata($value);
+            }
+        }
+
+        return $node;
     }
 }

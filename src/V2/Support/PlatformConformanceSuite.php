@@ -8,6 +8,7 @@ use JsonException;
 use RuntimeException;
 use Symfony\Component\Yaml\Exception\ParseException;
 use Symfony\Component\Yaml\Yaml;
+use Workflow\V2\Conformance\WorkerProtocolArtifactBindings;
 
 /**
  * Canonical, machine-readable mirror of the public platform conformance suite.
@@ -24,15 +25,15 @@ final class PlatformConformanceSuite
 {
     public const SCHEMA = 'durable-workflow.v2.platform-conformance.suite';
 
-    public const VERSION = 40;
+    public const VERSION = 41;
 
-    public const MIRROR_SHA256 = 'bd57756a1432ac3c6087fcc9f7b2e95d6dcc25813e58c9a839a4f877f2bf9049';
+    public const MIRROR_SHA256 = '7c6fa0f79d1b274b50f2e2804ca8763b79e80fbd74cc84d478b32501e36717fc';
 
     public const RUNTIME_SOURCE_REVISION = '75dfd5c869823409ef3d6c4b009a7882159ae9a2';
 
     public const FIXTURE_SOURCE_REVISION = self::RUNTIME_SOURCE_REVISION;
 
-    public const PROTOCOL_SOURCE_REVISION = 'e990bc36731463cc5b2cb2a9175dbccfdea61704';
+    public const PROTOCOL_SOURCE_REVISION = 'f781ced1ae33c8697835bd527a125bdf3eaf4321';
 
     public const RESULT_SCHEMA = 'durable-workflow.v2.platform-conformance.result';
 
@@ -63,7 +64,7 @@ final class PlatformConformanceSuite
 
     private const SUITE_SOURCE_DIRECTORY = 'resources/conformance/suite-v38/';
 
-    private const PROTOCOL_SPEC_DIRECTORY = self::SUITE_SOURCE_DIRECTORY . 'platform-protocol-specs/';
+    private const CURRENT_PROTOCOL_SPEC_DIRECTORY = 'resources/conformance/suite-v41/platform-protocol-specs/';
 
     private const RUNTIME_SOURCE_DIRECTORY = self::SUITE_SOURCE_DIRECTORY . 'platform-conformance/';
 
@@ -120,6 +121,7 @@ final class PlatformConformanceSuite
         self::assertStableFixtureSources($decoded);
         self::assertCliJsonEnvelopeClosure($decoded);
         self::assertStableSourceReferenceClosure($decoded);
+        WorkerProtocolArtifactBindings::assertManifest($decoded);
 
         self::$manifest = $decoded;
 
@@ -598,10 +600,10 @@ final class PlatformConformanceSuite
             }
 
             $sourcePath = $dependency['source_path'] ?? null;
-            $expectedSourcePath = self::PROTOCOL_SPEC_DIRECTORY . $filename;
+            $expectedSourcePath = self::CURRENT_PROTOCOL_SPEC_DIRECTORY . $filename;
             if (! is_string($sourcePath) || $sourcePath !== $expectedSourcePath) {
                 throw new RuntimeException(
-                    "Stable source dependency [{$artifactId}] must stay inside the suite-v38 protocol directory."
+                    "Stable source dependency [{$artifactId}] must stay inside its retained protocol carrier."
                 );
             }
 
@@ -891,9 +893,7 @@ final class PlatformConformanceSuite
         }
 
         $targetPath = implode('/', $segments);
-        $referenceDirectory = str_starts_with($sourcePath, self::CLI_FIXTURE_DIRECTORY)
-            ? self::CLI_FIXTURE_DIRECTORY
-            : self::PROTOCOL_SPEC_DIRECTORY;
+        $referenceDirectory = rtrim(dirname($sourcePath), '/') . '/';
         if (! str_starts_with($targetPath, $referenceDirectory)) {
             throw new RuntimeException(
                 "Stable source [{$artifactId}] local reference [{$referencePath}] escapes its retained directory."
@@ -1012,7 +1012,7 @@ final class PlatformConformanceSuite
             && str_starts_with($url['path'], $protocolPrefix)
         ) {
             $filename = substr($url['path'], strlen($protocolPrefix));
-            $relativePath = self::PROTOCOL_SPEC_DIRECTORY . $filename;
+            $relativePath = self::CURRENT_PROTOCOL_SPEC_DIRECTORY . $filename;
         } elseif (
             ($url['host'] ?? null) === 'durable-workflow.github.io'
             && str_starts_with($url['path'], '/cli-json-envelopes/v3/')
@@ -1039,13 +1039,13 @@ final class PlatformConformanceSuite
         if (
             preg_match('/\A[a-z0-9.-]+\.(?:json|ya?ml)\z/D', $filename) !== 1
             || preg_match(
-                '/\Aresources\/conformance\/suite-v38\/platform-(?:conformance|protocol-specs)\/'
+                '/\Aresources\/conformance\/suite-v(?:38|41)\/platform-(?:conformance|protocol-specs)\/'
                     . '[a-z0-9.-]+\.(?:json|ya?ml)\z/D',
                 $relativePath,
             ) !== 1
         ) {
             throw new RuntimeException(
-                "Stable fixture source [{$artifactId}] must resolve to a vendored suite-v38 JSON or YAML byte."
+                "Stable fixture source [{$artifactId}] must resolve to an approved retained JSON or YAML byte."
             );
         }
 

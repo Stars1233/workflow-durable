@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Platform conformance suite version 41 makes the lifecycle-neutral worker
+  protocol OpenAPI bytes the current conformance authority. The former
+  beta-worded binding remains available only through its explicit historical
+  identity, while protocol version 1.13 and every wire shape remain unchanged.
+- Advanced the Workflow package source to `2.0.0-rc.14` for the corrected
+  conformance authority. Durable Workflow 2.0 remains a release candidate.
 - Platform conformance suite version 40 publishes the revision-bound CLI
   output-schema manifest and its complete JSON envelope plus JSONL record
   schema closure with HTTPS identities and SHA-256 byte bindings. The

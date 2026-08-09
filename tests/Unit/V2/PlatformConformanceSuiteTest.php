@@ -158,7 +158,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $authority = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
 
         $this->assertSame($authority, PlatformConformanceSuite::manifest());
-        $this->assertSame(40, $authority['version']);
+        $this->assertSame(41, $authority['version']);
         $this->assertSame(PlatformConformanceSuite::VERSION, $authority['version']);
         $this->assertSame(PlatformConformanceSuite::SCHEMA, $authority['schema']);
         $this->assertSame(SurfaceStabilityContract::SCHEMA, $authority['surface_stability_authority']);
@@ -247,6 +247,50 @@ final class PlatformConformanceSuiteTest extends TestCase
                 }
             }
         }
+    }
+
+    public function testWorkerProtocolHistorySeparatesBetaEvidenceFromCurrentAuthority(): void
+    {
+        $manifest = PlatformConformanceSuite::manifest();
+        $history = $manifest['artifact_version_history']['worker_protocol_api'];
+        $historical = $history['bindings'][0];
+        $current = $history['bindings'][1];
+        $activeSources = $manifest['fixture_catalog']['worker_task_lifecycle']['sources'];
+        $active = array_values(array_filter(
+            $activeSources,
+            static fn (array $source): bool => $source['artifact_id'] === $current['artifact_id'],
+        ));
+
+        $this->assertSame('immutable_lifecycle_bindings', $history['history_mode']);
+        $this->assertSame('historical', $historical['status']);
+        $this->assertSame(
+            'durable-workflow.v2.worker-protocol-api@catalog-16-beta-history',
+            $historical['artifact_id']
+        );
+        $this->assertSame('current', $current['status']);
+        $this->assertSame('lifecycle_neutral', $current['lifecycle']);
+        $this->assertCount(1, $active);
+
+        foreach (['suite_version', 'status', 'lifecycle'] as $historyField) {
+            unset($current[$historyField]);
+        }
+        $this->assertSame($current, $active[0]);
+
+        $root = dirname(__DIR__, 3);
+        $this->assertSame(
+            $historical['sha256'],
+            'sha256:' . hash_file(
+                'sha256',
+                $root . '/resources/conformance/suite-v38/platform-protocol-specs/worker-protocol-api.openapi.yaml',
+            ),
+        );
+        $this->assertSame(
+            $current['sha256'],
+            'sha256:' . hash_file(
+                'sha256',
+                $root . '/resources/conformance/suite-v41/platform-protocol-specs/worker-protocol-api.openapi.yaml',
+            ),
+        );
     }
 
     public function testCliJsonEnvelopeManifestBindsItsCompletePublishedSchemaClosure(): void
@@ -680,7 +724,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $suiteManifest = PlatformConformanceSuite::manifest();
         $contracts = $suiteManifest['fixture_catalog']['signal_query_runtime_contract']['required_scenario_contracts'];
 
-        $this->assertSame('2.0.0-rc.13', $workflowSourceRelease);
+        $this->assertSame('2.0.0-rc.14', $workflowSourceRelease);
 
         foreach ($sdkCompatibility as $sdk) {
             $this->assertSame('2.0.0-rc.5', $sdk['release_line']);
