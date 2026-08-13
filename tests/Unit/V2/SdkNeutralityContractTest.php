@@ -148,9 +148,9 @@ final class SdkNeutralityContractTest extends TestCase
             'codec neutrality must point at the published worker protocol authority',
         );
         $this->assertStringContainsString(
-            'universal codec',
+            'codec `avro`',
             $codecRule['requirement'],
-            'codec neutrality must require advertising at least one universal codec',
+            'codec neutrality must require Avro on every durable public boundary',
         );
     }
 

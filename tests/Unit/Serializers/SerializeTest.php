@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Unit\Serializers;
 
+use InvalidArgumentException;
 use Laravel\SerializableClosure\SerializableClosure;
 use Tests\Fixtures\TestEnum;
 use Tests\TestCase;
@@ -138,6 +139,14 @@ final class SerializeTest extends TestCase
                 ]),
             ),
         );
+    }
+
+    public function testV2AvroRejectsUnadaptedSerializableClosures(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('unsupported_value_type');
+
+        Serializer::serializeWithCodec('avro', [new SerializableClosure(static fn (): string => 'php-only')]);
     }
 
     private function testSerializeUnserialize($data, $serializer, $unserializer): void

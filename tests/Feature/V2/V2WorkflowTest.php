@@ -48,6 +48,7 @@ use Tests\Fixtures\V2\TestSignalWorkflow;
 use Tests\Fixtures\V2\TestTimerWorkflow;
 use Tests\Fixtures\V2\TestUpdateWorkflow;
 use Tests\TestCase;
+use Workflow\Serializers\AvroBinaryValue;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\ActivityTaskBridge;
 use Workflow\V2\AsyncWorkflow;
@@ -3773,7 +3774,12 @@ final class V2WorkflowTest extends TestCase
 
         $this->assertSame(AsyncWorkflow::class, $asyncRun->workflow_class);
         $this->assertSame('durable-workflow.async', $asyncRun->workflow_type);
+        $this->assertSame('avro', $asyncRun->payload_codec);
         $this->assertSame(RunStatus::Completed, $asyncRun->status);
+
+        $asyncArguments = Serializer::unserializeWithCodec('avro', (string) $asyncRun->arguments);
+        $this->assertCount(1, $asyncArguments);
+        $this->assertInstanceOf(AvroBinaryValue::class, $asyncArguments[0]);
 
         /** @var WorkflowHistoryEvent $childScheduled */
         $childScheduled = WorkflowHistoryEvent::query()

@@ -11,7 +11,9 @@ use RuntimeException;
 use Tests\NonDatabaseTestCase;
 use TypeError;
 use Workflow\Serializers\Serializer;
+use Workflow\V2\Enums\StructuralLimitKind;
 use Workflow\V2\Exceptions\RestoredWorkflowException;
+use Workflow\V2\Exceptions\StructuralLimitExceededException;
 use Workflow\V2\Support\FailureFactory;
 
 final class FailureFactoryRestoreTest extends NonDatabaseTestCase
@@ -68,6 +70,25 @@ final class FailureFactoryRestoreTest extends NonDatabaseTestCase
 
         $this->assertInstanceOf(Exception::class, $restored);
         $this->assertSame('base exception sanity check', $restored->getMessage());
+    }
+
+    public function testStructuralLimitPropertiesRoundTripThroughAvro(): void
+    {
+        $original = StructuralLimitExceededException::payloadSize(200, 64);
+        $payload = FailureFactory::payload($original);
+        $properties = array_column($payload['properties'], 'value', 'name');
+
+        $this->assertSame(StructuralLimitKind::PayloadSize->value, $properties['limitKind']);
+        $this->assertSame(200, $properties['currentValue']);
+        $this->assertSame(64, $properties['configuredLimit']);
+
+        $decoded = Serializer::unserializeWithCodec('avro', Serializer::serializeWithCodec('avro', $payload));
+        $restored = FailureFactory::restoreForReplay($decoded);
+
+        $this->assertInstanceOf(StructuralLimitExceededException::class, $restored);
+        $this->assertSame(StructuralLimitKind::PayloadSize, $restored->limitKind);
+        $this->assertSame(200, $restored->currentValue);
+        $this->assertSame(64, $restored->configuredLimit);
     }
 
     public function testReplayPreservesStructuredFailureMetadata(): void

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Workflow\V2\Support;
 
+use BackedEnum;
 use Error;
 use Exception;
 use Illuminate\Database\QueryException;
@@ -11,10 +12,14 @@ use Illuminate\Queue\MaxAttemptsExceededException;
 use PDOException;
 use ReflectionClass;
 use ReflectionException;
+use ReflectionNamedType;
 use ReflectionProperty;
 use RuntimeException;
 use Throwable;
+use UnitEnum;
 use Workflow\Exceptions\NonRetryableExceptionContract;
+use Workflow\Serializers\AvroBinaryValue;
+use Workflow\Serializers\AvroMapValue;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Enums\FailureCategory;
 use Workflow\V2\Exceptions\RestoredWorkflowException;
@@ -542,16 +547,18 @@ final class FailureFactory
                         continue;
                     }
 
-                    $value = Serializer::serializeModels($property->getValue($throwable));
+                    $normalized = self::normalizePropertyValue(
+                        Serializer::serializeModels($property->getValue($throwable)),
+                    );
 
-                    if (! Serializer::serializable($value)) {
+                    if (! $normalized['supported']) {
                         continue;
                     }
 
                     $properties[] = [
                         'declaring_class' => $reflection->getName(),
                         'name' => $property->getName(),
-                        'value' => $value,
+                        'value' => $normalized['value'],
                     ];
                 }
             }
@@ -564,6 +571,113 @@ final class FailureFactory
         }
 
         return $properties;
+    }
+
+    /**
+     * Normalize reflected exception state into the fixed Avro Value domain.
+     * Backed enums use their scalar value; unit enums use their case name.
+     * Unsupported objects and malformed map/string values omit only that
+     * diagnostic property instead of making the durable failure unencodable.
+     *
+     * @return array{supported: bool, value: mixed}
+     */
+    private static function normalizePropertyValue(mixed $value): array
+    {
+        if ($value instanceof BackedEnum) {
+            return [
+                'supported' => true,
+                'value' => $value->value,
+            ];
+        }
+
+        if ($value instanceof UnitEnum) {
+            return [
+                'supported' => true,
+                'value' => $value->name,
+            ];
+        }
+
+        if ($value instanceof AvroBinaryValue) {
+            return [
+                'supported' => true,
+                'value' => $value,
+            ];
+        }
+
+        if ($value instanceof AvroMapValue) {
+            $pairs = [];
+
+            foreach ($value->pairs as [$key, $item]) {
+                $normalized = self::normalizePropertyValue($item);
+                if (! $normalized['supported']) {
+                    return [
+                        'supported' => false,
+                        'value' => null,
+                    ];
+                }
+
+                $pairs[] = [$key, $normalized['value']];
+            }
+
+            return [
+                'supported' => true,
+                'value' => AvroMapValue::fromPairs($pairs),
+            ];
+        }
+
+        if ($value === null || is_bool($value) || is_int($value)) {
+            return [
+                'supported' => true,
+                'value' => $value,
+            ];
+        }
+
+        if (is_float($value)) {
+            return [
+                'supported' => is_finite($value),
+                'value' => $value,
+            ];
+        }
+
+        if (is_string($value)) {
+            return [
+                'supported' => preg_match('//u', $value) === 1,
+                'value' => $value,
+            ];
+        }
+
+        if (is_array($value)) {
+            $items = [];
+
+            foreach ($value as $key => $item) {
+                if (! array_is_list($value) && ! is_string($key)) {
+                    return [
+                        'supported' => false,
+                        'value' => null,
+                    ];
+                }
+
+                $normalized = self::normalizePropertyValue($item);
+                if (! $normalized['supported']) {
+                    return [
+                        'supported' => false,
+                        'value' => null,
+                    ];
+                }
+
+                $items[$key] = $normalized['value'];
+            }
+
+            return [
+                'supported' => true,
+                'value' => $items,
+            ];
+        }
+
+        return [
+            'supported' => false,
+            'value' => null,
+        ];
     }
 
     /**
@@ -735,13 +849,43 @@ final class FailureFactory
             }
 
             try {
-                self::setThrowableProperty($throwable, $candidate, $property, $value);
+                self::setThrowableProperty(
+                    $throwable,
+                    $candidate,
+                    $property,
+                    self::restoreEnumPropertyValue($candidate, $property, $value),
+                );
 
                 return;
             } catch (Throwable) {
                 // A renamed exception should still be catchable even if one custom field no longer exists.
             }
         }
+    }
+
+    private static function restoreEnumPropertyValue(string $class, string $property, mixed $value): mixed
+    {
+        $type = (new ReflectionProperty($class, $property))->getType();
+        if (! $type instanceof ReflectionNamedType || $value === null) {
+            return $value;
+        }
+
+        $enumClass = $type->getName();
+        if (! enum_exists($enumClass)) {
+            return $value;
+        }
+
+        foreach ($enumClass::cases() as $case) {
+            if ($case instanceof BackedEnum && $case->value === $value) {
+                return $case;
+            }
+
+            if (! $case instanceof BackedEnum && is_string($value) && $case->name === $value) {
+                return $case;
+            }
+        }
+
+        return $value;
     }
 
     /**

@@ -18,12 +18,15 @@ use Tests\Fixtures\V2\TestManySideEffectsWorkflow;
 use Tests\Fixtures\V2\TestSignalWorkflow;
 use Tests\Fixtures\V2\TestUpdateWorkflow;
 use Tests\TestCase;
+use Workflow\Serializers\Serializer;
 use Workflow\V2\Enums\ActivityStatus;
 use Workflow\V2\Enums\FailureCategory;
 use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Enums\RunStatus;
 use Workflow\V2\Enums\SignalStatus;
+use Workflow\V2\Enums\StructuralLimitKind;
 use Workflow\V2\Enums\UpdateStatus;
+use Workflow\V2\Exceptions\StructuralLimitExceededException;
 use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowCommand;
 use Workflow\V2\Models\WorkflowFailure;
@@ -31,6 +34,7 @@ use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowSignal;
 use Workflow\V2\Models\WorkflowUpdate;
+use Workflow\V2\Support\FailureFactory;
 use Workflow\V2\Support\FailureSnapshots;
 use Workflow\V2\Support\StructuralLimits;
 use Workflow\V2\WorkflowStub;
@@ -340,6 +344,14 @@ final class V2StructuralLimitTest extends TestCase
             ->firstOrFail();
 
         $this->assertSame('payload_size', $failedActivityEvent->payload['structural_limit_kind'] ?? null);
+
+        $exceptionPayload = Serializer::unserializeWithCodec('avro', (string) $execution->exception);
+        $restored = FailureFactory::restoreForReplay($exceptionPayload);
+
+        $this->assertInstanceOf(StructuralLimitExceededException::class, $restored);
+        $this->assertSame(StructuralLimitKind::PayloadSize, $restored->limitKind);
+        $this->assertGreaterThan(64, $restored->currentValue);
+        $this->assertSame(64, $restored->configuredLimit);
 
         $failure = WorkflowFailure::query()
             ->where('workflow_run_id', $run->id)

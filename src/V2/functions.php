@@ -17,6 +17,7 @@ use Workflow\V2\Support\AwaitWithTimeoutCall;
 use Workflow\V2\Support\ChildWorkflowCall;
 use Workflow\V2\Support\ChildWorkflowOptions;
 use Workflow\V2\Support\ContinueAsNewCall;
+use Workflow\V2\Support\InternalAsyncClosurePayload;
 use Workflow\V2\Support\LocalActivityCall;
 use Workflow\V2\Support\LocalActivityOptions;
 use Workflow\V2\Support\ServiceOperationCall;
@@ -121,7 +122,10 @@ if (! function_exists(__NAMESPACE__ . '\\async')) {
             throw StraightLineWorkflowRequiredException::forAsyncCallback();
         }
 
-        return child(AsyncWorkflow::class, new SerializableClosure(\Closure::fromCallable($callback)));
+        return child(
+            AsyncWorkflow::class,
+            InternalAsyncClosurePayload::encode(new SerializableClosure(\Closure::fromCallable($callback))),
+        );
     }
 }
 
