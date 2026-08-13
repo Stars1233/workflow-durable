@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Advanced the Workflow package source to `2.0.0-rc.30` with Avro as the sole
+  public Durable Workflow 2.0 payload codec. JSON remains the HTTP document
+  transport and unsupported payload codec tags fail closed.
 - Platform conformance suite version 41 makes the lifecycle-neutral worker
   protocol OpenAPI bytes the current conformance authority. The former
   beta-worded binding remains available only through its explicit historical

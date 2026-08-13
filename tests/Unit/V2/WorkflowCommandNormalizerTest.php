@@ -89,7 +89,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
 
     public function testCompleteWorkflowPreservesEnvelopeCodec(): void
     {
-        $blob = Serializer::serializeWithCodec('workflow-serializer-y', [
+        $blob = Serializer::serializeWithCodec('avro', [
             'ok' => true,
         ]);
 
@@ -97,7 +97,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
             [
                 'type' => 'complete_workflow',
                 'result' => [
-                    'codec' => 'workflow-serializer-y',
+                    'codec' => 'avro',
                     'blob' => $blob,
                 ],
             ],
@@ -106,32 +106,24 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
         $this->assertSame([[
             'type' => 'complete_workflow',
             'result' => $blob,
-            'payload_codec' => 'workflow-serializer-y',
+            'payload_codec' => 'avro',
         ]], $out);
     }
 
-    public function testCompleteWorkflowAcceptsJsonEnvelope(): void
+    public function testCompleteWorkflowRejectsJsonEnvelope(): void
     {
-        $blob = Serializer::serializeWithCodec('json', [
-            'scenario' => 'php_created_python_workflow',
-            'workflow_runtime' => 'sdk-python',
-        ]);
+        $this->expectException(ValidationException::class);
+        $this->expectExceptionMessage('unsupported_payload_codec');
 
-        $out = WorkflowCommandNormalizer::normalize([
+        WorkflowCommandNormalizer::normalize([
             [
                 'type' => 'complete_workflow',
                 'result' => [
                     'codec' => 'json',
-                    'blob' => $blob,
+                    'blob' => '{"stale":true}',
                 ],
             ],
         ]);
-
-        $this->assertSame([[
-            'type' => 'complete_workflow',
-            'result' => $blob,
-            'payload_codec' => 'json',
-        ]], $out);
     }
 
     public function testFailWorkflowRequiresNonEmptyMessage(): void
@@ -218,14 +210,14 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
 
     public function testScheduleActivityPreservesArgumentsEnvelopeCodec(): void
     {
-        $arguments = Serializer::serializeWithCodec('workflow-serializer-y', ['hi']);
+        $arguments = Serializer::serializeWithCodec('avro', ['hi']);
 
         $out = WorkflowCommandNormalizer::normalize([
             [
                 'type' => 'schedule_activity',
                 'activity_type' => 'SendEmail',
                 'arguments' => [
-                    'codec' => 'workflow-serializer-y',
+                    'codec' => 'avro',
                     'blob' => $arguments,
                 ],
             ],
@@ -235,7 +227,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
             'type' => 'schedule_activity',
             'activity_type' => 'SendEmail',
             'arguments' => $arguments,
-            'payload_codec' => 'workflow-serializer-y',
+            'payload_codec' => 'avro',
         ]], $out);
     }
 
@@ -409,16 +401,15 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
 
     public function testContinueAsNewDropsPayloadCodecWithoutArguments(): void
     {
-        $out = WorkflowCommandNormalizer::normalize([
+        $this->expectException(ValidationException::class);
+        $this->expectExceptionMessage('unsupported_payload_codec');
+
+        WorkflowCommandNormalizer::normalize([
             [
                 'type' => 'continue_as_new',
                 'payload_codec' => ' Workflow\\Serializers\\Y ',
             ],
         ]);
-
-        $this->assertSame([[
-            'type' => 'continue_as_new',
-        ]], $out);
     }
 
     public function testContinueAsNewRejectsUnknownPayloadCodec(): void
@@ -457,7 +448,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
 
     public function testStartServiceOperationNormalizesPayloadEnvelopeAndCallerMetadata(): void
     {
-        $requestPayload = Serializer::serializeWithCodec('json', [
+        $requestPayload = Serializer::serializeWithCodec('avro', [
             'amount' => 4200,
             'currency' => 'USD',
         ]);
@@ -469,7 +460,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
                 'service_name' => 'PythonPayments',
                 'operation_name' => 'authorize',
                 'request_payload' => [
-                    'codec' => 'json',
+                    'codec' => 'avro',
                     'blob' => $requestPayload,
                 ],
                 'service_call_id' => 'svc-php-1',
@@ -491,7 +482,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
             'service_name' => 'PythonPayments',
             'operation_name' => 'authorize',
             'request_payload' => $requestPayload,
-            'payload_codec' => 'json',
+            'payload_codec' => 'avro',
             'service_call_id' => 'svc-php-1',
             'idempotency_key' => 'workflow-service-operation:wf-1:run-1:1',
             'mode_override' => 'async',
@@ -532,7 +523,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
 
     public function testCompleteUpdateAcceptsExplicitPayloadCodec(): void
     {
-        $blob = Serializer::serializeWithCodec('workflow-serializer-y', [
+        $blob = Serializer::serializeWithCodec('avro', [
             'approved' => true,
         ]);
 
@@ -541,7 +532,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
                 'type' => 'complete_update',
                 'update_id' => '01UPDATE000000000000000001',
                 'result' => $blob,
-                'payload_codec' => 'workflow-serializer-y',
+                'payload_codec' => 'avro',
             ],
         ]);
 
@@ -549,7 +540,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
             'type' => 'complete_update',
             'update_id' => '01UPDATE000000000000000001',
             'result' => $blob,
-            'payload_codec' => 'workflow-serializer-y',
+            'payload_codec' => 'avro',
         ]], $out);
     }
 
@@ -632,7 +623,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
 
     public function testRecordSideEffectUnwrapsEnvelopeWithPayloadCodec(): void
     {
-        $blob = Serializer::serializeWithCodec('workflow-serializer-y', [
+        $blob = Serializer::serializeWithCodec('avro', [
             'seed' => 123,
         ]);
 
@@ -640,7 +631,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
             [
                 'type' => 'record_side_effect',
                 'result' => [
-                    'codec' => 'workflow-serializer-y',
+                    'codec' => 'avro',
                     'blob' => $blob,
                 ],
             ],
@@ -649,7 +640,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
         $this->assertSame([[
             'type' => 'record_side_effect',
             'result' => $blob,
-            'payload_codec' => 'workflow-serializer-y',
+            'payload_codec' => 'avro',
         ]], $out);
     }
 

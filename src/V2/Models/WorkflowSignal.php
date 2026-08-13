@@ -83,7 +83,7 @@ class WorkflowSignal extends Model
 
         $arguments = is_string($this->payload_codec) && $this->payload_codec !== ''
             ? Serializer::unserializeWithCodec($this->payload_codec, $blob)
-            : Serializer::unserialize($blob);
+            : Serializer::unserializeWithCodec('avro', $blob);
 
         return is_array($arguments)
             ? array_values($arguments)

@@ -337,7 +337,6 @@ final class WorkerProtocolVersion
             'service_operation_command' => self::serviceOperationCommandShape(),
             'fail_workflow_command' => self::failWorkflowCommandShape(),
             'payload_codecs_universal' => CodecRegistry::universal(),
-            'payload_codecs_engine_specific' => CodecRegistry::engineSpecific(),
             'unsupported_payload_codec_reason' => self::REASON_UNSUPPORTED_PAYLOAD_CODEC,
             'invocable_carrier' => self::invocableCarrierSemantics(),
             'task_queue_priority_fairness' => self::taskQueuePriorityFairnessSemantics(),

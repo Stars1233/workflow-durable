@@ -37,7 +37,7 @@
         "status": "completed",
         "outcome": "completed",
         "response_payload": {
-          "codec": "json",
+          "codec": "avro",
           "blob": "{\"truncated\":"
         }
       },

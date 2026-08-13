@@ -118,12 +118,13 @@
         "invocable_carrier_contract": {"type": "boolean"},
         "payload_codecs": {
           "type": "array",
-          "items": {"type": "string"},
-          "description": "Codec ids accepted on every namespace. Engine-specific codecs are advertised separately under `payload_codecs_engine_specific`."
+          "const": ["avro"],
+          "description": "The sole Durable Workflow 2.0 payload codec. HTTP request and response documents remain JSON transport."
         },
         "payload_codecs_engine_specific": {
           "type": "object",
-          "description": "Map of engine id to the additional codec ids that engine accepts beyond the universal set."
+          "maxProperties": 0,
+          "description": "Reserved empty map. V2 exposes no engine-specific payload codec choices."
         },
         "response_compression": {
           "type": "array",

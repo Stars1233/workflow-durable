@@ -629,8 +629,8 @@ final class ActivityOutcomeRecorder
     /**
      * Serialize an activity payload, preferring the worker-supplied codec
      * (treats $value as already-serialized bytes), then the parent run's
-     * codec (with a chooseCodecForData PHP-only fallback), then the package
-     * default.
+     * codec, then the parent run's codec, then the package default. Every
+     * selectable v2 codec resolves to Avro.
      *
      * @return array{blob: string, codec: string}
      */

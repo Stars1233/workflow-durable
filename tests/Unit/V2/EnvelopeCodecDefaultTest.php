@@ -108,17 +108,17 @@ final class EnvelopeCodecDefaultTest extends TestCase
         $run->outputEnvelope();
     }
 
-    public function testWorkflowRunOutputEnvelopePrefersDedicatedOutputPayloadCodec(): void
+    public function testWorkflowRunOutputEnvelopeRejectsNonAvroDedicatedCodec(): void
     {
         $run = new WorkflowRun();
         $run->payload_codec = 'avro';
         $run->output_payload_codec = 'workflow-serializer-y';
         $run->output = 'y-bytes';
 
-        $this->assertSame([
-            'codec' => 'workflow-serializer-y',
-            'blob' => 'y-bytes',
-        ], $run->outputEnvelope());
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('unsupported_payload_codec');
+
+        $run->outputEnvelope();
     }
 
     public function testWorkflowUpdateResultEnvelopeFallsBackToAvroWhenJsonIsConfigured(): void

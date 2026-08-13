@@ -588,7 +588,7 @@ final class FailureFactory
         ?string $fallbackType = null,
     ): array {
         if (is_string($payload)) {
-            $payload = Serializer::unserialize($payload);
+            $payload = Serializer::unserializeWithCodec('avro', $payload);
         }
 
         if (! is_array($payload)) {

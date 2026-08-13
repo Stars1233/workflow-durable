@@ -7,6 +7,7 @@ namespace Workflow\V2\Support;
 use DateTimeInterface;
 use Illuminate\Support\Str;
 use Throwable;
+use Workflow\Serializers\CodecRegistry;
 use Workflow\V2\Contracts\ServiceBoundaryPolicy;
 use Workflow\V2\Contracts\ServiceControlPlane;
 use Workflow\V2\Contracts\WorkflowControlPlane;
@@ -589,7 +590,9 @@ final class DefaultServiceControlPlane implements ServiceControlPlane
             ?->value
             ?? ServiceCallOperationMode::Async->value;
         $call->resolved_binding_kind = self::UNRESOLVED;
-        $call->payload_codec = $this->stringOption($options, 'payload_codec') ?? $call->payload_codec;
+        $call->payload_codec = CodecRegistry::canonicalize(
+            $this->stringOption($options, 'payload_codec') ?? $call->payload_codec,
+        );
         $call->input_payload_reference = $this->stringOption($options, 'input_payload_reference')
             ?? $this->stringOption($options, 'request_payload_reference')
             ?? $call->input_payload_reference;

@@ -273,46 +273,39 @@ final class BackendCapabilitiesTest extends TestCase
         $this->assertSame('error', $queueIssue['severity']);
     }
 
-    public function testJsonCodecConfigIsUniversalAndAvroRemainsDefault(): void
+    public function testJsonCodecConfigFailsClosedAndAvroRemainsDefault(): void
     {
         config()->set('workflows.serializer', 'json');
 
         $snapshot = BackendCapabilities::snapshot();
 
         $this->assertSame('avro', $snapshot['codec']['canonical']);
-        $this->assertSame('json', $snapshot['codec']['configured_canonical']);
+        $this->assertNull($snapshot['codec']['configured_canonical']);
         $this->assertTrue($snapshot['codec']['universal']);
-        $this->assertTrue($snapshot['codec']['configured_universal']);
-        $this->assertTrue($snapshot['codec']['supported']);
-        $this->assertNull(collect($snapshot['issues'])->firstWhere('code', 'codec_unknown'));
-        $this->assertNull(collect($snapshot['issues'])->firstWhere('code', 'codec_legacy_php_only'));
+        $this->assertFalse($snapshot['codec']['configured_universal']);
+        $this->assertFalse($snapshot['codec']['supported']);
+        $this->assertNotNull(collect($snapshot['issues'])->firstWhere('code', 'codec_unknown'));
     }
 
-    public function testLegacyPhpCodecEmitsPolyglotCompatibilityWarning(): void
+    public function testLegacyPhpCodecCannotConfigureV2(): void
     {
         config()->set('workflows.serializer', \Workflow\Serializers\Y::class);
 
         $snapshot = BackendCapabilities::snapshot();
 
         $this->assertSame('avro', $snapshot['codec']['canonical']);
-        $this->assertSame('workflow-serializer-y', $snapshot['codec']['configured_canonical']);
+        $this->assertNull($snapshot['codec']['configured_canonical']);
         $this->assertTrue($snapshot['codec']['universal']);
         $this->assertFalse($snapshot['codec']['configured_universal']);
 
         $codecIssue = collect($snapshot['issues'])
-            ->firstWhere('code', 'codec_legacy_php_only');
+            ->firstWhere('code', 'codec_unknown');
 
         $this->assertNotNull($codecIssue);
-        $this->assertSame('warning', $codecIssue['severity']);
+        $this->assertSame('error', $codecIssue['severity']);
         $this->assertSame('codec', $codecIssue['component']);
-        $this->assertStringContainsString('workflow-serializer-y', $codecIssue['message']);
-
-        // A legacy-codec warning must not fail the codec component itself:
-        // final v2 still starts new runs with Avro, and the configured legacy
-        // value remains a diagnostic for v1 drain/import reads. Other
-        // components in the test env may still fail, so assert only on the
-        // codec component's own `supported` flag here.
-        $this->assertTrue($snapshot['codec']['supported']);
+        $this->assertStringContainsString('exactly one payload codec', $codecIssue['message']);
+        $this->assertFalse($snapshot['codec']['supported']);
     }
 
     public function testUnknownCodecStringProducesErrorSeverity(): void
@@ -343,20 +336,16 @@ final class BackendCapabilitiesTest extends TestCase
 
         $this->assertNotNull($codecIssue);
 
-        // The diagnostic must name the unsupported value and explain that
-        // custom serializer classes are not resolvable in v2.
+        // The diagnostic names the unsupported value and the sole v2 codec.
         $this->assertStringContainsString('App\\Custom\\V1Serializer', $codecIssue['message']);
-        $this->assertStringContainsString('does not support custom serializer classes', $codecIssue['message']);
+        $this->assertStringContainsString('exactly one payload codec', $codecIssue['message']);
 
         // It must name the universal codec options an operator can migrate to.
         foreach (CodecRegistry::universal() as $codec) {
             $this->assertStringContainsString($codec, $codecIssue['message']);
         }
 
-        // It must mention that default-codec resolution silently falls back
-        // to avro so operators understand why new runs still work — and that
-        // the unsupported value is being ignored.
-        $this->assertStringContainsString('falls back to "avro"', $codecIssue['message']);
+        $this->assertStringContainsString('Set workflows.serializer to "avro"', $codecIssue['message']);
     }
 
     public function testSnapshotIncludesSeverityRollupOfOkWhenAdmissionIsClean(): void
@@ -388,13 +377,9 @@ final class BackendCapabilitiesTest extends TestCase
         }
     }
 
-    public function testSnapshotSeverityRollupReportsWarningWhenOnlyWarningIssuesPresent(): void
+    public function testSnapshotSeverityRollupReportsErrorForLegacyCodec(): void
     {
-        // Establish a clean baseline so the only issue surfaced by the
-        // snapshot is the legacy-codec warning we are pinning here. The
-        // default test environment uses the sync queue driver, which would
-        // otherwise add an error-severity issue and shadow the rollup we
-        // want to assert.
+        // Establish a clean baseline so the legacy codec is the only issue.
         $originalDatabaseDefault = config('database.default');
 
         try {
@@ -414,17 +399,10 @@ final class BackendCapabilitiesTest extends TestCase
 
             $snapshot = BackendCapabilities::snapshot();
 
-            $codecIssue = collect($snapshot['issues'])->firstWhere('code', 'codec_legacy_php_only');
+            $codecIssue = collect($snapshot['issues'])->firstWhere('code', 'codec_unknown');
             $this->assertNotNull($codecIssue);
-            $this->assertSame('warning', $codecIssue['severity']);
-
-            $errorIssue = collect($snapshot['issues'])->firstWhere('severity', 'error');
-            $this->assertNull(
-                $errorIssue,
-                'This test pins the warning-only path; an error-severity issue here means the codec setup unexpectedly broke another component.',
-            );
-
-            $this->assertSame('warning', $snapshot['severity']);
+            $this->assertSame('error', $codecIssue['severity']);
+            $this->assertSame('error', $snapshot['severity']);
         } finally {
             config()->set('database.default', $originalDatabaseDefault);
         }

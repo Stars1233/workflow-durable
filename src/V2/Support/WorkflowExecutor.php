@@ -1555,10 +1555,8 @@ final class WorkflowExecutor
                 ->addSeconds($options->scheduleToCloseTimeout)
             : null;
 
-        // Activity arguments often contain consumer-side PHP objects (messages,
-        // DTOs, value objects) that the v2 default Avro codec can only encode
-        // by round-tripping through JSON. Persist the chosen codec beside the
-        // activity row so later reads never depend on payload sniffing.
+        // Persist the sole v2 codec beside the activity row. Callers must adapt
+        // PHP-only objects to values representable by the fixed Avro schema.
         $argumentsCodec = Serializer::chooseCodecForData($run->payload_codec, $activityCall->arguments);
         $serializedArguments = Serializer::serializeWithCodec($argumentsCodec, $activityCall->arguments);
         $this->logApproachingLimit(
@@ -1776,10 +1774,8 @@ final class WorkflowExecutor
         $preferredChildCodec = is_string($run->payload_codec) && $run->payload_codec !== ''
             ? $run->payload_codec
             : CodecRegistry::defaultCodec();
-        // When the child arguments carry PHP-only values (e.g. a
-        // SerializableClosure produced by async()), Avro cannot round-trip
-        // them. Pick the actually-used codec so the row's `payload_codec`
-        // matches what the blob was serialized with.
+        // PHP-only objects must be adapted before they reach this public v2
+        // boundary; child payloads never fall back to a legacy serializer.
         $childCodec = Serializer::chooseCodecForData($preferredChildCodec, $metadata->arguments);
         $serializedChildArguments = Serializer::serializeWithCodec($childCodec, $metadata->arguments);
         $this->logApproachingLimit(
@@ -4098,9 +4094,8 @@ final class WorkflowExecutor
     }
 
     /**
-     * Decode a payload bytes string using the run's pinned codec, falling
-     * back to the legacy codec-blind sniffer when no run codec is available
-     * (history events written before payload_codec was populated).
+     * Decode payload bytes using the run's pinned codec, treating an omitted
+     * codec as Avro without inspecting the payload bytes.
      */
     private function unserializePayloadWithRun(string $serialized, ?WorkflowRun $run): mixed
     {
@@ -4114,7 +4109,7 @@ final class WorkflowExecutor
             return Serializer::unserializeWithCodec($run->payload_codec, $serialized);
         }
 
-        return Serializer::unserialize($serialized);
+        return Serializer::unserializeWithCodec('avro', $serialized);
     }
 
     private function activityCompletionEvent(WorkflowRun $run, int $sequence): ?WorkflowHistoryEvent

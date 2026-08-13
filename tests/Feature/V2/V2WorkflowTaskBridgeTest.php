@@ -4159,7 +4159,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             ->firstOrFail();
         $this->bridge->claimStatus($childTask->id, 'external-child-worker');
 
-        $codec = 'workflow-serializer-y';
+        $codec = 'avro';
         $expected = [
             'child_result' => 'inline',
         ];
@@ -4352,7 +4352,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
 
         /** @var WorkflowTask $task */
         $task = $this->createLeasedTask($run);
-        $payload = Serializer::serializeWithCodec('workflow-serializer-y', [
+        $payload = Serializer::serializeWithCodec('avro', [
             'legacy' => true,
         ]);
 
@@ -4360,7 +4360,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             [
                 'type' => 'complete_workflow',
                 'result' => $payload,
-                'payload_codec' => 'workflow-serializer-y',
+                'payload_codec' => 'avro',
             ],
         ]);
 
@@ -4425,7 +4425,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         /** @var WorkflowTask $task */
         $task = $this->createLeasedTask($run);
 
-        $codec = 'workflow-serializer-y';
+        $codec = 'avro';
         $expected = [
             'message' => str_repeat('Y', 64),
         ];
@@ -4474,7 +4474,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         /** @var WorkflowTask $task */
         $task = $this->createLeasedTask($run);
 
-        $codec = 'workflow-serializer-y';
+        $codec = 'avro';
         $expected = [
             'message' => str_repeat('Y', 64),
         ];
@@ -4789,7 +4789,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
 
         /** @var WorkflowTask $task */
         $task = $this->createLeasedTask($run);
-        $codec = 'workflow-serializer-y';
+        $codec = 'avro';
         $serialized = Serializer::serializeWithCodec($codec, [
             'seed' => str_repeat('x', 256),
         ]);
@@ -5624,7 +5624,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             'payload' => WorkflowTaskPayload::forUpdate($update),
         ])->save();
 
-        $codec = 'workflow-serializer-y';
+        $codec = 'avro';
         $resultPayload = Serializer::serializeWithCodec($codec, [
             'approved' => true,
             'note' => str_repeat('r', 256),
@@ -5899,7 +5899,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         /** @var WorkflowTask $task */
         $task = $this->createLeasedTask($run);
 
-        $codec = 'workflow-serializer-y';
+        $codec = 'avro';
         $expected = ['Taylor', str_repeat('Y', 64)];
         $arguments = Serializer::serializeWithCodec($codec, $expected);
 
@@ -5953,7 +5953,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         /** @var WorkflowTask $task */
         $task = $this->createLeasedTask($run);
 
-        $codec = 'workflow-serializer-y';
+        $codec = 'avro';
         $expected = ['Taylor', str_repeat('Y', 64)];
         $arguments = Serializer::serializeWithCodec($codec, $expected);
 
@@ -7260,7 +7260,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         /** @var WorkflowTask $task */
         $task = $this->createLeasedTask($run);
 
-        $codec = 'workflow-serializer-y';
+        $codec = 'avro';
         $arguments = Serializer::serializeWithCodec($codec, ['child-arg']);
 
         $result = $this->bridge->complete($task->id, [
@@ -8500,9 +8500,9 @@ final class V2WorkflowTaskBridgeTest extends TestCase
     public function testCompleteContinueAsNewIgnoresPayloadCodecWhenArgumentsAreInherited(): void
     {
         $run = $this->createWaitingRun();
-        $inheritedArguments = Serializer::serializeWithCodec('workflow-serializer-y', ['Taylor']);
+        $inheritedArguments = Serializer::serializeWithCodec('avro', ['Taylor']);
         $run->forceFill([
-            'payload_codec' => 'workflow-serializer-y',
+            'payload_codec' => 'avro',
             'arguments' => $inheritedArguments,
         ])->save();
 
@@ -8527,7 +8527,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         /** @var WorkflowRun $continuedRun */
         $continuedRun = WorkflowRun::query()->findOrFail($link->child_workflow_run_id);
 
-        $this->assertSame('workflow-serializer-y', $continuedRun->payload_codec);
+        $this->assertSame('avro', $continuedRun->payload_codec);
         $this->assertSame($inheritedArguments, $continuedRun->arguments);
         $this->assertSame(['Taylor'], $continuedRun->workflowArguments());
     }
@@ -8565,8 +8565,8 @@ final class V2WorkflowTaskBridgeTest extends TestCase
     {
         $run = $this->createWaitingRun();
         $run->forceFill([
-            'payload_codec' => 'workflow-serializer-y',
-            'arguments' => Serializer::serializeWithCodec('workflow-serializer-y', ['Taylor']),
+            'payload_codec' => 'avro',
+            'arguments' => Serializer::serializeWithCodec('avro', ['Taylor']),
         ])->save();
 
         /** @var WorkflowTask $task */
@@ -8607,7 +8607,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         /** @var WorkflowTask $task */
         $task = $this->createLeasedTask($run);
 
-        $codec = 'workflow-serializer-y';
+        $codec = 'avro';
         $replacementArguments = Serializer::serializeWithCodec($codec, ['Avery']);
 
         $result = $this->bridge->complete($task->id, [

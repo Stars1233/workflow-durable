@@ -61,7 +61,7 @@ final class InvocableHttpAdapterTest extends TestCase
                     'currency' => $currency,
                 ],
             ],
-            resultCodec: 'json',
+            resultCodec: 'avro',
         );
 
         $response = $adapter->handle(json_encode($input, JSON_THROW_ON_ERROR));

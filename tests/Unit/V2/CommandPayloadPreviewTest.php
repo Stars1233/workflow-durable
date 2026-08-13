@@ -71,23 +71,18 @@ final class CommandPayloadPreviewTest extends NonDatabaseTestCase
         $this->assertSame($jsonBlob, CommandPayloadPreview::previewWithCodec($jsonBlob, 'avro'));
     }
 
-    public function testPreviewWithCodecAcceptsLegacyCodecFqcnAliases(): void
+    public function testPreviewWithCodecDoesNotDecodeLegacyCodecAliases(): void
     {
-        $blob = Serializer::serializeWithCodec('workflow-serializer-y', ['a', 'b']);
+        $blob = serialize(['a', 'b']);
 
-        $this->assertSame(
-            ['a', 'b'],
-            CommandPayloadPreview::previewWithCodec($blob, \Workflow\Serializers\Y::class),
-        );
+        $this->assertSame($blob, CommandPayloadPreview::previewWithCodec($blob, \Workflow\Serializers\Y::class));
     }
 
-    public function testPreviewWithCodecFallsThroughToLegacySniffWhenCodecNull(): void
+    public function testPreviewWithCodecDoesNotSniffUntaggedJsonWhenCodecIsNull(): void
     {
         $jsonBlob = '{"legacy":true}';
 
-        $this->assertSame([
-            'legacy' => true,
-        ], CommandPayloadPreview::previewWithCodec($jsonBlob, null),);
+        $this->assertSame($jsonBlob, CommandPayloadPreview::previewWithCodec($jsonBlob, null));
     }
 
     public function testPreviewWithCodecReturnsExternalPayloadEnvelopeForStoredReferences(): void

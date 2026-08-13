@@ -10,6 +10,7 @@ use Workflow\Serializers\Avro;
 use Workflow\Serializers\AvroBinaryValue;
 use Workflow\Serializers\AvroMapValue;
 use Workflow\Serializers\CodecDecodeException;
+use Workflow\Serializers\CodecRegistry;
 
 final class AvroValueProtocolTest extends TestCase
 {
@@ -141,6 +142,7 @@ final class AvroValueProtocolTest extends TestCase
             'fixture_schema' => 'durable-workflow.codec-regression/v1',
             'id' => 'non-finite-double',
             'protocol' => [
+                'codec' => 'avro',
                 'fingerprint' => Avro::valueSchemaFingerprint(),
             ],
             'bindings' => ['php'],
@@ -229,6 +231,23 @@ final class AvroValueProtocolTest extends TestCase
     {
         self::assertSame('durable-workflow.codec-regression/v1', $fixture['fixture_schema'] ?? null);
         self::assertContains('php', $fixture['bindings'] ?? []);
+
+        if (($fixture['protocol']['codec'] ?? null) === 'json') {
+            self::assertSame('decode_reject', $fixture['failure_policy']['operation'] ?? null);
+            self::assertSame('unsupported_payload_codec', $fixture['failure_policy']['error'] ?? null);
+
+            try {
+                CodecRegistry::canonicalize('json');
+                self::fail('Expected json-tagged payload codec to be rejected.');
+            } catch (InvalidArgumentException $exception) {
+                self::assertStringContainsString('unsupported_payload_codec', $exception->getMessage());
+                self::assertStringContainsString('HTTP document transport', $exception->getMessage());
+            }
+
+            return;
+        }
+
+        self::assertSame('avro', $fixture['protocol']['codec'] ?? null);
         self::assertSame(Avro::valueSchemaFingerprint(), $fixture['protocol']['fingerprint'] ?? null);
 
         $value = self::taggedValue($fixture['value']);

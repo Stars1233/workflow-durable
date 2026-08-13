@@ -11,7 +11,7 @@
     "arguments": [
       "single-activity"
     ],
-    "payload_codec": "json"
+    "payload_codec": "avro"
   },
   "command_sequence": [
     {
@@ -21,7 +21,7 @@
         {
           "type": "schedule_activity",
           "activity_type": "Tests\\Fixtures\\V2\\TestGreetingActivity",
-          "payload_codec": "json"
+          "payload_codec": "avro"
         }
       ],
       "resume_with": "Hello, Ada!"

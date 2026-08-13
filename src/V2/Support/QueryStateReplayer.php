@@ -1057,7 +1057,7 @@ final class QueryStateReplayer
             'available' => true,
             'value' => $codec !== null
                 ? Serializer::unserializeWithCodec($codec, $serialized)
-                : Serializer::unserialize($serialized),
+                : Serializer::unserializeWithCodec('avro', $serialized),
         ];
     }
 
@@ -1181,7 +1181,7 @@ final class QueryStateReplayer
             return Serializer::unserializeWithCodec($run->payload_codec, $serialized);
         }
 
-        return Serializer::unserialize($serialized);
+        return Serializer::unserializeWithCodec('avro', $serialized);
     }
 
     private function conditionWaitResolutionEvent(WorkflowRun $run, int $sequence): ?WorkflowHistoryEvent
@@ -1638,7 +1638,7 @@ final class QueryStateReplayer
             return Serializer::unserializeWithCodec($run->payload_codec, $serialized);
         }
 
-        return Serializer::unserialize($serialized);
+        return Serializer::unserializeWithCodec('avro', $serialized);
     }
 
     private function applyRecordedUpdates(

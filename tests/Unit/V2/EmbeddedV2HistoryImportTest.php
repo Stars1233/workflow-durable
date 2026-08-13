@@ -132,6 +132,69 @@ final class EmbeddedV2HistoryImportTest extends TestCase
         $this->assertFalse(WorkflowRun::query()->whereKey($runId)->exists());
     }
 
+    public function testItRejectsJsonAsTheTopLevelPayloadCodecWithoutWritingRows(): void
+    {
+        $bundle = $this->runningBundleWithOpenWork();
+        $runId = $bundle['workflow']['run_id'];
+        $bundle['payloads']['codec'] = 'json';
+        $bundle = $this->resealBundle($bundle);
+        $this->clearWorkflowState();
+
+        $report = EmbeddedV2HistoryImport::import($bundle);
+
+        $this->assertSame('rejected', $report['status']);
+        $this->assertContains('payload_codec.unsupported', array_column($report['eligibility']['errors'], 'rule'));
+        $this->assertStringContainsString(
+            'payloads.codec',
+            implode(' ', array_column($report['eligibility']['errors'], 'message')),
+        );
+        $this->assertFalse(WorkflowRun::query()->whereKey($runId)->exists());
+        $this->assertSame(0, WorkflowHistoryEvent::query()->where('workflow_run_id', $runId)->count());
+    }
+
+    public function testItRejectsJsonInANestedHistoryPayloadWithoutWritingRows(): void
+    {
+        $bundle = $this->runningBundleWithOpenWork();
+        $runId = $bundle['workflow']['run_id'];
+        $bundle['history_events'][0]['payload']['payload_codec'] = 'json';
+        $bundle = $this->resealBundle($bundle);
+        $this->clearWorkflowState();
+
+        $report = EmbeddedV2HistoryImport::import($bundle);
+
+        $this->assertSame('rejected', $report['status']);
+        $this->assertContains('payload_codec.unsupported', array_column($report['eligibility']['errors'], 'rule'));
+        $this->assertStringContainsString(
+            'history_events.0.payload.payload_codec',
+            implode(' ', array_column($report['eligibility']['errors'], 'message')),
+        );
+        $this->assertFalse(WorkflowRun::query()->whereKey($runId)->exists());
+        $this->assertSame(0, WorkflowHistoryEvent::query()->where('workflow_run_id', $runId)->count());
+    }
+
+    public function testItRejectsNamedJsonCodecsAnywhereInTheBundleWithoutWritingRows(): void
+    {
+        $bundle = $this->runningBundleWithOpenWork();
+        $runId = $bundle['workflow']['run_id'];
+        $bundle['timeline'] = [[
+            'label' => 'future-payload-projection',
+            'details_payload_codec' => 'json',
+        ]];
+        $bundle = $this->resealBundle($bundle);
+        $this->clearWorkflowState();
+
+        $report = EmbeddedV2HistoryImport::import($bundle);
+
+        $this->assertSame('rejected', $report['status']);
+        $this->assertContains('payload_codec.unsupported', array_column($report['eligibility']['errors'], 'rule'));
+        $this->assertStringContainsString(
+            'timeline.0.details_payload_codec',
+            implode(' ', array_column($report['eligibility']['errors'], 'message')),
+        );
+        $this->assertFalse(WorkflowRun::query()->whereKey($runId)->exists());
+        $this->assertSame(0, WorkflowHistoryEvent::query()->where('workflow_run_id', $runId)->count());
+    }
+
     public function testItImportsExternalizedActivityPayloadEnvelopesWithoutDroppingReferences(): void
     {
         $bundle = $this->runningBundleWithOpenWork();

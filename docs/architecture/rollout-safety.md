@@ -351,10 +351,9 @@ first-party SDK workers, and future non-PHP workers is:
   `complete_workflow.payload_codec`, `schedule_activity.payload_codec`, and
   `continue_as_new.payload_codec` all inherit the current run codec when
   omitted.
-  `CodecRegistry::universal()` is the language-neutral advertised codec
-  set; PHP-only codecs are advertised separately under
-  `payload_codecs_engine_specific` and must not be required of non-PHP
-  workers. A worker that cannot decode an input codec fails closed with
+  `CodecRegistry::universal()` is exactly `["avro"]`; no engine-specific v2
+  codecs are advertised. PHP-only v1 serializers remain confined to the
+  internal import/drain boundary. A worker that cannot decode an input codec fails closed with
   `unsupported_payload_codec`; it does not reinterpret the bytes
   through another codec or silently drop the task.
 

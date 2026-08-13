@@ -371,6 +371,10 @@ final class DefaultWorkflowControlPlane implements WorkflowControlPlane
 
     public function signal(string $instanceId, string $name, array $options = []): array
     {
+        $payloadCodec = is_string($options['payload_codec'] ?? null)
+            ? CodecRegistry::canonicalize($options['payload_codec'])
+            : null;
+        $payloadBlob = $options['payload_blob'] ?? null;
         $loaded = $this->loadControlPlaneWorkflow($instanceId, $options);
 
         if (($loaded['error'] ?? null) !== null) {
@@ -384,9 +388,6 @@ final class DefaultWorkflowControlPlane implements WorkflowControlPlane
         }
 
         $arguments = $this->commandArguments($options);
-        $payloadCodec = $options['payload_codec'] ?? null;
-        $payloadBlob = $options['payload_blob'] ?? null;
-
         $result = $stub
             ->withCommandContext($this->commandContext($options))
             ->attemptSignalWithArguments($name, $arguments, $payloadCodec, $payloadBlob);

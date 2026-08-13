@@ -7,16 +7,14 @@ namespace Tests\Unit\V2;
 use Orchestra\Testbench\TestCase;
 use ReflectionMethod;
 use Workflow\Serializers\Serializer;
+use Workflow\V2\Exceptions\WorkflowPayloadDecodeException;
 use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Support\WorkflowExecutor;
 
 /**
- * #331 regression: signalValue() must decode the serialized signal payload
- * using the run's pinned payload_codec. Previously it called the codec-blind
- * Serializer::unserialize(), which cannot decode binary Avro by sniffing and
- * can misread legacy PHP codec payloads. The fix is to thread the run through
- * signalValue() and delegate to unserializePayloadWithRun().
+ * signalValue() must decode the serialized signal payload using the run's
+ * pinned payload_codec and must not infer a codec from untagged bytes.
  */
 final class SignalValueCodecTest extends TestCase
 {
@@ -38,37 +36,46 @@ final class SignalValueCodecTest extends TestCase
         $this->assertSame($value, $this->invokeSignalValue($event, $run));
     }
 
-    public function testSignalValueDecodesLegacyPhpEncodedPayloadWithRunCodec(): void
+    public function testSignalValueRejectsJsonTaggedPayloadWithRunCodec(): void
+    {
+        $event = new WorkflowHistoryEvent();
+        $event->payload = [
+            'value' => '{"count":3}',
+        ];
+
+        $run = new WorkflowRun();
+        $run->payload_codec = 'json';
+
+        $this->expectException(WorkflowPayloadDecodeException::class);
+        $this->expectExceptionMessage('unsupported_payload_codec');
+
+        $this->invokeSignalValue($event, $run);
+    }
+
+    public function testSignalValueDefaultsMissingRunCodecToAvro(): void
     {
         $value = [
-            'count' => 3,
+            'approved' => true,
         ];
 
         $event = new WorkflowHistoryEvent();
         $event->payload = [
-            'value' => Serializer::serializeWithCodec('workflow-serializer-y', $value),
+            'value' => Serializer::serializeWithCodec('avro', $value),
         ];
 
-        $run = new WorkflowRun();
-        $run->payload_codec = 'workflow-serializer-y';
-
-        $this->assertSame($value, $this->invokeSignalValue($event, $run));
+        $this->assertSame($value, $this->invokeSignalValue($event, null));
     }
 
-    public function testSignalValueFallsBackToCodecBlindWhenRunCodecUnavailable(): void
+    public function testSignalValueDoesNotSniffUntaggedJsonWhenRunCodecUnavailable(): void
     {
-        $value = [
-            'legacy' => 'payload',
-        ];
-
         $event = new WorkflowHistoryEvent();
         $event->payload = [
             'value' => '{"legacy":"payload"}',
         ];
 
-        // Legacy untagged JSON blobs written before payload_codec was
-        // populated still round-trip through the codec-blind sniffer path.
-        $this->assertSame($value, $this->invokeSignalValue($event, null));
+        $this->expectException(WorkflowPayloadDecodeException::class);
+
+        $this->invokeSignalValue($event, null);
     }
 
     public function testSignalValueReturnsNullForMissingSerializedValue(): void

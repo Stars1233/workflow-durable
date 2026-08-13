@@ -112,8 +112,8 @@ final class V2ServiceResponseReplayTest extends TestCase
             'auth_code' => 'A-42',
         ];
         $envelope = [
-            'codec' => 'json',
-            'blob' => Serializer::serializeWithCodec('json', $expected),
+            'codec' => 'avro',
+            'blob' => Serializer::serializeWithCodec('avro', $expected),
         ];
 
         foreach ($this->serviceEventTypes() as $eventType) {
@@ -147,16 +147,16 @@ final class V2ServiceResponseReplayTest extends TestCase
             [
                 'name' => 'undecodable inline blob',
                 'payload' => [
-                    'codec' => 'json',
+                    'codec' => 'avro',
                     'blob' => '{"truncated":',
                 ],
                 'exception' => CodecDecodeException::class,
-                'message' => 'Failed to JSON-decode payload',
+                'message' => 'invalid_payload_framing',
             ],
             [
                 'name' => 'invalid external reference',
                 'payload' => [
-                    'codec' => 'json',
+                    'codec' => 'avro',
                     'external_storage' => [
                         'key' => 'payload',
                     ],
@@ -167,13 +167,13 @@ final class V2ServiceResponseReplayTest extends TestCase
             [
                 'name' => 'unresolvable external reference',
                 'payload' => [
-                    'codec' => 'json',
+                    'codec' => 'avro',
                     'external_storage' => [
                         'schema' => ExternalPayloadReference::SCHEMA,
                         'uri' => 'file:///unavailable/service-response.json',
                         'sha256' => str_repeat('a', 64),
                         'size_bytes' => 128,
-                        'codec' => 'json',
+                        'codec' => 'avro',
                     ],
                 ],
                 'exception' => RuntimeException::class,
@@ -193,13 +193,13 @@ final class V2ServiceResponseReplayTest extends TestCase
                 'authorized' => true,
             ],
             [
-                'codec' => 'json',
+                'codec' => 'domain-record',
                 'blob' => [
                     'domain' => 'value',
                 ],
             ],
             [
-                'codec' => 'json',
+                'codec' => 'domain-record',
                 'external_storage' => 'inline',
             ],
         ];

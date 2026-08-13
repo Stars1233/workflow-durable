@@ -1427,7 +1427,7 @@ final class WorkflowFiberRunnerTest extends TestCase
             $payload,
             new ServiceOperationOptions(
                 waitFor: ServiceOperationOptions::WAIT_ACCEPTED,
-                payloadCodec: 'json',
+                payloadCodec: 'avro',
                 metadata: [
                     'service_sdk_language' => 'sdk-python',
                 ],
@@ -1435,8 +1435,8 @@ final class WorkflowFiberRunnerTest extends TestCase
         ), 'avro');
 
         $this->assertSame('start_service_operation', $step->command['type']);
-        $this->assertSame('json', $step->command['payload_codec']);
-        $this->assertSame($payload, Serializer::unserializeWithCodec('json', $step->command['request_payload']));
+        $this->assertSame('avro', $step->command['payload_codec']);
+        $this->assertSame($payload, Serializer::unserializeWithCodec('avro', $step->command['request_payload']));
         $this->assertSame('accepted', $step->command['wait_for']);
         $this->assertSame([
             'service_sdk_language' => 'sdk-python',
@@ -1519,8 +1519,8 @@ final class WorkflowFiberRunnerTest extends TestCase
                     'operation_name' => 'authorize',
                     'status' => 'completed',
                     'outcome' => 'completed',
-                    'payload_codec' => 'json',
-                    'response_payload' => Serializer::serializeWithCodec('json', $responsePayload),
+                    'payload_codec' => 'avro',
+                    'response_payload' => Serializer::serializeWithCodec('avro', $responsePayload),
                 ],
                 'recorded_at' => '2026-05-12T10:11:13+00:00',
             ]],
@@ -1543,8 +1543,8 @@ final class WorkflowFiberRunnerTest extends TestCase
             'accepted' => true,
         ];
         $encodedPayload = [
-            'codec' => 'json',
-            'blob' => Serializer::serializeWithCodec('json', $responsePayload),
+            'codec' => 'avro',
+            'blob' => Serializer::serializeWithCodec('avro', $responsePayload),
         ];
 
         foreach (['ServiceCallStarted', 'ServiceCallCompleted'] as $eventType) {
@@ -1563,15 +1563,15 @@ final class WorkflowFiberRunnerTest extends TestCase
         $malformedPayloads = [
             [
                 'payload' => [
-                    'codec' => 'json',
+                    'codec' => 'avro',
                     'blob' => '{"truncated":',
                 ],
                 'exception' => CodecDecodeException::class,
-                'message' => 'Failed to JSON-decode payload',
+                'message' => 'invalid_payload_framing',
             ],
             [
                 'payload' => [
-                    'codec' => 'json',
+                    'codec' => 'avro',
                     'external_storage' => [
                         'key' => 'payload',
                     ],

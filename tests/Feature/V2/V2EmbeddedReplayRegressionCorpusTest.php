@@ -57,11 +57,10 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
 
             if (in_array('query-state-replayer', $consumers, true)) {
                 $run = $this->createRunFromFixture($fixture);
-                $mismatch = $this->replayFailureMismatch(
-                    static fn (): mixed => (new QueryStateReplayer())->replay($run->fresh(['historyEvents'])),
-                    $fixture,
-                    'QueryStateReplayer',
+                $operation = static fn (): mixed => (new QueryStateReplayer())->replay(
+                    $run->fresh(['historyEvents']),
                 );
+                $mismatch = $this->replayFailureMismatch($operation, $fixture, 'QueryStateReplayer');
                 if ($mismatch !== null) {
                     $mismatches[] = $mismatch;
                 }

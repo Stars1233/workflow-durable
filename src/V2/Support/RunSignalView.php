@@ -229,7 +229,7 @@ final class RunSignalView
                 return Serializer::unserializeWithCodec($codec, $value);
             }
 
-            return Serializer::unserialize($value);
+            return Serializer::unserializeWithCodec('avro', $value);
         } catch (Throwable) {
             return $value;
         }

@@ -13,14 +13,9 @@ use InvalidArgumentException;
  * docs/configuration/worker-protocol.md. They travel alongside payload bytes
  * so any SDK can pick the right decoder without sniffing.
  *
- * Canonical names:
- *   - "avro"                    — Apache Avro binary codec (default for new workflows)
- *   - "json"                    — UTF-8 JSON payloads for explicit interop envelopes
- *   - "workflow-serializer-y"   — PHP SerializableClosure with byte-escape encoding (legacy)
- *   - "workflow-serializer-base64" — PHP SerializableClosure with base64 encoding (legacy)
- *
- * Legacy PHP serializer fully-qualified class names (e.g. "Workflow\\Serializers\\Y")
- * are accepted as aliases so v1 rows persisted before the codec rename keep working.
+ * Durable Workflow 2.0 has one public codec: Avro. Legacy PHP serializers are
+ * deliberately kept out of this registry and remain reachable only through
+ * Serializer's untagged v1 import/drain path.
  */
 final class CodecRegistry
 {
@@ -29,17 +24,6 @@ final class CodecRegistry
      */
     private const CODECS = [
         'avro' => Avro::class,
-        'json' => Json::class,
-        'workflow-serializer-y' => Y::class,
-        'workflow-serializer-base64' => Base64::class,
-    ];
-
-    /**
-     * @var array<string, string> legacy FQCN → canonical name
-     */
-    private const LEGACY_ALIASES = [
-        Y::class => 'workflow-serializer-y',
-        Base64::class => 'workflow-serializer-base64',
     ];
 
     /**
@@ -52,14 +36,15 @@ final class CodecRegistry
         $name = self::canonicalize($codec);
 
         if (! isset(self::CODECS[$name])) {
-            throw new InvalidArgumentException(sprintf('Unknown payload codec "%s".', $codec ?? ''));
+            throw self::unsupported($codec);
         }
 
         return self::CODECS[$name];
     }
 
     /**
-     * Normalize a codec name: accept canonical names, legacy FQCNs, and null (→ default).
+     * Normalize a public v2 codec name. Omission selects Avro; every explicit
+     * non-Avro value fails closed.
      */
     public static function canonicalize(?string $codec): string
     {
@@ -67,21 +52,11 @@ final class CodecRegistry
             return self::defaultCodec();
         }
 
-        if (isset(self::CODECS[$codec])) {
-            return $codec;
+        if ($codec === 'avro') {
+            return 'avro';
         }
 
-        if (isset(self::LEGACY_ALIASES[$codec])) {
-            return self::LEGACY_ALIASES[$codec];
-        }
-
-        // Tolerate leading backslashes in persisted FQCNs.
-        $trimmed = ltrim($codec, '\\');
-        if (isset(self::LEGACY_ALIASES[$trimmed])) {
-            return self::LEGACY_ALIASES[$trimmed];
-        }
-
-        throw new InvalidArgumentException(sprintf('Unknown payload codec "%s".', $codec));
+        throw self::unsupported($codec);
     }
 
     /**
@@ -89,8 +64,9 @@ final class CodecRegistry
      *
      * v2 is unreleased, so there is no supported v2-to-v2 codec migration
      * surface. New v2 payloads always use Avro. Explicit row/envelope codec
-     * tags still resolve through {@see resolve()} for v1 import/drain paths, but
-     * deployment config cannot change the new-run v2 default away from Avro.
+     * tags fail closed through {@see resolve()}. Untagged PHP v1 import/drain
+     * data uses Serializer's separate internal legacy reader; deployment config
+     * cannot change the new-run v2 default away from Avro.
      */
     public static function defaultCodec(): string
     {
@@ -110,37 +86,19 @@ final class CodecRegistry
      *
      * Public wire contract: only these codec names should be advertised to
      * polyglot clients on `/api/cluster/info` and equivalent public endpoints.
-     * PHP-specific codecs are exposed separately via {@see engineSpecific()}.
      *
      * @return list<string>
      */
     public static function universal(): array
     {
-        return ['avro', 'json'];
+        return ['avro'];
     }
 
-    /**
-     * Codecs that require an engine-specific runtime to decode.
-     *
-     * Keyed by engine name so polyglot SDKs can selectively opt in to a codec
-     * they know how to decode without PHP-flavored identifiers leaking into
-     * the primary `payload_codecs` wire field.
-     *
-     * @return array<string, list<string>>
-     */
-    public static function engineSpecific(): array
+    private static function unsupported(?string $codec): InvalidArgumentException
     {
-        $universal = self::universal();
-
-        $excluded = $universal;
-        $phpOnly = array_values(array_diff(array_keys(self::CODECS), $excluded));
-
-        if ($phpOnly === []) {
-            return [];
-        }
-
-        return [
-            'php' => $phpOnly,
-        ];
+        return new InvalidArgumentException(sprintf(
+            'unsupported_payload_codec: payload codec "%s" is not supported by Durable Workflow 2.0; use codec="avro" with the fixed Avro Value schema and single-object framing. JSON remains the HTTP document transport, not a workflow payload codec.',
+            $codec ?? '',
+        ));
     }
 }

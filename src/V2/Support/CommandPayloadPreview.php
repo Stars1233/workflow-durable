@@ -18,10 +18,8 @@ final class CommandPayloadPreview
     /**
      * Decode a payload blob for display.
      *
-     * When the persisted `payload_codec` is known, prefer
-     * {@see self::previewWithCodec()} so binary codecs (Avro) decode
-     * correctly. The no-codec overload falls back to the legacy blob-sniff
-     * behavior and is retained for call sites that do not track codec.
+     * The no-codec overload treats the payload as Avro. Durable v2 payloads
+     * never infer a codec from their bytes.
      */
     public static function preview(mixed $payload): mixed
     {
@@ -34,7 +32,7 @@ final class CommandPayloadPreview
         }
 
         try {
-            return Serializer::unserialize($payload);
+            return self::displayValue(Serializer::unserializeWithCodec('avro', $payload));
         } catch (Throwable) {
             return $payload;
         }
@@ -43,11 +41,12 @@ final class CommandPayloadPreview
     /**
      * Decode a payload blob using an explicit codec for display.
      *
-     * When $codec is null or empty, falls through to the sniff-based
+     * When $codec is null or empty, falls through to the Avro-only
      * {@see self::preview()}. When a codec is named, the blob is decoded
      * through {@see Serializer::unserializeWithCodec()} so binary codecs
-     * like Avro (which sniffing cannot detect) render readably in the
-     * run-detail view, history timeline, and update view.
+     * like Avro render readably in the
+     * run-detail view, history timeline, and update view. Unsupported codec
+     * names are never used to decode a payload.
      *
      * Decode failures return the raw blob instead of propagating — this is
      * a display helper, not a strict decoder. Mixed-codec errors (Avro

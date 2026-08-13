@@ -200,7 +200,7 @@ final class HistoryExport
      * fingerprint. Consumers can decode the standard single-object frame
      * without a network schema lookup.
      *
-     * For JSON and other self-describing codecs: the map is empty.
+     * The map is empty when a legacy internal import lacks writer-schema metadata.
      *
      * @param  array<string, mixed>  $bundle
      * @return array<string, mixed>

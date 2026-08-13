@@ -142,7 +142,7 @@ final class Avro implements SerializerInterface
             throw new CodecDecodeException(
                 'avro',
                 'invalid_payload_framing: expected Avro single-object magic c301.',
-                'Encode the value with a Durable Workflow 2.0 Avro codec, or use the JSON codec explicitly.',
+                'Encode the value with the Durable Workflow 2.0 fixed Avro Value schema and single-object framing; JSON is only the HTTP document transport.',
             );
         }
 
@@ -405,7 +405,7 @@ final class Avro implements SerializerInterface
                 ? 'invalid_payload_framing: payload bytes look like JSON, not base64-encoded Avro.'
                 : 'invalid_payload_framing: failed to base64-decode Avro payload bytes.',
             $looksLikeJson
-                ? 'Use codec="json" explicitly, or encode the value with the fixed Avro Value codec.'
+                ? 'Encode the value with the fixed Avro Value codec; JSON is only the HTTP document transport.'
                 : 'Avro payloads must be strict base64 containing a c301 single-object frame.',
         );
     }

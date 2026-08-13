@@ -6,6 +6,7 @@ namespace Workflow\V2\Support;
 
 use Illuminate\Support\Facades\Log;
 use Throwable;
+use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Exceptions\WorkflowPayloadDecodeException;
 use Workflow\V2\Models\WorkflowCommand;
@@ -19,7 +20,11 @@ final class WorkflowPayloadDecoder
      */
     public static function unserializeWithRun(string $serialized, ?WorkflowRun $run, array $context): mixed
     {
-        $codec = self::stringValue($run?->payload_codec);
+        try {
+            $codec = CodecRegistry::canonicalize(self::stringValue($run?->payload_codec));
+        } catch (Throwable $throwable) {
+            throw self::failure($throwable, $context, self::stringValue($run?->payload_codec), $serialized);
+        }
         $payload = ExternalPayloads::resolveStoredPayload(
             $serialized,
             $codec,
@@ -27,9 +32,7 @@ final class WorkflowPayloadDecoder
         );
 
         try {
-            return $codec !== null
-                ? Serializer::unserializeWithCodec($codec, $payload)
-                : Serializer::unserialize($payload);
+            return Serializer::unserializeWithCodec($codec, $payload);
         } catch (Throwable $throwable) {
             throw self::failure($throwable, $context, $codec, $serialized);
         }

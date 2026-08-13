@@ -20,7 +20,12 @@ final class WorkflowPayloadDecodeException extends RuntimeException
         $codec = $context['codec'] ?? 'unknown';
 
         parent::__construct(
-            sprintf('Failed to decode workflow %s payload with codec [%s].', $receiver, $codec),
+            sprintf(
+                'Failed to decode workflow %s payload with codec [%s]: %s',
+                $receiver,
+                $codec,
+                $previous->getMessage(),
+            ),
             0,
             $previous,
         );

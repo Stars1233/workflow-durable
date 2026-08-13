@@ -544,7 +544,7 @@ final class RunActivityView
             }
 
             return $codec === null || $codec === ''
-                ? Serializer::unserialize($blob)
+                ? Serializer::unserializeWithCodec('avro', $blob)
                 : Serializer::unserializeWithCodec($codec, $blob);
         } catch (Throwable) {
             return self::isExternalStorageEnvelope($value) ? $value : $default;

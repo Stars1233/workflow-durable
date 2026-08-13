@@ -856,6 +856,8 @@ final class EmbeddedV2HistoryImport
             );
         }
 
+        self::rejectUnsupportedPayloadCodecs($bundle, $errors);
+
         if (! (bool) ($options['allow_open_leases'] ?? false)) {
             self::rejectOpenLeases($bundle, $errors);
         }
@@ -865,6 +867,67 @@ final class EmbeddedV2HistoryImport
             'errors' => $errors,
             'warnings' => $warnings,
         ];
+    }
+
+    /**
+     * @param list<array<string, string>> $errors
+     */
+    private static function rejectUnsupportedPayloadCodecs(array $bundle, array &$errors): void
+    {
+        self::inspectPayloadCodecs($bundle, '', $errors);
+    }
+
+    /**
+     * @param array<int|string, mixed> $value
+     * @param list<array<string, string>> $errors
+     */
+    private static function inspectPayloadCodecs(array $value, string $path, array &$errors): void
+    {
+        foreach ($value as $key => $nested) {
+            $key = (string) $key;
+            $fieldPath = $path === '' ? $key : $path . '.' . $key;
+
+            if (self::isPayloadCodecField($value, $path, $key)
+                && $nested !== null
+                && $nested !== ''
+                && $nested !== CodecRegistry::defaultCodec()
+            ) {
+                self::addFinding(
+                    $errors,
+                    'payload_codec.unsupported',
+                    sprintf(
+                        'Bundle payload codec at [%s] must be "avro"; found %s. JSON is only the HTTP document transport and cannot be imported as durable payload data.',
+                        $fieldPath,
+                        is_string($nested) ? sprintf('"%s"', $nested) : get_debug_type($nested),
+                    ),
+                );
+            }
+
+            if (is_array($nested)) {
+                self::inspectPayloadCodecs($nested, $fieldPath, $errors);
+            }
+        }
+    }
+
+    /**
+     * @param array<int|string, mixed> $container
+     */
+    private static function isPayloadCodecField(array $container, string $path, string $key): bool
+    {
+        if (in_array($key, ['payload_codec', 'output_payload_codec', 'details_payload_codec'], true)) {
+            return true;
+        }
+
+        if ($key !== 'codec') {
+            return false;
+        }
+
+        return $path === 'payloads'
+            || $path === 'payloads.output'
+            || str_starts_with($path, 'payload_manifest.entries.')
+            || array_key_exists('blob', $container)
+            || array_key_exists('external_storage', $container)
+            || ($container['schema'] ?? null) === ExternalPayloadReference::SCHEMA;
     }
 
     /**

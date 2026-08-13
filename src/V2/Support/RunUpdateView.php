@@ -710,7 +710,7 @@ final class RunUpdateView
         }
 
         if ($codec === null || $codec === '') {
-            return Serializer::unserialize($value);
+            return Serializer::unserializeWithCodec('avro', $value);
         }
 
         try {

@@ -275,7 +275,7 @@ final class FailureSnapshots
         ?WorkflowFailure $failure,
     ): array {
         if (is_string($payload)) {
-            $payload = Serializer::unserialize($payload);
+            $payload = Serializer::unserializeWithCodec('avro', $payload);
         }
 
         if (! is_array($payload)) {

@@ -9,17 +9,15 @@ the platform conformance suite.
 
 The `payload_codec` envelope tag on every wire payload identifies the
 codec used to encode the blob. The language-neutral v2 surface advertises
-these universal codecs:
+one universal codec:
 
 | Codec | Use |
 | --- | --- |
-| `avro` | Default for new v2 workflows and activities. The blob is a base64-encoded Avro single-object frame containing the fixed recursive `durable_workflow.protocol.Value` schema. |
-| `json` | Explicit interop envelope for UTF-8 JSON payloads. Workers and control-plane poll responses can decode it when an external SDK or previously persisted row already tagged the payload as JSON. |
+| `avro` | Required for every v2 workflow payload. The blob is a base64-encoded Avro single-object frame containing the fixed recursive `durable_workflow.protocol.Value` schema. JSON remains the HTTP document transport, not a payload codec. |
 
-Legacy PHP history can still name PHP-engine-specific codecs. Those
-codecs are exposed under `payload_codecs_engine_specific["php"]`, not
-in the universal `payload_codecs` list, so non-PHP workers are not
-required to decode PHP serializer payloads:
+Legacy PHP v1 history can still name PHP-engine-specific serializers only at
+the internal import/drain boundary. They are not v2 SDK choices and are not
+advertised as engine-specific or universal codecs:
 
 | Engine | Codec | Use |
 | --- | --- | --- |
@@ -52,7 +50,8 @@ round-trip with identical observable behaviour:
 The Avro codec selects a named branch for every value, so booleans cannot be
 inferred as numbers and bytes cannot be inferred as text. New PHP-authored v2
 payloads write the default `payload_codec: "avro"` envelope; workers and
-control-plane clients also read explicit `payload_codec: "json"` envelopes.
+control-plane clients exchange JSON HTTP documents whose durable payload
+envelopes are explicitly tagged `payload_codec: "avro"`.
 
 ### Round-trip with documented coercion
 
@@ -129,11 +128,7 @@ blocker for both packages.
 
 Operators of polyglot fleets SHOULD:
 
-- Pin `avro` as the default write codec for new v2 payloads unless a
-  namespace has an explicit policy to author JSON envelopes. Keep both
-  `avro` and `json` available as universal decode codecs. Expose legacy
-  PHP serializer codecs only through the engine-specific codec list when
-  old PHP history still needs to drain.
+- Use `avro` as the universal payload codec for every v2 SDK and service.
 - Treat the `Requires an explicit adapter` set as a workflow-author
   contract, not a runtime fallback. The SDKs deliberately fail closed
   rather than guess at a serialisation for these values.

@@ -11,7 +11,7 @@
     "arguments": [
       "single-activity"
     ],
-    "payload_codec": "json"
+    "payload_codec": "avro"
   },
   "history": [
     {
@@ -26,8 +26,8 @@
       "payload": {
         "sequence": 7,
         "activity_type": "Tests\\Fixtures\\V2\\TestGreetingActivity",
-        "result": "\"Hello, Ada!\"",
-        "payload_codec": "json"
+        "result": "wwHioz3/VYAiNwoWSGVsbG8sIEFkYSE=",
+        "payload_codec": "avro"
       },
       "recorded_at": "2026-07-29T12:00:01+00:00"
     }

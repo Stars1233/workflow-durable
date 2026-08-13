@@ -516,7 +516,7 @@ class WorkflowCommand extends Model
 
         $payload = $codec !== null
             ? Serializer::unserializeWithCodec($codec, $blob)
-            : Serializer::unserialize($blob);
+            : Serializer::unserializeWithCodec('avro', $blob);
 
         return is_array($payload)
             ? $payload

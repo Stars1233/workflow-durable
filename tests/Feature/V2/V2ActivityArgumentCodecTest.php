@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Tests\Feature\V2;
 
 use Illuminate\Support\Facades\Queue;
-use Tests\Fixtures\V2\TestActivityArgumentObject;
 use Tests\Fixtures\V2\TestActivityArgumentObjectActivity;
 use Tests\Fixtures\V2\TestActivityArgumentObjectWorkflow;
 use Tests\TestCase;
@@ -15,16 +14,7 @@ use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\WorkflowStub;
 
-/**
- * #429 (TD-066) — activity argument codec fallback.
- *
- * v2 runs default to the Avro codec, which encodes PHP objects via
- * json_encode / json_decode and hands decoders a plain associative array.
- * scheduleActivity now applies the same chooseCodecForData fallback child
- * workflow scheduling uses so PHP-only arguments round-trip through the
- * legacy Y codec. The selected codec is stored on the activity row so the
- * decode path does not depend on sniffing disjoint blob shapes.
- */
+/** Avro-only activity arguments reject PHP-only object values. */
 final class V2ActivityArgumentCodecTest extends TestCase
 {
     protected function setUp(): void
@@ -39,7 +29,7 @@ final class V2ActivityArgumentCodecTest extends TestCase
         Queue::fake();
     }
 
-    public function testActivityReceivesTypedObjectWhenRunCodecIsAvro(): void
+    public function testPhpOnlyActivityArgumentsFailBeforeScheduling(): void
     {
         $workflow = WorkflowStub::make(TestActivityArgumentObjectWorkflow::class, 'activity-arg-codec-avro');
         $workflow->start();
@@ -50,22 +40,10 @@ final class V2ActivityArgumentCodecTest extends TestCase
         $run = WorkflowRun::query()->findOrFail($workflow->runId());
         $this->assertSame('avro', $run->payload_codec);
 
-        $this->assertTrue($workflow->refresh()->completed());
-        $this->assertSame(sprintf('hello:3:%s', TestActivityArgumentObject::class), $workflow->output());
-
-        /** @var ActivityExecution $execution */
-        $execution = ActivityExecution::query()
-            ->where('workflow_run_id', $run->id)
-            ->firstOrFail();
-
-        $this->assertSame('workflow-serializer-y', $execution->payload_codec);
-        $this->assertSame(sprintf('hello:3:%s', TestActivityArgumentObject::class), $execution->activityResult());
-
-        [$argument] = $execution->activityArguments();
-
-        $this->assertInstanceOf(TestActivityArgumentObject::class, $argument);
-        $this->assertSame('hello', $argument->tag);
-        $this->assertSame(3, $argument->count);
+        $this->assertTrue($workflow->refresh()->failed());
+        $this->assertDatabaseMissing('activity_executions', [
+            'workflow_run_id' => $run->id,
+        ]);
     }
 
     public function testActivityArgumentsUseStoredCodecInsteadOfSniffFallback(): void

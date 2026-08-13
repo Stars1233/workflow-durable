@@ -122,7 +122,7 @@ final class SerializeTest extends TestCase
         $this->assertSame('ok', $unserialized[0]->getClosure()());
     }
 
-    public function testAvroProtocolAdaptersStayOnAvroUnlessAMapContainsAPhpOnlyValue(): void
+    public function testV2CodecSelectionNeverFallsBackFromAvro(): void
     {
         $value = AvroMapValue::fromPairs([
             ['nested', AvroMapValue::fromPairs([['bytes', AvroBinaryValue::fromBytes("\x00\xFF")]])],
@@ -130,7 +130,7 @@ final class SerializeTest extends TestCase
 
         $this->assertSame('avro', Serializer::chooseCodecForData('avro', $value));
         $this->assertSame(
-            'workflow-serializer-y',
+            'avro',
             Serializer::chooseCodecForData(
                 'avro',
                 AvroMapValue::fromPairs([

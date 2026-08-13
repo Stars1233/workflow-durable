@@ -799,7 +799,7 @@ final class ChildRunHistory
 
         return $codec !== null
             ? Serializer::unserializeWithCodec($codec, $serialized)
-            : Serializer::unserialize($serialized);
+            : Serializer::unserializeWithCodec('avro', $serialized);
     }
 
     private static function outputPayloadCodec(

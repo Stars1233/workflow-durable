@@ -35,7 +35,7 @@ final class ExternalStorageEnvelopeTest extends TestCase
             'data' => str_repeat('x', 200),
         ];
 
-        $envelope = Serializer::externalStorageEnvelope($largeValue, 'json', $driver, 10);
+        $envelope = Serializer::externalStorageEnvelope($largeValue, 'avro', $driver, 10);
 
         $this->assertArrayHasKey('codec', $envelope);
         $this->assertArrayHasKey('external_storage', $envelope);
@@ -51,7 +51,7 @@ final class ExternalStorageEnvelopeTest extends TestCase
 
         $envelope = Serializer::externalStorageEnvelope([
             'ok' => true,
-        ], 'json', $driver, 100_000);
+        ], 'avro', $driver, 100_000);
 
         $this->assertArrayHasKey('codec', $envelope);
         $this->assertArrayHasKey('blob', $envelope);
@@ -62,10 +62,10 @@ final class ExternalStorageEnvelopeTest extends TestCase
     {
         $driver = new LocalFilesystemExternalPayloadStorage($this->makeStorageRoot());
         $value = 'test';
-        $blob = Serializer::serializeWithCodec('json', $value);
+        $blob = Serializer::serializeWithCodec('avro', $value);
         $threshold = strlen($blob);
 
-        $envelope = Serializer::externalStorageEnvelope($value, 'json', $driver, $threshold);
+        $envelope = Serializer::externalStorageEnvelope($value, 'avro', $driver, $threshold);
 
         $this->assertArrayHasKey('blob', $envelope);
         $this->assertArrayNotHasKey('external_storage', $envelope);
@@ -75,10 +75,10 @@ final class ExternalStorageEnvelopeTest extends TestCase
     {
         $driver = new LocalFilesystemExternalPayloadStorage($this->makeStorageRoot());
         $value = 'test';
-        $blob = Serializer::serializeWithCodec('json', $value);
+        $blob = Serializer::serializeWithCodec('avro', $value);
         $threshold = strlen($blob) - 1;
 
-        $envelope = Serializer::externalStorageEnvelope($value, 'json', $driver, $threshold);
+        $envelope = Serializer::externalStorageEnvelope($value, 'avro', $driver, $threshold);
 
         $this->assertArrayHasKey('external_storage', $envelope);
         $this->assertArrayNotHasKey('blob', $envelope);
@@ -93,7 +93,7 @@ final class ExternalStorageEnvelopeTest extends TestCase
             ],
         ];
 
-        $envelope = Serializer::externalStorageEnvelope($value, 'json', $driver, 10);
+        $envelope = Serializer::externalStorageEnvelope($value, 'avro', $driver, 10);
 
         $this->assertArrayHasKey('external_storage', $envelope);
 
@@ -110,7 +110,7 @@ final class ExternalStorageEnvelopeTest extends TestCase
             'small' => true,
         ];
 
-        $envelope = Serializer::externalStorageEnvelope($value, 'json', $driver, 100_000);
+        $envelope = Serializer::externalStorageEnvelope($value, 'avro', $driver, 100_000);
 
         $this->assertArrayHasKey('blob', $envelope);
 
@@ -127,7 +127,7 @@ final class ExternalStorageEnvelopeTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('threshold');
 
-        Serializer::externalStorageEnvelope('value', 'json', $driver, 0);
+        Serializer::externalStorageEnvelope('value', 'avro', $driver, 0);
     }
 
     public function testEnvelopeRejectsNegativeThreshold(): void
@@ -136,7 +136,7 @@ final class ExternalStorageEnvelopeTest extends TestCase
 
         $this->expectException(InvalidArgumentException::class);
 
-        Serializer::externalStorageEnvelope('value', 'json', $driver, -1);
+        Serializer::externalStorageEnvelope('value', 'avro', $driver, -1);
     }
 
     public function testEnvelopeNormalizesCodecAlias(): void

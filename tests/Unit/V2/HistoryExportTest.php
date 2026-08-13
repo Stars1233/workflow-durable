@@ -1882,10 +1882,10 @@ final class HistoryExportTest extends TestCase
         }
 
         config()
-            ->set('workflows.serializer', 'workflow-serializer-y');
+            ->set('workflows.serializer', 'avro');
         $run = $this->createMinimalCompletedRun('history-export-row-local-codec');
         $run->forceFill([
-            'payload_codec' => 'workflow-serializer-y',
+            'payload_codec' => 'avro',
         ])->save();
 
         $instance = $run->instance;
@@ -1980,9 +1980,8 @@ final class HistoryExportTest extends TestCase
         $this->assertSame('avro-encoded-update-args', $updateRow['arguments']);
         $this->assertSame('avro-encoded-update-result', $updateRow['result']);
 
-        // The run itself is PHP-legacy-coded, but the Avro signal/update rows must
-        // trigger codec_schemas.avro so an offline consumer has the fixed
-        // writer schema and fingerprint needed to decode those blobs.
+        // Avro rows trigger codec_schemas.avro so an offline consumer has the
+        // fixed writer schema and fingerprint needed to decode those blobs.
         $this->assertArrayHasKey('avro', $bundle['codec_schemas']);
         $this->assertSame(
             Avro::VALUE_SCHEMA_FINGERPRINT_HEX,
@@ -1990,18 +1989,18 @@ final class HistoryExportTest extends TestCase
         );
     }
 
-    public function testItOmitsAvroSchemasWhenBundleHasNoAvroPayloads(): void
+    public function testItIncludesAvroSchemaForAvroOnlyBundle(): void
     {
-        config()->set('workflows.serializer', 'workflow-serializer-y');
-        $run = $this->createMinimalCompletedRun('history-export-legacy-y');
+        config()->set('workflows.serializer', 'avro');
+        $run = $this->createMinimalCompletedRun('history-export-avro-only');
         $run->forceFill([
-            'payload_codec' => 'workflow-serializer-y',
+            'payload_codec' => 'avro',
         ])->save();
 
         $bundle = HistoryExport::forRun($run->refresh(), Carbon::parse('2026-04-09 13:00:00'));
 
         $this->assertArrayHasKey('codec_schemas', $bundle);
-        $this->assertSame([], $bundle['codec_schemas']);
+        $this->assertArrayHasKey('avro', $bundle['codec_schemas']);
     }
 
     public function testItSignsHistoryExportIntegrityWhenSigningKeyIsConfigured(): void

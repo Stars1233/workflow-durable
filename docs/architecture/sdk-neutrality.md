@@ -63,7 +63,7 @@ the authority for the exact field shapes; the summary below is for reviewers.
 | Rule | Requirement |
 | --- | --- |
 | `protocol_neutrality` | Public RPC and event surfaces use HTTP+JSON or AsyncAPI shapes that any HTTP-capable runtime can produce and consume. |
-| `codec_neutrality` | Every payload that crosses a public boundary advertises a codec name. At least one universal codec is always offered alongside any engine-specific codec. |
+| `codec_neutrality` | Every durable payload that crosses a public boundary advertises the sole v2 codec, `avro`. JSON remains the HTTP document transport; no engine-specific v2 codec is offered. |
 | `error_shape_neutrality` | Public failure objects use a structured envelope of (`code`, `message`, optional `details`). PHP/Python exception class names are diagnostic only. |
 | `type_identity_neutrality` | Workflow, activity, child workflow, and exception types are identified by stable string names. Class FQCNs are SDK-input convenience, not contract. |
 | `replay_fixture_neutrality` | Replay fixtures and golden history bundles are JSON conforming to the published `history_event_payloads` and `replay_bundle` schemas. |

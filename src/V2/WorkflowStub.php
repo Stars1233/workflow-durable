@@ -2235,6 +2235,10 @@ final class WorkflowStub
             throw new LogicException('Signal name cannot be empty.');
         }
 
+        $payloadCodec = $payloadCodec !== null
+            ? CodecRegistry::canonicalize($payloadCodec)
+            : null;
+
         /** @var WorkflowCommand|null $command */
         $command = null;
         $task = null;
@@ -2368,7 +2372,9 @@ final class WorkflowStub
                 return;
             }
 
-            $signalCodec = $payloadCodec ?? $run->payload_codec ?? CodecRegistry::defaultCodec();
+            $signalCodec = CodecRegistry::canonicalize(
+                $payloadCodec ?? $run->payload_codec ?? CodecRegistry::defaultCodec(),
+            );
             $serializedSignalArguments = $payloadBlob ?? Serializer::serializeWithCodec($signalCodec, $arguments);
 
             StructuralLimits::logWarning(
@@ -2405,7 +2411,7 @@ final class WorkflowStub
                 'target_scope' => $this->commandTargetScope(),
                 'status' => CommandStatus::Accepted->value,
                 'outcome' => CommandOutcome::SignalReceived->value,
-                ...$this->signalCommandPayloadAttributes($name, $arguments, [], $payloadCodec),
+                ...$this->signalCommandPayloadAttributes($name, $arguments, [], $signalCodec),
                 'accepted_at' => now(),
             ]));
 
@@ -2417,7 +2423,7 @@ final class WorkflowStub
                 $name,
                 $arguments,
                 $signalWaitId,
-                $payloadCodec,
+                $signalCodec,
                 $serializedSignalArguments,
             );
 

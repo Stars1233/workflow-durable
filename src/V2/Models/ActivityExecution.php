@@ -112,6 +112,6 @@ class ActivityExecution extends Model
             return Serializer::unserializeWithCodec($this->payload_codec, $blob);
         }
 
-        return Serializer::unserialize($blob);
+        return Serializer::unserializeWithCodec('avro', $blob);
     }
 }

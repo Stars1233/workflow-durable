@@ -8,11 +8,10 @@ use JsonException;
 use RuntimeException;
 
 /**
- * UTF-8 JSON payload codec.
+ * Internal reader for untagged PHP v1 import/drain records.
  *
- * The v2 default codec remains Avro, but explicit worker/control-plane
- * envelopes may carry JSON bytes for cross-language interop and for legacy
- * codec-blind {@see Serializer::unserialize()} sniffing.
+ * @internal Not a Durable Workflow 2.0 payload codec. New runs, public
+ * SDKs, and tagged payload envelopes must use Avro.
  */
 final class Json implements SerializerInterface
 {

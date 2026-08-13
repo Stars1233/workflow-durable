@@ -18,13 +18,10 @@ use Workflow\V2\Contracts\ExternalPayloadStorageDriver;
  * send `input` in three shapes on the HTTP API:
  *
  *   1. A plain array of arguments  →  encoded with the final v2 default codec (Avro)
- *   2. An explicit envelope object `{codec: "<name>", blob: "<opaque>"}`
- *      →  codec = the declared name, blob = the opaque string as-is
- *   3. An explicit external envelope `{codec: "<name>", external_storage: {...}}`
- *      →  codec = the declared name, blob = fetched from the external reference
- *
- * Shape 2 lets PHP clients that already have SerializableClosure-encoded
- * payloads (or any other codec) preserve the exact bytes they produced.
+ *   2. An explicit Avro envelope `{codec: "avro", blob: "<opaque>"}`
+ *      →  blob = the Avro single-object bytes as-is
+ *   3. An explicit external Avro envelope `{codec: "avro", external_storage: {...}}`
+ *      →  blob = fetched from the external reference
  *
  * @see docs/configuration/worker-protocol.md
  *
@@ -43,8 +40,8 @@ final class PayloadEnvelopeResolver
      * envelope, or a {codec, external_storage} envelope. When an envelope is
      * received, the payload bytes are decoded using the declared codec — any
      * codec in the {@see CodecRegistry} that can round-trip an array is
-     * accepted (json, avro, and the legacy PHP closure codecs). The decoded
-     * value must be an array.
+     * accepted (Avro only). The decoded
+     * value must be an array. JSON-tagged and unknown envelopes fail closed.
      *
      * @param  mixed  $input  the `input` field from a validated request
      * @return array<int|string, mixed>  arguments (positional or named)
@@ -232,13 +229,9 @@ final class PayloadEnvelopeResolver
 
         try {
             $canonical = CodecRegistry::canonicalize($codec);
-        } catch (InvalidArgumentException) {
+        } catch (InvalidArgumentException $exception) {
             throw ValidationException::withMessages([
-                $field . '.codec' => [sprintf(
-                    'Unknown payload codec "%s". Known codecs: %s.',
-                    $codec,
-                    implode(', ', CodecRegistry::names()),
-                )],
+                $field . '.codec' => [$exception->getMessage()],
             ]);
         }
 

@@ -629,7 +629,7 @@ final class V2ActivityOutcomeHistoryRoleTest extends TestCase
     private function scaffoldLeasedAttempt(string $instanceId, int $maxAttempts = 1): array
     {
         $now = now();
-        $pinnedCodec = 'workflow-serializer-y';
+        $pinnedCodec = 'avro';
 
         $instance = WorkflowInstance::query()->create([
             'id' => $instanceId,

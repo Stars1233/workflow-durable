@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Unit\V2;
 
+use InvalidArgumentException;
 use Tests\TestCase;
 use Workflow\V2\Contracts\ServiceBoundaryPolicy;
 use Workflow\V2\Contracts\WorkflowControlPlane;
@@ -23,6 +24,27 @@ use Workflow\V2\Support\ServiceBoundaryRequest;
 
 final class DefaultServiceControlPlaneTest extends TestCase
 {
+    public function testExecuteRejectsJsonPayloadCodecBeforePersistence(): void
+    {
+        $controlPlane = new DefaultServiceControlPlane(
+            new FakeServiceWorkflowControlPlane(),
+            new DefaultServiceBoundaryPolicy(),
+        );
+
+        try {
+            $controlPlane->execute('Billing', 'Invoices', 'Create', [
+                'namespace' => 'billing',
+                'payload_codec' => 'json',
+            ]);
+            $this->fail('JSON-tagged service payload must fail closed.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('unsupported_payload_codec', $exception->getMessage());
+            $this->assertStringContainsString('HTTP document transport', $exception->getMessage());
+        }
+
+        $this->assertSame(0, WorkflowServiceCall::query()->count());
+    }
+
     public function testExecuteRecordsDurableResolutionFailureWhenEndpointIsMissing(): void
     {
         $controlPlane = new DefaultServiceControlPlane(

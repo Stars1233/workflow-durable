@@ -32,14 +32,11 @@ use Workflow\V2\Support\FailureSnapshots;
 
 /**
  * TD-089 regression: activity exception rows must be encoded with the
- * run's pinned payload codec, not the package default. Any fallback
- * reader that decodes the blob must use the run codec too, so that
- * Avro-default deployments do not corrupt legacy-codec pinned runs (and vice
- * versa).
+ * run's pinned Avro codec, not an unsupported package configuration.
  */
 final class V2ActivityExceptionCodecTest extends TestCase
 {
-    public function testRetryPathStoresExceptionUnderRunCodecWhenDefaultDiffers(): void
+    public function testRetryPathStoresExceptionUnderAvroRunCodec(): void
     {
         // Package default differs from the run's pinned codec: this is the
         // exact mismatch that the old codec-blind Serializer::serialize()
@@ -48,9 +45,9 @@ final class V2ActivityExceptionCodecTest extends TestCase
             ->set('workflows.serializer', 'avro');
 
         [$run, $execution, $task, $attempt] = $this->scaffoldLeasedAttempt(
-            pinnedCodec: 'workflow-serializer-y',
+            pinnedCodec: 'avro',
             maxAttempts: 2,
-            instanceId: 'td089-retry-legacy-y',
+            instanceId: 'td089-retry-avro',
         );
 
         $outcome = ActivityOutcomeRecorder::record(
@@ -74,8 +71,8 @@ final class V2ActivityExceptionCodecTest extends TestCase
 
         $this->assertExceptionBytesDecodeAs(
             bytes: $execution->exception,
-            runCodec: 'workflow-serializer-y',
-            otherCodec: 'avro',
+            runCodec: 'avro',
+            otherCodec: 'json',
             expectedMessage: 'retry boom',
         );
     }
@@ -83,7 +80,7 @@ final class V2ActivityExceptionCodecTest extends TestCase
     public function testRetryPathUsesHistoryProjectionRoleBinding(): void
     {
         [$run, $execution, $task, $attempt] = $this->scaffoldLeasedAttempt(
-            pinnedCodec: 'workflow-serializer-y',
+            pinnedCodec: 'avro',
             maxAttempts: 2,
             instanceId: 'td089-history-role-retry',
         );
@@ -129,14 +126,14 @@ final class V2ActivityExceptionCodecTest extends TestCase
         $this->assertSame([['projectRun', $run->id]], $customRole->calls);
     }
 
-    public function testFinalFailurePathStoresExceptionUnderRunCodecWhenDefaultDiffers(): void
+    public function testFinalFailurePathStoresExceptionUnderAvroRunCodec(): void
     {
         config()->set('workflows.serializer', 'avro');
 
         [$run, $execution, $task, $attempt] = $this->scaffoldLeasedAttempt(
-            pinnedCodec: 'workflow-serializer-y',
+            pinnedCodec: 'avro',
             maxAttempts: 1,
-            instanceId: 'td089-final-legacy-y',
+            instanceId: 'td089-final-avro',
         );
 
         $outcome = ActivityOutcomeRecorder::record(
@@ -158,18 +155,17 @@ final class V2ActivityExceptionCodecTest extends TestCase
 
         $this->assertExceptionBytesDecodeAs(
             bytes: $execution->exception,
-            runCodec: 'workflow-serializer-y',
-            otherCodec: 'avro',
+            runCodec: 'avro',
+            otherCodec: 'json',
             expectedMessage: 'final boom',
         );
     }
 
-    public function testFinalFailurePathStoresExceptionUnderAvroRunCodecWhenDefaultIsLegacyPhp(): void
+    public function testFinalFailurePathUsesPinnedAvroWhenConfiguredCodecIsUnsupported(): void
     {
-        // Mirror case: Avro-pinned run under a legacy PHP package default
-        // still has to write Avro bytes, not legacy PHP bytes.
+        // A persisted Avro run never adopts a non-Avro package setting.
         config()
-            ->set('workflows.serializer', 'workflow-serializer-y');
+            ->set('workflows.serializer', 'json');
 
         [$run, $execution, $task, $attempt] = $this->scaffoldLeasedAttempt(
             pinnedCodec: 'avro',
@@ -203,10 +199,10 @@ final class V2ActivityExceptionCodecTest extends TestCase
 
     public function testCompletionHistoryStampsWorkerResultCodec(): void
     {
-        config()->set('workflows.serializer', 'workflow-serializer-y');
+        config()->set('workflows.serializer', 'avro');
 
         [$run, $execution, $task, $attempt] = $this->scaffoldLeasedAttempt(
-            pinnedCodec: 'workflow-serializer-y',
+            pinnedCodec: 'avro',
             maxAttempts: 1,
             instanceId: 'td090-result-avro',
         );
@@ -248,7 +244,7 @@ final class V2ActivityExceptionCodecTest extends TestCase
         config()->set('workflows.serializer', 'avro');
 
         [$run, $execution, $task, $attempt] = $this->scaffoldLeasedAttempt(
-            pinnedCodec: 'workflow-serializer-y',
+            pinnedCodec: 'avro',
             maxAttempts: 2,
             instanceId: 'td090-failure-details-avro',
         );
@@ -281,7 +277,7 @@ final class V2ActivityExceptionCodecTest extends TestCase
         $this->assertTrue($outcome['recorded']);
 
         $execution->refresh();
-        $decodedException = Serializer::unserializeWithCodec('workflow-serializer-y', (string) $execution->exception);
+        $decodedException = Serializer::unserializeWithCodec('avro', (string) $execution->exception);
 
         $this->assertSame($detailsBlob, $decodedException['details'] ?? null);
         $this->assertSame('avro', $decodedException['details_payload_codec'] ?? null);
@@ -358,7 +354,7 @@ final class V2ActivityExceptionCodecTest extends TestCase
         config()->set('workflows.serializer', 'avro');
 
         [$run, $execution, $task, $attempt] = $this->scaffoldLeasedAttempt(
-            pinnedCodec: 'workflow-serializer-y',
+            pinnedCodec: 'avro',
             maxAttempts: 3,
             instanceId: 'worker-codec-nonretryable',
         );
@@ -408,7 +404,7 @@ final class V2ActivityExceptionCodecTest extends TestCase
         config()->set('workflows.serializer', 'avro');
 
         [$run, $execution, $task, $attempt] = $this->scaffoldLeasedAttempt(
-            pinnedCodec: 'workflow-serializer-y',
+            pinnedCodec: 'avro',
             maxAttempts: 3,
             instanceId: 'worker-codec-retryable-sanitized',
         );

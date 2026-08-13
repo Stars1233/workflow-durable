@@ -28,6 +28,7 @@ CODEC_SCHEMA = "durable-workflow.codec-regression/v1"
 REPLAY_SCHEMA = "durable-workflow.replay-regression/v1"
 GOLDEN_HISTORY_SCHEMA = "durable-workflow.golden-history.v1"
 MALFORMED_SERVICE_RESPONSE_ENVELOPE = "malformed_service_response_envelope"
+UNSUPPORTED_PAYLOAD_CODEC = "unsupported_payload_codec"
 PHP_GOLDEN_REPLAY_WORKFLOW = "Tests\\Fixtures\\V2\\TestGoldenReplayWorkflow"
 PHP_REPLAY_CONSUMERS = {
     "query-state-replayer",
@@ -252,16 +253,8 @@ PHP_REPLAY_DECODED_FIELDS = {
     "ServiceCallCompleted": ("response_payload",),
 }
 PHP_GOLDEN_VALUE_FIELDS = {"result", "value", "arguments"}
-PHP_CODEC_NAMES = {
-    "avro",
-    "json",
-    "workflow-serializer-y",
-    "workflow-serializer-base64",
-}
-PHP_CODEC_ALIASES = {
-    "Workflow\\Serializers\\Y": "workflow-serializer-y",
-    "Workflow\\Serializers\\Base64": "workflow-serializer-base64",
-}
+PHP_CODEC_NAMES = {"avro"}
+PHP_CODEC_ALIASES: dict[str, str] = {}
 PHP_REPLAY_PAYLOAD_DECODER = Path(__file__).with_name("decode-replay-payload.php")
 RUNTIME_DEPENDENCY_PATHS = ("vendor",)
 ZERO_COMMIT = re.compile(r"^0+$")
@@ -421,10 +414,104 @@ def _avro_golden_migration(base_content: bytes, current_content: bytes) -> bool:
     return migrated and base_document == current_document
 
 
+def _contains_json_payload_codec(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"codec", "payload_codec"} and item == "json":
+                return True
+            if _contains_json_payload_codec(item):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_json_payload_codec(item) for item in value)
+    return False
+
+
+def _contains_payload_codec(value: Any, codec: str) -> bool:
+    if isinstance(value, dict):
+        return any(
+            (key in {"codec", "payload_codec"} and item == codec)
+            or _contains_payload_codec(item, codec)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_payload_codec(item, codec) for item in value)
+    return False
+
+
+def _replay_codec_migration_shape(document: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Project a codec migration pair onto its unchanged replay behavior."""
+
+    normalized = json.loads(json.dumps(document))
+    normalized.pop("id", None)
+    workflow = normalized.get("workflow")
+    if isinstance(workflow, dict) and "payload_codec" in workflow:
+        workflow["payload_codec"] = "<payload-codec>"
+    history = normalized.get("history")
+    if isinstance(history, list):
+        for event in history:
+            if not isinstance(event, dict):
+                continue
+            event_type = event.get("event_type")
+            payload = event.get("payload")
+            if not isinstance(event_type, str) or not isinstance(payload, dict):
+                continue
+            if "payload_codec" in payload:
+                payload["payload_codec"] = "<payload-codec>"
+            for field in PHP_REPLAY_DECODED_FIELDS.get(event_type, ()):
+                field_value = payload.get(field)
+                if isinstance(field_value, dict) and (
+                    "codec" in field_value or "blob" in field_value
+                ):
+                    payload[field] = "<encoded-payload>"
+                elif "payload_codec" in payload and field in payload:
+                    payload[field] = "<encoded-payload>"
+    command_sequence = normalized.get("command_sequence")
+    if isinstance(command_sequence, list):
+        for step in command_sequence:
+            if not isinstance(step, dict):
+                continue
+            for command in step.get("commands", []):
+                if isinstance(command, dict) and "payload_codec" in command:
+                    command["payload_codec"] = "<payload-codec>"
+    return normalized
+
+
+def _is_prerelease_json_to_avro_replay_migration(
+    previous_content: bytes,
+    current_content: bytes,
+    path: str,
+) -> bool:
+    """Permit only behavior-equivalent in-place removal of prerelease JSON payloads."""
+
+    previous = _json(previous_content, path)
+    current = _json(current_content, path)
+    previous_failure = previous.get("expected_failure")
+    current_workflow = current.get("workflow")
+    if (
+        previous.get("fixture_schema") != REPLAY_SCHEMA
+        or current.get("fixture_schema") != REPLAY_SCHEMA
+        or previous.get("id") != current.get("id")
+        or not isinstance(current_workflow, dict)
+        or current_workflow.get("payload_codec") != "avro"
+        or not _contains_json_payload_codec(previous)
+        or _contains_json_payload_codec(current)
+        or not _contains_payload_codec(current, "avro")
+        or (
+            isinstance(previous_failure, dict)
+            and previous_failure.get("type") == UNSUPPORTED_PAYLOAD_CODEC
+        )
+    ):
+        return False
+    return _replay_codec_migration_shape(previous) == _replay_codec_migration_shape(
+        current
+    )
+
+
 def _replay_semantic(
     *,
     workflow_type: str,
     workflow_input: Any,
+    workflow_codec: str,
     replay_namespace: str | None,
     history: Any,
     command_sequence: Any,
@@ -436,6 +523,7 @@ def _replay_semantic(
         "workflow": {
             "type": workflow_type,
             "input": workflow_input,
+            "payload_codec": workflow_codec,
             "namespace": replay_namespace,
         },
         "history": history,
@@ -498,12 +586,16 @@ def _consumer_payload(
                 f"{context}.{field}",
                 default_codec,
             )
-        except CorpusError:
-            if (
-                not service_response_envelope
-                or expected_failure != MALFORMED_SERVICE_RESPONSE_ENVELOPE
-                or observed_failures is None
-            ):
+        except CorpusError as error:
+            malformed_service_response = (
+                service_response_envelope
+                and expected_failure == MALFORMED_SERVICE_RESPONSE_ENVELOPE
+            )
+            unsupported_codec = (
+                expected_failure == UNSUPPORTED_PAYLOAD_CODEC
+                and "unsupported payload codec" in str(error)
+            )
+            if not (malformed_service_response or unsupported_codec) or observed_failures is None:
                 raise
             observed_failures.append(expected_failure)
             payload[field] = {
@@ -552,7 +644,9 @@ def _canonical_php_codec(value: str, context: str) -> str:
 
     canonical = PHP_CODEC_ALIASES.get(value.lstrip("\\"), value)
     if canonical not in PHP_CODEC_NAMES:
-        raise CorpusError(f"{context} declares unsupported payload codec {value!r}")
+        raise CorpusError(
+            f"unsupported_payload_codec: {context} declares unsupported payload codec {value!r}"
+        )
     return canonical
 
 
@@ -1128,7 +1222,10 @@ def _replay_expected_failure(value: Any, context: str) -> Mapping[str, str]:
     if set(expected) != required:
         raise CorpusError(f"{context} must contain exactly {sorted(required)}")
     failure_type = _string(expected["type"], f"{context}.type")
-    if failure_type != MALFORMED_SERVICE_RESPONSE_ENVELOPE:
+    if failure_type not in {
+        MALFORMED_SERVICE_RESPONSE_ENVELOPE,
+        UNSUPPORTED_PAYLOAD_CODEC,
+    }:
         raise CorpusError(f"{context}.type is unsupported")
 
     return {
@@ -1137,7 +1234,13 @@ def _replay_expected_failure(value: Any, context: str) -> Mapping[str, str]:
     }
 
 
-def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None) -> list[Evidence]:
+def _replay_fixture(
+    document: Mapping[str, Any],
+    path: str,
+    binding: str | None,
+    *,
+    allow_legacy_json: bool = False,
+) -> list[Evidence]:
     _string(document.get("$schema"), f"{path}.$schema")
     if document.get("fixture_schema") != REPLAY_SCHEMA:
         raise CorpusError(f"{path} must declare fixture_schema={REPLAY_SCHEMA}")
@@ -1186,6 +1289,20 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
     )
     if expected_failure is not None and commands is not None:
         raise CorpusError(f"{path}.expected_failure requires history replay input")
+    legacy_json_rejection = _contains_json_payload_codec(document)
+    if legacy_json_rejection and not allow_legacy_json and (
+        expected_failure is None
+        or expected_failure["type"] != UNSUPPORTED_PAYLOAD_CODEC
+    ):
+        raise CorpusError(
+            f"{path} JSON-tagged replay evidence must declare "
+            "expected_failure.type=unsupported_payload_codec"
+        )
+    effective_failure = (
+        UNSUPPORTED_PAYLOAD_CODEC
+        if legacy_json_rejection
+        else expected_failure["type"] if expected_failure is not None else None
+    )
     observed_failures: list[str] = []
     replay_namespace = None
     if history is not None:
@@ -1194,7 +1311,7 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
             f"{path}.history",
             default_codec=workflow["payload_codec"],
             golden_values=False,
-            expected_failure=expected_failure["type"] if expected_failure is not None else None,
+            expected_failure=effective_failure,
             observed_failures=observed_failures,
         )
     else:
@@ -1225,11 +1342,16 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
                 raise CorpusError(
                     f"{path}.command_sequence[{index}] has an unused resume_with value"
                 )
-    if expected_failure is not None:
+    if legacy_json_rejection:
+        if history is not None and observed_failures != [UNSUPPORTED_PAYLOAD_CODEC]:
+            raise CorpusError(
+                f"{path} must exercise exactly one unsupported_payload_codec rejection"
+            )
+        expected = {"failure": {"type": UNSUPPORTED_PAYLOAD_CODEC}}
+    elif expected_failure is not None:
         if observed_failures != [expected_failure["type"]]:
             raise CorpusError(
-                f"{path}.expected_failure must match exactly one malformed "
-                "service-response envelope"
+                f"{path}.expected_failure must match exactly one fail-closed payload"
             )
         expected: Mapping[str, Any] = {"failure": expected_failure}
     else:
@@ -1243,6 +1365,7 @@ def _replay_fixture(document: Mapping[str, Any], path: str, binding: str | None)
     semantic = _replay_semantic(
         workflow_type=workflow["type"],
         workflow_input=workflow["arguments"],
+        workflow_codec=workflow["payload_codec"],
         replay_namespace=replay_namespace,
         history=canonical_history,
         command_sequence=canonical_steps,
@@ -1380,6 +1503,7 @@ def _golden_history_fixture(
         semantic = _replay_semantic(
             workflow_type=PHP_GOLDEN_REPLAY_WORKFLOW,
             workflow_input=[scenario],
+            workflow_codec="avro",
             replay_namespace=replay_namespace,
             history=history,
             command_sequence=None,
@@ -1679,6 +1803,12 @@ def _require_counterfactual_evidence(
                 )
             verified[category_name] += 1
 
+        if evidence_paths and verified[category_name] == 0:
+            raise CorpusError(
+                f"new {category_name} evidence includes no fixture that fails the "
+                "official consumer at the base revision and passes at the current revision"
+            )
+
     return verified
 
 
@@ -1687,6 +1817,7 @@ def _inventory(
     files: Mapping[str, bytes],
     *,
     new_paths: set[str] | None = None,
+    allow_legacy_json: bool = False,
 ) -> list[Evidence]:
     binding = policy.get("binding")
     evidence: list[Evidence] = []
@@ -1705,7 +1836,12 @@ def _inventory(
                 if fixture_format == "codec-regression-v1":
                     parsed = _codec_fixture(document, path, binding if isinstance(binding, str) else None)
                 elif fixture_format == "replay-regression-v1":
-                    parsed = _replay_fixture(document, path, binding if isinstance(binding, str) else None)
+                    parsed = _replay_fixture(
+                        document,
+                        path,
+                        binding if isinstance(binding, str) else None,
+                        allow_legacy_json=allow_legacy_json,
+                    )
                 elif fixture_format == "avro-value-golden-v1":
                     parsed = _avro_golden_fixture(document, path)
                 else:
@@ -1831,12 +1967,19 @@ def validate(
         for path in _fixture_paths(base_policy, base_files):
             current_content = current_files.get(path)
             if current_content != base_files[path] and current_content is not None:
-                if _avro_golden_migration(base_files[path], current_content):
+                if _avro_golden_migration(
+                    base_files[path],
+                    current_content,
+                ) or _is_prerelease_json_to_avro_replay_migration(
+                    base_files[path],
+                    current_content,
+                    path,
+                ):
                     base_files[path] = current_content
                     continue
             if current_content != base_files[path]:
                 raise CorpusError(f"immutable fixture file {path} was changed, moved, or removed")
-        base_evidence = _inventory(base_policy, base_files)
+        base_evidence = _inventory(base_policy, base_files, allow_legacy_json=True)
     current_evidence = _inventory(policy, current_files, new_paths=added_paths)
 
     current_by_id = {item.identity: item for item in current_evidence}

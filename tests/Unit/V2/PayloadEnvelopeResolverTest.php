@@ -50,31 +50,32 @@ final class PayloadEnvelopeResolverTest extends TestCase
         $this->assertSame(['a', 'b', 42], PayloadEnvelopeResolver::resolveToArray($envelope));
     }
 
-    public function testResolveToArrayDecodesLegacyYEnvelope(): void
+    public function testResolveToArrayRejectsJsonEnvelope(): void
     {
-        $envelope = [
-            'codec' => 'workflow-serializer-y',
-            'blob' => Serializer::serializeWithCodec('workflow-serializer-y', ['a', 'b']),
-        ];
+        $this->expectException(ValidationException::class);
+        $this->expectExceptionMessage('unsupported_payload_codec');
 
-        $this->assertSame(['a', 'b'], PayloadEnvelopeResolver::resolveToArray($envelope));
+        PayloadEnvelopeResolver::resolveToArray([
+            'codec' => 'json',
+            'blob' => '["scheduled",{"runtime":"python"}]',
+        ]);
     }
 
-    public function testResolveToArrayDecodesJsonEnvelope(): void
+    public function testResolveToArrayRejectsLegacyPhpEnvelope(): void
     {
-        $this->assertSame([
-            'scheduled', [
-                'runtime' => 'python',
-            ]], PayloadEnvelopeResolver::resolveToArray([
-                'codec' => 'json',
-                'blob' => '["scheduled",{"runtime":"python"}]',
-            ]));
+        $this->expectException(ValidationException::class);
+        $this->expectExceptionMessage('unsupported_payload_codec');
+
+        PayloadEnvelopeResolver::resolveToArray([
+            'codec' => 'workflow-serializer-y',
+            'blob' => 'legacy',
+        ]);
     }
 
     public function testResolveToArrayRejectsUnknownCodec(): void
     {
         $this->expectException(ValidationException::class);
-        $this->expectExceptionMessage('Unknown payload codec');
+        $this->expectExceptionMessage('unsupported_payload_codec');
 
         PayloadEnvelopeResolver::resolveToArray([
             'codec' => 'does-not-exist',
@@ -156,7 +157,7 @@ final class PayloadEnvelopeResolverTest extends TestCase
         $payload['codec'] = 'workflow-serializer-y';
 
         $this->expectException(ValidationException::class);
-        $this->expectExceptionMessage('codec must match');
+        $this->expectExceptionMessage('unsupported_payload_codec');
 
         PayloadEnvelopeResolver::resolve([
             'codec' => 'avro',

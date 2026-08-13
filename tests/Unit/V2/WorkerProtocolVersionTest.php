@@ -120,10 +120,7 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
             $summary['history_pagination']['max_page_size']
         );
         $this->assertSame(\Workflow\Serializers\CodecRegistry::universal(), $summary['payload_codecs_universal']);
-        $this->assertSame(
-            \Workflow\Serializers\CodecRegistry::engineSpecific(),
-            $summary['payload_codecs_engine_specific']
-        );
+        $this->assertArrayNotHasKey('payload_codecs_engine_specific', $summary);
         $this->assertSame(
             WorkerProtocolVersion::REASON_UNSUPPORTED_PAYLOAD_CODEC,
             $summary['unsupported_payload_codec_reason']

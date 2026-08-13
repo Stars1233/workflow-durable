@@ -7,6 +7,7 @@ namespace Tests\Feature\V2;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use InvalidArgumentException;
 use Tests\Fixtures\V2\TestGreetingWorkflow;
 use Tests\Fixtures\V2\TestQueryContinueAsNewWorkflow;
 use Tests\Fixtures\V2\TestQueryWorkflow;
@@ -181,6 +182,53 @@ final class V2WorkflowControlPlaneTest extends TestCase
             ->where('status', TaskStatus::Ready->value)
             ->first();
         $this->assertNull($resumeTask);
+    }
+
+    public function testSignalRejectsJsonTaggedPayloadBeforePersistence(): void
+    {
+        $start = $this->controlPlane->start('remote-signal-workflow', 'ctrl-plane-json-signal', [
+            'connection' => 'redis',
+            'queue' => 'polyglot-shared',
+        ]);
+        $commandCount = WorkflowCommand::query()->count();
+
+        try {
+            $this->controlPlane->signal('ctrl-plane-json-signal', 'polyglot-signal', [
+                'arguments' => ['delivered'],
+                'payload_codec' => 'json',
+                'payload_blob' => '{"delivered":true}',
+            ]);
+            $this->fail('Expected the JSON-tagged signal payload to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('unsupported_payload_codec', $exception->getMessage());
+        }
+
+        $this->assertSame($commandCount, WorkflowCommand::query()->count());
+        $this->assertDatabaseMissing('workflow_signal_records', [
+            'workflow_instance_id' => 'ctrl-plane-json-signal',
+        ]);
+        $this->assertDatabaseMissing('workflow_history_events', [
+            'workflow_run_id' => $start['workflow_run_id'],
+            'event_type' => HistoryEventType::SignalReceived->value,
+        ]);
+    }
+
+    public function testWorkflowStubRejectsJsonTaggedSignalPayloadBeforePersistence(): void
+    {
+        $workflow = WorkflowStub::make(TestSignalWorkflow::class, 'stub-json-signal');
+        $commandCount = WorkflowCommand::query()->count();
+
+        try {
+            $workflow->attemptSignalWithArguments('name-provided', ['Taylor'], 'json', '{"name":"Taylor"}');
+            $this->fail('Expected the JSON-tagged signal payload to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('unsupported_payload_codec', $exception->getMessage());
+        }
+
+        $this->assertSame($commandCount, WorkflowCommand::query()->count());
+        $this->assertDatabaseMissing('workflow_signal_records', [
+            'workflow_instance_id' => 'stub-json-signal',
+        ]);
     }
 
     public function testStartUsesHistoryProjectionRoleBindingForNewRunProjection(): void

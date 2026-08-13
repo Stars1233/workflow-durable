@@ -8,7 +8,6 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Tests\Fixtures\V2\TestReplayMapOrderWorkflow;
 use Throwable;
-use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Support\WorkflowFiberRunner;
 use Workflow\V2\Support\WorkflowStep;
@@ -49,6 +48,10 @@ final class ReplayRegressionCorpusTest extends TestCase
                 )->step();
             } catch (Throwable $exception) {
                 $this->assertSame($fixture['expected_failure']['exception'], $exception::class);
+                if ($fixture['expected_failure']['type'] === 'unsupported_payload_codec') {
+                    $this->assertStringContainsString('unsupported_payload_codec', $exception->getMessage());
+                    $this->assertStringContainsString('HTTP document transport', $exception->getMessage());
+                }
 
                 return;
             }
@@ -82,31 +85,32 @@ final class ReplayRegressionCorpusTest extends TestCase
 
     public function testRawBlobsAndInlineEnvelopesProduceTheSameWorkflowResult(): void
     {
-        $fixture = self::replayRegressionFixtures()['workflow-fiber-activity-history-sequence'][0];
+        $fixtures = self::replayRegressionFixtures();
+        $fixture = $fixtures['workflow-fiber-activity-history-sequence'][0];
+        $codec = 'avro';
+        $this->assertSame($codec, $fixture['workflow']['payload_codec']);
 
-        foreach (CodecRegistry::universal() as $codec) {
-            $blob = Serializer::serializeWithCodec($codec, 'Hello, Ada!');
-            $rawHistory = $fixture['history'];
-            $rawHistory[1]['payload']['payload_codec'] = $codec;
-            $rawHistory[1]['payload']['result'] = $blob;
-            $envelopeHistory = $rawHistory;
-            unset($envelopeHistory[1]['payload']['payload_codec']);
-            $envelopeHistory[1]['payload']['result'] = [
-                'codec' => $codec,
-                'blob' => $blob,
-            ];
+        $blob = Serializer::serializeWithCodec($codec, 'Hello, Ada!');
+        $rawHistory = $fixture['history'];
+        $rawHistory[1]['payload']['payload_codec'] = $codec;
+        $rawHistory[1]['payload']['result'] = $blob;
+        $envelopeHistory = $rawHistory;
+        unset($envelopeHistory[1]['payload']['payload_codec']);
+        $envelopeHistory[1]['payload']['result'] = [
+            'codec' => $codec,
+            'blob' => $blob,
+        ];
 
-            $fromRawBlob = $this->replayStep($fixture, $rawHistory, "{$codec}-raw");
-            $fromInlineEnvelope = $this->replayStep($fixture, $envelopeHistory, "{$codec}-envelope");
+        $fromRawBlob = $this->replayStep($fixture, $rawHistory, "{$codec}-raw");
+        $fromInlineEnvelope = $this->replayStep($fixture, $envelopeHistory, "{$codec}-envelope");
 
-            $this->assertStepMatches($fixture['expected'], $fromRawBlob, "Raw {$codec} history");
-            $this->assertStepMatches($fixture['expected'], $fromInlineEnvelope, "Inline {$codec} history");
-            $this->assertSame(
-                $fromRawBlob->result,
-                $fromInlineEnvelope->result,
-                "Inline {$codec} history produced a different workflow result.",
-            );
-        }
+        $this->assertStepMatches($fixture['expected'], $fromRawBlob, "Raw {$codec} history");
+        $this->assertStepMatches($fixture['expected'], $fromInlineEnvelope, "Inline {$codec} history");
+        $this->assertSame(
+            $fromRawBlob->result,
+            $fromInlineEnvelope->result,
+            "Inline {$codec} history produced a different workflow result.",
+        );
     }
 
     public function testAlternateAvroMapOrdersRemainObservableToTheRunner(): void

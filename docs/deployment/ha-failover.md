@@ -411,7 +411,7 @@ Operators MUST wire load balancers to them as follows:
   rather than fall back to a stale roster.
 - **`GET /api/cluster/info`** proves an authenticated client can
   discover build identity, control-plane protocol, worker protocol,
-  payload codecs, and server capabilities. Use it during rollout to
+  the fixed Avro payload contract, and server capabilities. Use it during rollout to
   confirm the new image is in place and to read
   `topology.current_shape`, `topology.current_roles`, and
   `topology.matching_role`.

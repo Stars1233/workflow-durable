@@ -25,8 +25,9 @@ final class Serializer
      * the codec-specific surface: {@see serialize()} / {@see unserialize()}.
      *
      * - serialize(): uses config('workflows.serializer') (default "avro").
-     * - unserialize(): sniffs legacy untagged blobs ("base64:" prefix → Base64,
-     *   JSON-like → Json, else Y). Avro blobs are not detectable by sniff alone,
+     * - unserialize(): is the explicitly internal v1 import/drain reader. It
+     *   sniffs legacy untagged blobs ("base64:" prefix → Base64,
+     *   JSON-like → Json, else Y). Avro blobs are detected by their frame,
      *   so call sites with codec context should prefer
      *   {@see self::unserializeWithCodec()}.
      *
@@ -130,21 +131,13 @@ final class Serializer
     }
 
     /**
-     * Pick the codec name actually used to serialize a payload. If the
-     * preferred codec is Avro but the value contains PHP-only objects
-     * (SerializableClosure, resources, arbitrary objects Avro cannot encode),
-     * fall back to the legacy `workflow-serializer-y` codec so the payload
-     * round-trips. Callers that store a payload_codec column alongside the
-     * blob must use the codec returned here, not the preferred input.
+     * Pick the codec name actually used to serialize a v2 payload. Durable
+     * values are Avro-only; PHP-only values must be adapted before they cross
+     * a v2 payload boundary and are never silently moved to a legacy codec.
      */
     public static function chooseCodecForData(?string $preferred, mixed $data): string
     {
-        $preferredCodec = CodecRegistry::resolve($preferred);
-
-        if ($preferredCodec === Avro::class && self::containsPhpOnlyValue($data)) {
-            return 'workflow-serializer-y';
-        }
-
+        CodecRegistry::resolve($preferred);
         return CodecRegistry::canonicalize($preferred);
     }
 
@@ -204,6 +197,14 @@ final class Serializer
         $configured = function_exists('config') ? config('workflows.serializer') : null;
 
         if (is_string($configured) && $configured !== '') {
+            $legacy = ltrim($configured, '\\');
+            if ($legacy === Y::class || $legacy === 'workflow-serializer-y') {
+                return Y::class;
+            }
+            if ($legacy === Base64::class || $legacy === 'workflow-serializer-base64') {
+                return Base64::class;
+            }
+
             return CodecRegistry::resolve($configured);
         }
 

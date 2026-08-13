@@ -186,7 +186,7 @@ exit(0);
             "workflow": {
                 "type": workflow_type,
                 "arguments": [],
-                "payload_codec": "json",
+                "payload_codec": "avro",
             },
             "history": [
                 {
@@ -376,8 +376,8 @@ exit(0);
                 "payload": {
                     "sequence": 7,
                     "activity_type": "Tests\\Fixtures\\V2\\TestGreetingActivity",
-                    "result": '"Hello, Ada!"',
-                    "payload_codec": "json",
+                    "result": "wwHioz3/VYAiNwoWSGVsbG8sIEFkYSE=",
+                    "payload_codec": "avro",
                 },
                 "recorded_at": "2026-07-29T12:00:01+00:00",
             },
@@ -799,6 +799,37 @@ exit(0);
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn("duplicate semantic fixtures", result.stderr)
 
+    def test_positive_json_replay_cannot_be_preserved_beside_an_avro_copy(self) -> None:
+        legacy = self.official_history_replay_fixture()
+        legacy["id"] = "frozen-json-replay"
+        legacy["workflow"]["payload_codec"] = "json"
+        legacy["history"][1]["payload"].update(
+            {
+                "result": '"Hello, Ada!"',
+                "payload_codec": "json",
+            }
+        )
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base.json",
+            legacy,
+        )
+        self.commit_current_as_base()
+
+        successor = self.official_history_replay_fixture()
+        successor["id"] = "frozen-json-replay-avro"
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/base-avro.json",
+            successor,
+        )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn(
+            "JSON-tagged replay evidence must declare expected_failure.type=unsupported_payload_codec",
+            result.stderr,
+        )
+
     def test_golden_history_rewrap_cannot_manufacture_growth(self) -> None:
         self.write_json(
             "tests/Fixtures/V2/ReplayRegression/base.json",
@@ -950,7 +981,7 @@ exit(0);
         self.commit_current_as_base()
         duplicate = self.official_history_replay_fixture()
         duplicate["id"] = "expected-command-subset-rewrap"
-        duplicate["expected"]["commands"][0]["payload_codec"] = "json"
+        duplicate["expected"]["commands"][0]["payload_codec"] = "avro"
         self.write_json(
             "tests/Fixtures/V2/ReplayRegression/expected-command-subset.json",
             duplicate,
@@ -969,7 +1000,7 @@ exit(0);
         self.commit_current_as_base()
         duplicate = self.official_command_replay_fixture()
         duplicate["id"] = "command-sequence-subset-rewrap"
-        duplicate["command_sequence"][0]["commands"][0]["payload_codec"] = "json"
+        duplicate["command_sequence"][0]["commands"][0]["payload_codec"] = "avro"
         self.write_json(
             "tests/Fixtures/V2/ReplayRegression/command-sequence-subset.json",
             duplicate,
@@ -982,16 +1013,16 @@ exit(0);
 
     def test_inline_payload_envelopes_cannot_manufacture_replay_growth(self) -> None:
         payload_fields = (
-            ("ActivityCompleted", "result", '"activity-result"', "json"),
-            ("SideEffectRecorded", "result", '{"source":"history"}', "json"),
-            ("SignalReceived", "arguments", '["received-signal"]', "json"),
-            ("SignalApplied", "value", '"applied-signal"', "json"),
-            ("SignalApplied", "arguments", '["applied-arguments"]', "json"),
-            ("UpdateAccepted", "arguments", "[true]", "json"),
-            ("UpdateApplied", "arguments", "[true]", "json"),
-            ("ChildRunCompleted", "output", '"child-output"', "json"),
-            ("ServiceCallStarted", "response_payload", '{"accepted":true}', "json"),
-            ("ServiceCallCompleted", "response_payload", '{"completed":true}', "json"),
+            ("ActivityCompleted", "result", "wwHioz3/VYAiNwoeYWN0aXZpdHktcmVzdWx0", "avro"),
+            ("SideEffectRecorded", "result", "wwHioz3/VYAiNw4CDHNvdXJjZQoOaGlzdG9yeQA=", "avro"),
+            ("SignalReceived", "arguments", "wwHioz3/VYAiNwwCCh5yZWNlaXZlZC1zaWduYWwA", "avro"),
+            ("SignalApplied", "value", "wwHioz3/VYAiNwocYXBwbGllZC1zaWduYWw=", "avro"),
+            ("SignalApplied", "arguments", "wwHioz3/VYAiNwwCCiJhcHBsaWVkLWFyZ3VtZW50cwA=", "avro"),
+            ("UpdateAccepted", "arguments", "wwHioz3/VYAiNwwCAgEA", "avro"),
+            ("UpdateApplied", "arguments", "wwHioz3/VYAiNwwCAgEA", "avro"),
+            ("ChildRunCompleted", "output", "wwHioz3/VYAiNwoYY2hpbGQtb3V0cHV0", "avro"),
+            ("ServiceCallStarted", "response_payload", "wwHioz3/VYAiNw4CEGFjY2VwdGVkAgEA", "avro"),
+            ("ServiceCallCompleted", "response_payload", "wwHioz3/VYAiNw4CEmNvbXBsZXRlZAIBAA==", "avro"),
             (
                 "ActivityCompleted",
                 "result",
@@ -1038,7 +1069,9 @@ exit(0);
 
     def test_codec_reencoding_cannot_manufacture_replay_growth(self) -> None:
         base = self.official_history_replay_fixture()
-        base["history"][1]["payload"]["result"] = '"activity-result"'
+        base["history"][1]["payload"]["result"] = (
+            "wwHioz3/VYAiNwoeYWN0aXZpdHktcmVzdWx0"
+        )
         self.write_json(
             "tests/Fixtures/V2/ReplayRegression/base.json",
             base,
@@ -1112,36 +1145,6 @@ exit(0);
                     self.assertEqual(2, counts["current"])
                 finally:
                     (self.root / duplicate_path).unlink(missing_ok=True)
-
-    def test_alternate_json_object_orders_grow_replay_evidence(self) -> None:
-        base = self.official_history_replay_fixture()
-        base["history"][1]["payload"] = {
-            "sequence": 7,
-            "payload_codec": "json",
-            "result": '{"outer":{"left":1,"right":"x"},"tail":"done"}',
-        }
-        self.write_json(
-            "tests/Fixtures/V2/ReplayRegression/base.json",
-            base,
-        )
-        self.commit_current_as_base()
-
-        changed = json.loads(json.dumps(base))
-        changed["id"] = "alternate-json-object-order"
-        changed["history"][1]["payload"]["result"] = (
-            '{"tail":"done","outer":{"right":"x","left":1}}'
-        )
-        self.write_json(
-            "tests/Fixtures/V2/ReplayRegression/alternate-json-order.json",
-            changed,
-        )
-
-        result = self.validate()
-
-        self.assertEqual(0, result.returncode, result.stderr)
-        counts = json.loads(result.stdout)["counts"]["replay"]
-        self.assertEqual(1, counts["base"])
-        self.assertEqual(2, counts["current"])
 
     def test_alternate_inline_object_orders_grow_replay_evidence(self) -> None:
         base = self.official_history_replay_fixture()
@@ -1267,7 +1270,7 @@ exit(0);
         )
         self.assertIn("consumer is unavailable", result.stderr)
 
-    def test_payload_codec_precedence_matches_the_runner(self) -> None:
+    def test_json_envelope_is_rejected_even_with_avro_workflow_codec(self) -> None:
         base = self.official_history_replay_fixture()
         base["workflow"]["payload_codec"] = "avro"
         self.write_json(
@@ -1292,9 +1295,9 @@ exit(0);
         result = self.validate()
 
         self.assertNotEqual(0, result.returncode, result.stdout)
-        self.assertIn("duplicate semantic fixtures", result.stderr)
+        self.assertIn("unsupported_payload_codec", result.stderr)
 
-    def test_workflow_codec_is_the_payload_fallback(self) -> None:
+    def test_workflow_avro_codec_is_the_payload_fallback(self) -> None:
         base = self.official_history_replay_fixture()
         base["history"][1]["payload"].pop("payload_codec")
         self.write_json(
@@ -1306,7 +1309,7 @@ exit(0);
         duplicate = json.loads(json.dumps(base))
         duplicate["id"] = "workflow-codec-fallback-envelope"
         duplicate["history"][1]["payload"]["result"] = {
-            "blob": '"Hello, Ada!"',
+            "blob": "wwHioz3/VYAiNwoWSGVsbG8sIEFkYSE=",
         }
         self.write_json(
             "tests/Fixtures/V2/ReplayRegression/fallback-codec.json",
@@ -1327,6 +1330,14 @@ exit(0);
                 {"external_storage": "inline", "accepted": True},
             ),
         )
+        encoded_responses = {
+            "ServiceCallStarted-codec": "wwHioz3/VYAiNw4GCmNvZGVjChJwcmVmZXJyZWQQYWNjZXB0ZWQCARBpZGVudGl0eQowU2VydmljZUNhbGxTdGFydGVkLWNvZGVjAA==",
+            "ServiceCallStarted-blob": "wwHioz3/VYAiNw4GCGJsb2IOAgxkb21haW4KCnZhbHVlABBhY2NlcHRlZAIBEGlkZW50aXR5Ci5TZXJ2aWNlQ2FsbFN0YXJ0ZWQtYmxvYgA=",
+            "ServiceCallStarted-external-storage": "wwHioz3/VYAiNw4GIGV4dGVybmFsX3N0b3JhZ2UKDGlubGluZRBhY2NlcHRlZAIBEGlkZW50aXR5CkZTZXJ2aWNlQ2FsbFN0YXJ0ZWQtZXh0ZXJuYWwtc3RvcmFnZQA=",
+            "ServiceCallCompleted-codec": "wwHioz3/VYAiNw4GCmNvZGVjChJwcmVmZXJyZWQQYWNjZXB0ZWQCARBpZGVudGl0eQo0U2VydmljZUNhbGxDb21wbGV0ZWQtY29kZWMA",
+            "ServiceCallCompleted-blob": "wwHioz3/VYAiNw4GCGJsb2IOAgxkb21haW4KCnZhbHVlABBhY2NlcHRlZAIBEGlkZW50aXR5CjJTZXJ2aWNlQ2FsbENvbXBsZXRlZC1ibG9iAA==",
+            "ServiceCallCompleted-external-storage": "wwHioz3/VYAiNw4GIGV4dGVybmFsX3N0b3JhZ2UKDGlubGluZRBhY2NlcHRlZAIBEGlkZW50aXR5CkpTZXJ2aWNlQ2FsbENvbXBsZXRlZC1leHRlcm5hbC1zdG9yYWdlAA==",
+        }
         fixtures = []
 
         for event_type in ("ServiceCallStarted", "ServiceCallCompleted"):
@@ -1353,10 +1364,9 @@ exit(0);
         for fixture, identity in fixtures:
             duplicate = json.loads(json.dumps(fixture))
             duplicate["id"] = f"encoded-service-response-{identity}"
-            direct = duplicate["history"][1]["payload"]["response_payload"]
             duplicate["history"][1]["payload"]["response_payload"] = {
-                "codec": "json",
-                "blob": json.dumps(direct, separators=(",", ":")),
+                "codec": "avro",
+                "blob": encoded_responses[identity],
             }
             self.write_json(
                 (
@@ -1383,11 +1393,11 @@ exit(0);
     def test_malformed_service_response_envelopes_are_rejected(self) -> None:
         malformed_values = (
             (
-                {"codec": "json", "blob": '{"truncated":'},
+                {"codec": "avro", "blob": "not-an-avro-frame"},
                 "cannot be decoded by the PHP payload consumer",
             ),
             (
-                {"codec": "json", "external_storage": {"key": "payload"}},
+                {"codec": "avro", "external_storage": {"key": "payload"}},
                 "not a decodable inline payload envelope",
             ),
         )
@@ -1423,8 +1433,8 @@ exit(0);
         fixture["history"][1]["payload"] = {
             "sequence": 7,
             "response_payload": {
-                "codec": "json",
-                "blob": '{"truncated":',
+                "codec": "avro",
+                "blob": "not-an-avro-frame",
             },
         }
         del fixture["expected"]
@@ -1458,19 +1468,15 @@ exit(0);
         )
         self.commit_current_as_base()
         malformed_values = (
-            ({"codec": "json"}, "not a decodable inline payload envelope"),
-            ({"codec": "json", "blob": 42}, "not a decodable inline payload envelope"),
+            ({"codec": "avro"}, "not a decodable inline payload envelope"),
+            ({"codec": "avro", "blob": 42}, "not a decodable inline payload envelope"),
             (
-                {"codec": "json", "external_storage": {"key": "payload"}},
+                {"codec": "avro", "external_storage": {"key": "payload"}},
                 "not a decodable inline payload envelope",
             ),
             (
                 {"codec": "unknown", "blob": '"activity-result"'},
                 "declares unsupported payload codec",
-            ),
-            (
-                {"codec": "json", "blob": '{"truncated":'},
-                "cannot be decoded by the PHP payload consumer",
             ),
             (
                 {"codec": "avro", "blob": "not-an-avro-frame"},
@@ -1495,11 +1501,11 @@ exit(0);
                 finally:
                     (self.root / path).unlink(missing_ok=True)
 
-    def test_conflicting_payload_codec_declarations_are_rejected(self) -> None:
+    def test_nested_json_payload_codec_is_rejected_before_decode(self) -> None:
         fixture = self.official_history_replay_fixture()
         fixture["id"] = "conflicting-inline-envelope-codecs"
         fixture["history"][1]["payload"]["result"] = {
-            "codec": "avro",
+            "codec": "json",
             "blob": '"Hello, Ada!"',
         }
         self.write_json(
@@ -1510,39 +1516,7 @@ exit(0);
         result = self.validate()
 
         self.assertNotEqual(0, result.returncode, result.stdout)
-        self.assertIn("declares conflicting payload codecs", result.stderr)
-
-    def test_equivalent_codec_alias_declarations_are_not_conflicts(self) -> None:
-        base = self.official_history_replay_fixture()
-        base["history"][1]["payload"] = {
-            "sequence": 7,
-            "payload_codec": "\\Workflow\\Serializers\\Base64",
-            "result": "base64:Tjs=",
-        }
-        self.write_json(
-            "tests/Fixtures/V2/ReplayRegression/base.json",
-            base,
-        )
-        self.commit_current_as_base()
-
-        duplicate = json.loads(json.dumps(base))
-        duplicate["id"] = "equivalent-codec-aliases"
-        duplicate["history"][1]["payload"] = {
-            "sequence": 7,
-            "result": {
-                "codec": "workflow-serializer-base64",
-                "blob": "base64:Tjs=",
-            },
-        }
-        self.write_json(
-            "tests/Fixtures/V2/ReplayRegression/equivalent-aliases.json",
-            duplicate,
-        )
-
-        result = self.validate()
-
-        self.assertNotEqual(0, result.returncode, result.stdout)
-        self.assertIn("duplicate semantic fixtures", result.stderr)
+        self.assertIn("unsupported_payload_codec", result.stderr)
 
     def test_ignored_failure_exception_cannot_manufacture_growth(self) -> None:
         self.write_json(
@@ -1678,7 +1652,9 @@ exit(0);
         self.commit_current_as_base()
         changed = self.official_history_replay_fixture()
         changed["id"] = "changed-activity-result"
-        changed["history"][1]["payload"]["result"] = '"Hello, Grace!"'
+        changed["history"][1]["payload"]["result"] = (
+            "wwHioz3/VYAiNwoaSGVsbG8sIEdyYWNlIQ=="
+        )
         changed["expected"]["result"]["greeting"] = "Hello, Grace!"
         changed["expected"]["result"]["events"] = ["activity:Hello, Grace!"]
         self.write_json(
@@ -1889,6 +1865,51 @@ exit(0);
             "resources/protocol/avro-value-v1-golden.json",
             self.malformed_avro_golden_fixture("Ag=="),
         )
+
+        result = self.validate()
+
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("immutable fixture file", result.stderr)
+
+    def test_prerelease_json_replay_fixture_migrates_in_place_to_avro(self) -> None:
+        path = "tests/Fixtures/V2/ReplayRegression/base.json"
+        legacy = self.official_history_replay_fixture()
+        legacy["workflow"]["payload_codec"] = "json"
+        legacy["history"][1]["payload"].update(
+            {
+                "result": '"Hello, Ada!"',
+                "payload_codec": "json",
+            }
+        )
+        self.write_json(path, legacy)
+        self.commit_current_as_base()
+        self.write_json(path, self.official_history_replay_fixture())
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        counts = json.loads(result.stdout)["counts"]["replay"]
+        self.assertEqual(1, counts["base"])
+        self.assertEqual(1, counts["current"])
+
+    def test_prerelease_json_to_avro_migration_cannot_change_replay_behavior(
+        self,
+    ) -> None:
+        path = "tests/Fixtures/V2/ReplayRegression/base.json"
+        legacy = self.official_history_replay_fixture()
+        legacy["workflow"]["payload_codec"] = "json"
+        legacy["history"][1]["payload"].update(
+            {
+                "result": '"Hello, Ada!"',
+                "payload_codec": "json",
+            }
+        )
+        self.write_json(path, legacy)
+        self.commit_current_as_base()
+
+        changed = self.official_history_replay_fixture()
+        changed["expected"]["result"]["greeting"] = "Hello, Grace!"
+        self.write_json(path, changed)
 
         result = self.validate()
 

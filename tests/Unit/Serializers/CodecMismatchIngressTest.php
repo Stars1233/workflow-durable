@@ -33,7 +33,7 @@ final class CodecMismatchIngressTest extends NonDatabaseTestCase
             $this->assertSame('avro', $e->declaredCodec);
             $this->assertStringContainsString('look like JSON', $e->detail);
             $this->assertStringContainsString('fixed Avro Value codec', $e->remediation);
-            $this->assertStringContainsString('codec="json"', $e->remediation);
+            $this->assertStringContainsString('JSON is only the HTTP document transport', $e->remediation);
         }
     }
 
@@ -104,7 +104,7 @@ final class CodecMismatchIngressTest extends NonDatabaseTestCase
             $this->assertSame('avro', $e->declaredCodec);
             $this->assertStringContainsString('invalid_payload_framing', $e->detail);
             $this->assertStringContainsString('c301', $e->detail);
-            $this->assertStringContainsString('JSON codec explicitly', $e->remediation);
+            $this->assertStringContainsString('fixed Avro Value schema', $e->remediation);
         }
     }
 
