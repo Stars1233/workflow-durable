@@ -56,6 +56,7 @@ final class DefaultServiceControlPlane implements ServiceControlPlane
         $endpointKey = $this->contractName($endpointName);
         $serviceKey = $this->contractName($serviceName);
         $operationKey = $this->contractName($operationName);
+        CodecRegistry::canonicalize($this->stringOption($options, 'payload_codec'));
 
         $explicitCallId = $this->stringFrom($options['service_call_id'] ?? null);
 

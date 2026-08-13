@@ -45,6 +45,90 @@ final class DefaultServiceControlPlaneTest extends TestCase
         $this->assertSame(0, WorkflowServiceCall::query()->count());
     }
 
+    public function testExecuteRejectsJsonPayloadCodecBeforeIdempotentReplay(): void
+    {
+        $fakeWorkflow = new FakeServiceWorkflowControlPlane();
+        $controlPlane = new DefaultServiceControlPlane($fakeWorkflow, new DefaultServiceBoundaryPolicy());
+        [$endpoint, $service, $operation] = $this->catalogWithOperation('billing');
+
+        $call = $this->serviceCall($endpoint, $service, $operation, [
+            'payload_codec' => 'avro',
+            'idempotency_key' => 'idem-1',
+        ]);
+
+        try {
+            $controlPlane->execute('billing', 'invoices', 'create', [
+                'namespace' => 'billing',
+                'idempotency_key' => 'idem-1',
+                'payload_codec' => 'json',
+                'payload_blob' => 'json-encoded-arguments',
+            ]);
+            $this->fail('JSON-tagged service payload must fail before idempotent replay.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('unsupported_payload_codec', $exception->getMessage());
+        }
+
+        $this->assertSame(ServiceCallStatus::Started->value, $call->refresh()->status);
+        $this->assertSame('avro', $call->payload_codec);
+        $this->assertSame([], $fakeWorkflow->starts);
+    }
+
+    public function testExecuteRejectsJsonPayloadCodecBeforeTerminalCallReplay(): void
+    {
+        $fakeWorkflow = new FakeServiceWorkflowControlPlane();
+        $controlPlane = new DefaultServiceControlPlane($fakeWorkflow, new DefaultServiceBoundaryPolicy());
+        [$endpoint, $service, $operation] = $this->catalogWithOperation('billing');
+
+        $call = $this->serviceCall($endpoint, $service, $operation, [
+            'status' => ServiceCallStatus::Completed->value,
+            'outcome' => ServiceCallOutcome::Completed->value,
+            'payload_codec' => 'avro',
+        ]);
+
+        try {
+            $controlPlane->execute('billing', 'invoices', 'create', [
+                'namespace' => 'billing',
+                'service_call_id' => $call->id,
+                'payload_codec' => 'json',
+                'payload_blob' => 'json-encoded-arguments',
+            ]);
+            $this->fail('JSON-tagged service payload must fail before terminal call replay.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('unsupported_payload_codec', $exception->getMessage());
+        }
+
+        $this->assertSame(ServiceCallStatus::Completed->value, $call->refresh()->status);
+        $this->assertSame('avro', $call->payload_codec);
+        $this->assertSame([], $fakeWorkflow->starts);
+    }
+
+    public function testExecuteRejectsJsonPayloadCodecBeforeStartedCallReplay(): void
+    {
+        $fakeWorkflow = new FakeServiceWorkflowControlPlane();
+        $controlPlane = new DefaultServiceControlPlane($fakeWorkflow, new DefaultServiceBoundaryPolicy());
+        [$endpoint, $service, $operation] = $this->catalogWithOperation('billing');
+
+        $call = $this->serviceCall($endpoint, $service, $operation, [
+            'payload_codec' => 'avro',
+        ]);
+
+        try {
+            $controlPlane->execute('billing', 'invoices', 'create', [
+                'namespace' => 'billing',
+                'service_call_id' => $call->id,
+                'payload_codec' => 'json',
+                'payload_blob' => 'json-encoded-arguments',
+            ]);
+            $this->fail('JSON-tagged service payload must fail before started call replay.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('unsupported_payload_codec', $exception->getMessage());
+        }
+
+        $this->assertSame(ServiceCallStatus::Started->value, $call->refresh()->status);
+        $this->assertSame('avro', $call->payload_codec);
+        $this->assertSame([], $fakeWorkflow->starts);
+    }
+
     public function testExecuteRecordsDurableResolutionFailureWhenEndpointIsMissing(): void
     {
         $controlPlane = new DefaultServiceControlPlane(
