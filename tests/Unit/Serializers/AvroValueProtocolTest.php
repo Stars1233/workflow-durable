@@ -11,6 +11,7 @@ use Workflow\Serializers\AvroBinaryValue;
 use Workflow\Serializers\AvroMapValue;
 use Workflow\Serializers\CodecDecodeException;
 use Workflow\Serializers\CodecRegistry;
+use Workflow\Serializers\Serializer;
 
 final class AvroValueProtocolTest extends TestCase
 {
@@ -64,6 +65,33 @@ final class AvroValueProtocolTest extends TestCase
             $decoded = Avro::unserialize($blob);
             self::assertEquals($value, $decoded, $name);
             self::assertSame($blob, Avro::serialize($decoded), $name);
+        }
+    }
+
+    public function testPhpArrayValuesCrossTheFixedValueBoundary(): void
+    {
+        $value = [
+            'order_id' => 42,
+            'items' => ['book', 'pen'],
+            'paid' => true,
+        ];
+
+        $blob = Serializer::serializeWithCodec('avro', $value);
+
+        self::assertSame($value, Serializer::unserializeWithCodec('avro', $blob));
+    }
+
+    public function testPhpObjectsMustBeAdaptedBeforeEncode(): void
+    {
+        $value = new \stdClass();
+        $value->order_id = 42;
+
+        try {
+            Serializer::serializeWithCodec('avro', $value);
+            self::fail('Expected an unadapted PHP object to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            self::assertStringContainsString('unsupported_value_type', $exception->getMessage());
+            self::assertStringContainsString('stdClass', $exception->getMessage());
         }
     }
 

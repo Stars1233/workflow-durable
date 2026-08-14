@@ -53,6 +53,12 @@ payloads write the default `payload_codec: "avro"` envelope; workers and
 control-plane clients exchange JSON HTTP documents whose durable payload
 envelopes are explicitly tagged `payload_codec: "avro"`.
 
+For PHP producers, the supported set is exactly `null`, `bool`, `int`, finite
+`float`, valid UTF-8 `string`, `AvroBinaryValue`, list arrays, and string-keyed
+map arrays (or `AvroMapValue`). Every nested value must come from the same set.
+The encoder uses `array_is_list()` to distinguish a list from a map; it does not
+treat an object as a map.
+
 ### Round-trip with documented coercion
 
 These values decode in both languages but to a different concrete type
@@ -84,18 +90,26 @@ encoder raises:
 - Python `bytearray` (convert to native `bytes`, which uses Avro `BytesValue`)
 - Python `set` / `frozenset` (convert to a sorted `list`)
 - Python custom objects without a registered adapter
-- PHP objects that are not plain `stdClass` or arrays (the workflow
-  package's serializer rejects them at the boundary; convert to an
-  associative array before scheduling the activity or workflow)
+- PHP `stdClass`, domain objects, and every other arbitrary object (the encoder
+  does not inspect object properties or call `jsonSerialize`; explicitly
+  convert the object and every nested value to a supported associative array
+  before scheduling the activity or workflow)
 - PHP closures and resources (rejected unconditionally)
 - PHP `BackedEnum` values (convert to `->value` before scheduling)
 
 A producer that does not adapt one of these values gets a synchronous
-`TypeError` (Python) or `WorkflowPayloadDecodeException` (PHP) at the
-call site. The error never crosses the worker protocol; the workflow
-never advances on an unadapted value. This is intentional: the codec
-boundary is the only place where the workflow author can choose how a
-language-specific shape is represented in durable history.
+`TypeError` (Python) or `InvalidArgumentException` with an
+`unsupported_value_type` diagnostic (PHP) at the call site. The producer-side
+error occurs before an envelope is written and never crosses the worker
+protocol; the workflow never advances on an unadapted value.
+
+`WorkflowPayloadDecodeException` describes the other direction: v2 workflow
+ingress wraps a consumer-side failure to decode a received command, signal, or
+update payload in that exception, retaining the codec and underlying cause for
+diagnostics. It is not raised for producer-side adaptation failures. This
+separation is intentional: the encode boundary is where a workflow author can
+choose how a language-specific shape is represented in durable history, while
+the decode exception reports that received history could not be consumed.
 
 ## Test surfaces
 
