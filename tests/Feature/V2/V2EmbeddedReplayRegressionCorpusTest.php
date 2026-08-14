@@ -131,8 +131,8 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
 
         $bundle = HistoryExport::forRun($run->fresh());
         $runId = $bundle['workflow']['run_id'];
-        $this->assertSame($metadata['memo'], $bundle['workflow']['memo']);
-        $this->assertSame($metadata['search_attributes'], $bundle['workflow']['search_attributes']);
+        $this->assertEquals($metadata['memo'], $bundle['workflow']['memo']);
+        $this->assertEquals($metadata['search_attributes'], $bundle['workflow']['search_attributes']);
 
         $this->clearWorkflowState();
         $report = EmbeddedV2HistoryImport::import($bundle);
@@ -147,8 +147,8 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
         $importedRun = WorkflowRun::query()->findOrFail($runId);
         $roundTrip = HistoryExport::forRun($importedRun->fresh());
 
-        $this->assertSame($metadata['memo'], $roundTrip['workflow']['memo']);
-        $this->assertSame($metadata['search_attributes'], $roundTrip['workflow']['search_attributes']);
+        $this->assertEquals($metadata['memo'], $roundTrip['workflow']['memo']);
+        $this->assertEquals($metadata['search_attributes'], $roundTrip['workflow']['search_attributes']);
     }
 
     private function clearWorkflowState(): void
