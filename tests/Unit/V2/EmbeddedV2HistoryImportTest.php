@@ -20,8 +20,10 @@ use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowCommand;
 use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowInstance;
+use Workflow\V2\Models\WorkflowMemo;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowRunSummary;
+use Workflow\V2\Models\WorkflowSearchAttribute;
 use Workflow\V2\Models\WorkflowSignal;
 use Workflow\V2\Models\WorkflowTask;
 use Workflow\V2\Models\WorkflowTimer;
@@ -156,7 +158,19 @@ final class EmbeddedV2HistoryImportTest extends TestCase
     {
         $bundle = $this->runningBundleWithOpenWork();
         $runId = $bundle['workflow']['run_id'];
-        $bundle['history_events'][0]['payload']['payload_codec'] = 'json';
+        $bundle['history_events'][] = [
+            'id' => (string) Str::ulid(),
+            'sequence' => 2,
+            'type' => HistoryEventType::ActivityCompleted->value,
+            'payload' => [
+                'result' => [
+                    'codec' => 'json',
+                    'blob' => '{"status":"completed"}',
+                ],
+            ],
+            'recorded_at' => now()
+                ->toJSON(),
+        ];
         $bundle = $this->resealBundle($bundle);
         $this->clearWorkflowState();
 
@@ -165,34 +179,218 @@ final class EmbeddedV2HistoryImportTest extends TestCase
         $this->assertSame('rejected', $report['status']);
         $this->assertContains('payload_codec.unsupported', array_column($report['eligibility']['errors'], 'rule'));
         $this->assertStringContainsString(
-            'history_events.0.payload.payload_codec',
+            'history_events.1.payload.result.codec',
             implode(' ', array_column($report['eligibility']['errors'], 'message')),
         );
         $this->assertFalse(WorkflowRun::query()->whereKey($runId)->exists());
         $this->assertSame(0, WorkflowHistoryEvent::query()->where('workflow_run_id', $runId)->count());
     }
 
-    public function testItRejectsNamedJsonCodecsAnywhereInTheBundleWithoutWritingRows(): void
+    public function testItRoundTripsCodecLookingMemoAndSearchAttributeData(): void
     {
         $bundle = $this->runningBundleWithOpenWork();
         $runId = $bundle['workflow']['run_id'];
-        $bundle['timeline'] = [[
-            'label' => 'future-payload-projection',
-            'details_payload_codec' => 'json',
-        ]];
-        $bundle = $this->resealBundle($bundle);
+
+        /** @var WorkflowRun $sourceRun */
+        $sourceRun = WorkflowRun::query()->findOrFail($runId);
+        $memoValue = [
+            'payload_codec' => 'json',
+            'details_payload_codec' => 'customer-codec',
+            'nested' => [
+                'codec' => 'json',
+                'blob' => 'user data',
+            ],
+        ];
+        $this->createMemo($sourceRun, 'codec_metadata', $memoValue);
+        $this->createMemo($sourceRun, 'payload_codec', 'json');
+        $this->createSearchAttribute($sourceRun, 'payload_codec', 'json');
+
+        WorkflowHistoryEvent::record($sourceRun, HistoryEventType::MemoUpserted, [
+            'sequence' => 2,
+            'entries' => [
+                'codec_metadata' => $memoValue,
+                'payload_codec' => 'json',
+            ],
+            'merged' => [
+                'codec_metadata' => $memoValue,
+                'payload_codec' => 'json',
+            ],
+        ]);
+        WorkflowHistoryEvent::record($sourceRun, HistoryEventType::SearchAttributesUpserted, [
+            'sequence' => 3,
+            'attributes' => [
+                'payload_codec' => 'json',
+            ],
+            'merged' => [
+                'payload_codec' => 'json',
+            ],
+        ]);
+
+        $bundle = HistoryExport::forRun($sourceRun->fresh());
         $this->clearWorkflowState();
 
         $report = EmbeddedV2HistoryImport::import($bundle);
 
-        $this->assertSame('rejected', $report['status']);
-        $this->assertContains('payload_codec.unsupported', array_column($report['eligibility']['errors'], 'rule'));
-        $this->assertStringContainsString(
-            'timeline.0.details_payload_codec',
-            implode(' ', array_column($report['eligibility']['errors'], 'message')),
-        );
-        $this->assertFalse(WorkflowRun::query()->whereKey($runId)->exists());
-        $this->assertSame(0, WorkflowHistoryEvent::query()->where('workflow_run_id', $runId)->count());
+        $this->assertSame('imported', $report['status']);
+
+        /** @var WorkflowRun $importedRun */
+        $importedRun = WorkflowRun::query()->findOrFail($runId);
+        $roundTrip = HistoryExport::forRun($importedRun->fresh());
+
+        $this->assertSame($bundle['workflow']['memo'], $roundTrip['workflow']['memo']);
+        $this->assertSame($bundle['workflow']['search_attributes'], $roundTrip['workflow']['search_attributes']);
+
+        $memoEvent = collect($roundTrip['history_events'])->firstWhere('type', HistoryEventType::MemoUpserted->value);
+        $searchEvent = collect($roundTrip['history_events'])
+            ->firstWhere('type', HistoryEventType::SearchAttributesUpserted->value);
+
+        $this->assertIsArray($memoEvent);
+        $this->assertIsArray($searchEvent);
+        $this->assertSame($memoValue, $memoEvent['payload']['entries']['codec_metadata']);
+        $this->assertSame('json', $memoEvent['payload']['entries']['payload_codec']);
+        $this->assertSame('json', $searchEvent['payload']['attributes']['payload_codec']);
+    }
+
+    public function testItRejectsJsonAndUnknownCodecsAtEveryPayloadRowDeclaration(): void
+    {
+        $bundle = $this->runningBundleWithOpenWork();
+        $this->clearWorkflowState();
+
+        $mutations = [
+            'payloads.codec' => static function (array &$candidate, string $codec): void {
+                $candidate['payloads']['codec'] = $codec;
+            },
+            'payloads.output.codec' => static function (array &$candidate, string $codec): void {
+                $candidate['payloads']['output']['codec'] = $codec;
+            },
+            'history_events.1.payload.payload_codec' => static function (array &$candidate, string $codec): void {
+                $candidate['history_events'][] = [
+                    'type' => HistoryEventType::ActivityCompleted->value,
+                    'payload' => [
+                        'payload_codec' => $codec,
+                        'result' => 'payload',
+                    ],
+                ];
+            },
+            'history_events.1.payload.activity.payload_codec' => static function (
+                array &$candidate,
+                string $codec,
+            ): void {
+                $candidate['history_events'][] = [
+                    'type' => HistoryEventType::ActivityScheduled->value,
+                    'payload' => [
+                        'activity' => [
+                            'payload_codec' => $codec,
+                            'arguments' => 'payload',
+                        ],
+                    ],
+                ];
+            },
+            'history_events.1.payload.exception.details_payload_codec' => static function (
+                array &$candidate,
+                string $codec,
+            ): void {
+                $candidate['history_events'][] = [
+                    'type' => HistoryEventType::ActivityFailed->value,
+                    'payload' => [
+                        'exception' => [
+                            'details' => 'payload',
+                            'details_payload_codec' => $codec,
+                        ],
+                    ],
+                ];
+            },
+            'commands.0.payload_codec' => static function (array &$candidate, string $codec): void {
+                $candidate['commands'][] = [
+                    'payload_codec' => $codec,
+                ];
+            },
+            'signals.0.payload_codec' => static function (array &$candidate, string $codec): void {
+                $candidate['signals'][] = [
+                    'payload_codec' => $codec,
+                ];
+            },
+            'updates.0.payload_codec' => static function (array &$candidate, string $codec): void {
+                $candidate['updates'][] = [
+                    'payload_codec' => $codec,
+                ];
+            },
+            'activities.0.payload_codec' => static function (array &$candidate, string $codec): void {
+                $candidate['activities'][0]['payload_codec'] = $codec;
+            },
+            'payload_manifest.entries.0.codec' => static function (array &$candidate, string $codec): void {
+                $candidate['payload_manifest']['entries'][0]['codec'] = $codec;
+            },
+        ];
+
+        foreach (['json', 'customer-codec'] as $codec) {
+            foreach ($mutations as $expectedPath => $mutate) {
+                $candidate = $bundle;
+                $mutate($candidate, $codec);
+
+                $report = EmbeddedV2HistoryImport::import($this->resealBundle($candidate), [
+                    'dry_run' => true,
+                ]);
+                $messages = implode(' ', array_column($report['eligibility']['errors'], 'message'));
+
+                $this->assertSame('rejected', $report['status'], $expectedPath . ' accepted ' . $codec);
+                $this->assertContains(
+                    'payload_codec.unsupported',
+                    array_column($report['eligibility']['errors'], 'rule'),
+                    $expectedPath . ' accepted ' . $codec,
+                );
+                $this->assertStringContainsString($expectedPath, $messages);
+            }
+        }
+    }
+
+    public function testItRejectsUnsupportedCodecsInEveryPayloadEnvelopeShape(): void
+    {
+        $bundle = $this->runningBundleWithOpenWork();
+        $this->clearWorkflowState();
+
+        foreach (['json', 'customer-codec'] as $codec) {
+            $inline = $bundle;
+            $inline['payloads']['arguments']['data'] = [
+                'codec' => $codec,
+                'blob' => 'payload',
+            ];
+
+            $externalEnvelope = $bundle;
+            $externalEnvelope['payloads']['arguments']['data'] = $this->externalStorageEnvelope(
+                $codec,
+                'unsupported-envelope-' . $codec,
+            );
+
+            $externalReference = $bundle;
+            $externalReference['payloads']['arguments']['data'] = $this->externalStorageEnvelope(
+                CodecRegistry::defaultCodec(),
+                'unsupported-reference-' . $codec,
+            );
+            $externalReference['payloads']['arguments']['data']['external_storage']['codec'] = $codec;
+
+            $cases = [
+                'payloads.arguments.data.codec' => $inline,
+                'payloads.arguments.data.codec (external)' => $externalEnvelope,
+                'payloads.arguments.data.external_storage.codec' => $externalReference,
+            ];
+
+            foreach ($cases as $expectedPath => $candidate) {
+                $report = EmbeddedV2HistoryImport::import($this->resealBundle($candidate), [
+                    'dry_run' => true,
+                ]);
+                $messages = implode(' ', array_column($report['eligibility']['errors'], 'message'));
+                $path = str_replace(' (external)', '', $expectedPath);
+
+                $this->assertSame('rejected', $report['status'], $expectedPath . ' accepted ' . $codec);
+                $this->assertContains(
+                    'payload_codec.unsupported',
+                    array_column($report['eligibility']['errors'], 'rule'),
+                    $expectedPath . ' accepted ' . $codec,
+                );
+                $this->assertStringContainsString($path, $messages);
+            }
+        }
     }
 
     public function testItImportsExternalizedActivityPayloadEnvelopesWithoutDroppingReferences(): void
@@ -529,6 +727,32 @@ final class EmbeddedV2HistoryImportTest extends TestCase
         ] as $table) {
             DB::table($table)->delete();
         }
+    }
+
+    private function createMemo(WorkflowRun $run, string $key, mixed $value): void
+    {
+        $memo = new WorkflowMemo([
+            'workflow_run_id' => $run->id,
+            'workflow_instance_id' => $run->workflow_instance_id,
+            'key' => $key,
+            'upserted_at_sequence' => 1,
+            'inherited_from_parent' => false,
+        ]);
+        $memo->setValue($value);
+        $memo->save();
+    }
+
+    private function createSearchAttribute(WorkflowRun $run, string $key, mixed $value): void
+    {
+        $attribute = new WorkflowSearchAttribute([
+            'workflow_run_id' => $run->id,
+            'workflow_instance_id' => $run->workflow_instance_id,
+            'key' => $key,
+            'upserted_at_sequence' => 1,
+            'inherited_from_parent' => false,
+        ]);
+        $attribute->setTypedValueWithInference($value);
+        $attribute->save();
     }
 
     /**

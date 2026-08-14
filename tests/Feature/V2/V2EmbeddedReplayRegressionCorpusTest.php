@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature\V2;
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 use Throwable;
@@ -16,9 +17,13 @@ use Workflow\V2\Models\ActivityAttempt;
 use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowFailure;
 use Workflow\V2\Models\WorkflowHistoryEvent;
+use Workflow\V2\Models\WorkflowMemo;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowRunSummary;
+use Workflow\V2\Models\WorkflowSearchAttribute;
 use Workflow\V2\Models\WorkflowTask;
+use Workflow\V2\Support\EmbeddedV2HistoryImport;
+use Workflow\V2\Support\HistoryExport;
 use Workflow\V2\Support\QueryStateReplayer;
 use Workflow\V2\Support\WorkflowFiberRunner;
 use Workflow\V2\Support\WorkflowStep;
@@ -42,6 +47,10 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
             $this->executeColdReplayFixture($fixture);
 
             $consumers = $fixture['consumers'] ?? ['workflow-fiber-runner'];
+            if (in_array('embedded-history-import', $consumers, true)) {
+                $this->assertHistoryImportMetadataRoundTrips($fixture);
+            }
+
             $embeddedConsumers = array_intersect(['query-state-replayer', 'workflow-executor'], $consumers);
 
             if ($embeddedConsumers === []) {
@@ -85,6 +94,87 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
             }
 
             $this->assertSame([], $mismatches, implode(' ', $mismatches));
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     */
+    private function assertHistoryImportMetadataRoundTrips(array $fixture): void
+    {
+        $metadata = $fixture['history_import_metadata'];
+        $run = $this->createRunFromFixture($fixture);
+
+        foreach ($metadata['memo'] as $key => $value) {
+            $memo = new WorkflowMemo([
+                'workflow_run_id' => $run->id,
+                'workflow_instance_id' => $run->workflow_instance_id,
+                'key' => $key,
+                'upserted_at_sequence' => $run->last_history_sequence,
+                'inherited_from_parent' => false,
+            ]);
+            $memo->setValue($value);
+            $memo->save();
+        }
+
+        foreach ($metadata['search_attributes'] as $key => $value) {
+            $attribute = new WorkflowSearchAttribute([
+                'workflow_run_id' => $run->id,
+                'workflow_instance_id' => $run->workflow_instance_id,
+                'key' => $key,
+                'upserted_at_sequence' => $run->last_history_sequence,
+                'inherited_from_parent' => false,
+            ]);
+            $attribute->setTypedValueWithInference($value);
+            $attribute->save();
+        }
+
+        $bundle = HistoryExport::forRun($run->fresh());
+        $runId = $bundle['workflow']['run_id'];
+        $this->assertSame($metadata['memo'], $bundle['workflow']['memo']);
+        $this->assertSame($metadata['search_attributes'], $bundle['workflow']['search_attributes']);
+
+        $this->clearWorkflowState();
+        $report = EmbeddedV2HistoryImport::import($bundle);
+
+        $this->assertSame('imported', $report['status']);
+        $this->assertNotContains(
+            'payload_codec.unsupported',
+            array_column($report['eligibility']['errors'], 'rule'),
+        );
+
+        /** @var WorkflowRun $importedRun */
+        $importedRun = WorkflowRun::query()->findOrFail($runId);
+        $roundTrip = HistoryExport::forRun($importedRun->fresh());
+
+        $this->assertSame($metadata['memo'], $roundTrip['workflow']['memo']);
+        $this->assertSame($metadata['search_attributes'], $roundTrip['workflow']['search_attributes']);
+    }
+
+    private function clearWorkflowState(): void
+    {
+        foreach ([
+            'workflow_run_summaries',
+            'workflow_run_waits',
+            'workflow_run_timeline_entries',
+            'workflow_run_timer_entries',
+            'workflow_run_lineage_entries',
+            'workflow_search_attributes',
+            'workflow_memos',
+            'workflow_history_events',
+            'workflow_tasks',
+            'activity_attempts',
+            'activity_executions',
+            'workflow_run_timers',
+            'workflow_failures',
+            'workflow_links',
+            'workflow_signal_records',
+            'workflow_updates',
+            'workflow_commands',
+            'workflow_runs',
+            'workflow_instances',
+        ] as $table) {
+            DB::table($table)->delete();
         }
     }
 

@@ -19,7 +19,12 @@ final class ReplayRegressionCorpusTest extends TestCase
 
     private const FIXTURE_SCHEMA = 'durable-workflow.replay-regression/v1';
 
-    private const REPLAY_CONSUMERS = ['query-state-replayer', 'workflow-executor', 'workflow-fiber-runner'];
+    private const REPLAY_CONSUMERS = [
+        'embedded-history-import',
+        'query-state-replayer',
+        'workflow-executor',
+        'workflow-fiber-runner',
+    ];
 
     /**
      * @param array<string, mixed> $fixture

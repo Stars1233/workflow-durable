@@ -31,6 +31,7 @@ MALFORMED_SERVICE_RESPONSE_ENVELOPE = "malformed_service_response_envelope"
 UNSUPPORTED_PAYLOAD_CODEC = "unsupported_payload_codec"
 PHP_GOLDEN_REPLAY_WORKFLOW = "Tests\\Fixtures\\V2\\TestGoldenReplayWorkflow"
 PHP_REPLAY_CONSUMERS = {
+    "embedded-history-import",
     "query-state-replayer",
     "workflow-executor",
     "workflow-fiber-runner",
@@ -143,6 +144,7 @@ OFFICIAL_BINDING_CONSUMER_SUPPORT = {
     ]: (
         "tests/Feature/V2/V2EmbeddedReplayRegressionCorpusTest.php",
         "tests/Fixtures/V2/TestServiceResponseReplayWorkflow.php",
+        "tests/Unit/V2/ReplayRegressionCorpusTest.php",
     ),
 }
 FAILURE_EVENT_FALLBACK_MESSAGES = {
@@ -516,10 +518,11 @@ def _replay_semantic(
     history: Any,
     command_sequence: Any,
     expected: Mapping[str, Any],
+    history_import_metadata: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
     """Project every replay representation onto consumer-executed values."""
 
-    return {
+    semantic = {
         "workflow": {
             "type": workflow_type,
             "input": workflow_input,
@@ -530,6 +533,9 @@ def _replay_semantic(
         "command_sequence": command_sequence,
         "expected": expected,
     }
+    if history_import_metadata is not None:
+        semantic["history_import_metadata"] = history_import_metadata
+    return semantic
 
 
 def _consumer_payload(
@@ -1263,6 +1269,32 @@ def _replay_fixture(
             f"{path}.consumers must include workflow-fiber-runner for the "
             "replay-regression-v1 consumer"
         )
+    raw_history_import_metadata = document.get("history_import_metadata")
+    history_import_metadata = None
+    if raw_history_import_metadata is not None:
+        history_import_metadata = _object(
+            raw_history_import_metadata,
+            f"{path}.history_import_metadata",
+        )
+        required_metadata_fields = {"memo", "search_attributes"}
+        if set(history_import_metadata) != required_metadata_fields:
+            raise CorpusError(
+                f"{path}.history_import_metadata must contain exactly "
+                f"{sorted(required_metadata_fields)}"
+            )
+        for field in sorted(required_metadata_fields):
+            _object(
+                history_import_metadata[field],
+                f"{path}.history_import_metadata.{field}",
+            )
+        if "embedded-history-import" not in consumers:
+            raise CorpusError(
+                f"{path}.history_import_metadata requires the embedded-history-import consumer"
+            )
+    elif "embedded-history-import" in consumers:
+        raise CorpusError(
+            f"{path}.consumers declares embedded-history-import without history_import_metadata"
+        )
     workflow = _object(document.get("workflow"), f"{path}.workflow")
     required_workflow_fields = {"type", "arguments", "payload_codec"}
     if set(workflow) != required_workflow_fields:
@@ -1370,6 +1402,7 @@ def _replay_fixture(
         history=canonical_history,
         command_sequence=canonical_steps,
         expected=expected,
+        history_import_metadata=history_import_metadata,
     )
     return [
         _fixture_evidence(

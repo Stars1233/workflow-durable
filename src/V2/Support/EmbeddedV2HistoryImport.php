@@ -43,6 +43,77 @@ use Workflow\V2\Models\WorkflowUpdate;
 final class EmbeddedV2HistoryImport
 {
     /**
+     * Serialized payload fields in the frozen history-event contract.
+     *
+     * @var array<string, list<string>>
+     */
+    private const HISTORY_EVENT_PAYLOAD_FIELDS = [
+        'ActivityCompleted' => ['result'],
+        'ChildRunCompleted' => ['output', 'result'],
+        'ServiceCallStarted' => ['request_payload', 'response_payload'],
+        'ServiceCallCompleted' => ['request_payload', 'response_payload'],
+        'ServiceCallFailed' => ['request_payload', 'response_payload'],
+        'ServiceCallCancelled' => ['request_payload', 'response_payload'],
+        'SideEffectRecorded' => ['result'],
+        'SignalReceived' => ['arguments'],
+        'SignalApplied' => ['arguments', 'value'],
+        'UpdateAccepted' => ['arguments'],
+        'UpdateRejected' => ['arguments'],
+        'UpdateApplied' => ['arguments'],
+        'UpdateCompleted' => ['result'],
+        'WorkflowCompleted' => ['output'],
+    ];
+
+    /**
+     * @var list<string>
+     */
+    private const ACTIVITY_SNAPSHOT_EVENT_TYPES = [
+        'ActivityScheduled',
+        'ActivityStarted',
+        'ActivityHeartbeatRecorded',
+        'ActivityRetryScheduled',
+        'ActivityCompleted',
+        'ActivityFailed',
+        'ActivityCancelled',
+        'ActivityTimedOut',
+    ];
+
+    /**
+     * @var list<string>
+     */
+    private const FAILURE_PAYLOAD_EVENT_TYPES = [
+        'ActivityRetryScheduled',
+        'ActivityFailed',
+        'ChildRunFailed',
+        'ServiceCallFailed',
+        'ServiceCallCancelled',
+        'UpdateCompleted',
+        'WorkflowFailed',
+    ];
+
+    /**
+     * @var list<string>
+     */
+    private const SERVICE_CALL_EVENT_TYPES = [
+        'ServiceCallStarted',
+        'ServiceCallCompleted',
+        'ServiceCallFailed',
+        'ServiceCallCancelled',
+    ];
+
+    /**
+     * Payload rows copied from the history-export bundle.
+     *
+     * @var array<string, list<string>>
+     */
+    private const PAYLOAD_ROW_FIELDS = [
+        'commands' => ['payload'],
+        'signals' => ['arguments'],
+        'updates' => ['arguments', 'result'],
+        'activities' => ['arguments', 'result'],
+    ];
+
+    /**
      * Import one embedded v2 history-export bundle into the current v2 store.
      *
      * @param array<string, mixed> $bundle
@@ -874,60 +945,163 @@ final class EmbeddedV2HistoryImport
      */
     private static function rejectUnsupportedPayloadCodecs(array $bundle, array &$errors): void
     {
-        self::inspectPayloadCodecs($bundle, '', $errors);
+        $payloads = self::arrayValue($bundle['payloads'] ?? null) ?? [];
+        $arguments = self::arrayValue($payloads['arguments'] ?? null) ?? [];
+        $output = self::arrayValue($payloads['output'] ?? null) ?? [];
+
+        self::rejectPayloadCodec($payloads['codec'] ?? null, 'payloads.codec', $errors);
+        self::rejectPayloadCodec($output['codec'] ?? null, 'payloads.output.codec', $errors);
+        self::inspectPayloadEnvelope($arguments['data'] ?? null, 'payloads.arguments.data', $errors);
+        self::inspectPayloadEnvelope($output['data'] ?? null, 'payloads.output.data', $errors);
+
+        foreach (self::PAYLOAD_ROW_FIELDS as $section => $payloadFields) {
+            foreach (self::listValue($bundle[$section] ?? null) as $index => $row) {
+                self::inspectPayloadRow($row, sprintf('%s.%d', $section, $index), $payloadFields, $errors);
+            }
+        }
+
+        foreach (self::listValue($bundle['history_events'] ?? null) as $index => $event) {
+            $eventType = self::stringValue($event['type'] ?? null);
+            $payloadFields = $eventType === null
+                ? null
+                : (self::HISTORY_EVENT_PAYLOAD_FIELDS[$eventType] ?? null);
+
+            $payload = self::arrayValue($event['payload'] ?? null) ?? [];
+            $payloadPath = sprintf('history_events.%d.payload', $index);
+
+            if ($payloadFields !== null) {
+                self::inspectPayloadRow($payload, $payloadPath, $payloadFields, $errors);
+            }
+
+            if ($eventType !== null && in_array($eventType, self::ACTIVITY_SNAPSHOT_EVENT_TYPES, true)) {
+                $activity = self::arrayValue($payload['activity'] ?? null);
+
+                if ($activity !== null) {
+                    self::inspectPayloadRow(
+                        $activity,
+                        $payloadPath . '.activity',
+                        ['arguments', 'result', 'exception'],
+                        $errors,
+                    );
+                    self::inspectFailureDetails(
+                        $activity['exception'] ?? null,
+                        $payloadPath . '.activity.exception',
+                        $errors,
+                    );
+                }
+            }
+
+            if ($eventType !== null && in_array($eventType, self::FAILURE_PAYLOAD_EVENT_TYPES, true)) {
+                self::inspectFailureDetails($payload['exception'] ?? null, $payloadPath . '.exception', $errors);
+            }
+
+            if ($eventType !== null && in_array($eventType, self::SERVICE_CALL_EVENT_TYPES, true)) {
+                foreach (['service_call', 'response_or_failure_surface'] as $surfaceField) {
+                    $surface = self::arrayValue($payload[$surfaceField] ?? null);
+
+                    if ($surface === null) {
+                        continue;
+                    }
+
+                    self::inspectPayloadRow(
+                        $surface,
+                        $payloadPath . '.' . $surfaceField,
+                        ['request_payload', 'response_payload'],
+                        $errors,
+                    );
+                    self::inspectFailureDetails(
+                        $surface['exception'] ?? null,
+                        $payloadPath . '.' . $surfaceField . '.exception',
+                        $errors,
+                    );
+                }
+            }
+        }
+
+        $payloadManifest = self::arrayValue($bundle['payload_manifest'] ?? null) ?? [];
+
+        foreach (self::listValue($payloadManifest['entries'] ?? null) as $index => $entry) {
+            self::rejectPayloadCodec(
+                $entry['codec'] ?? null,
+                sprintf('payload_manifest.entries.%d.codec', $index),
+                $errors,
+            );
+        }
     }
 
     /**
-     * @param array<int|string, mixed> $value
+     * @param array<string, mixed> $row
+     * @param list<string> $payloadFields
      * @param list<array<string, string>> $errors
      */
-    private static function inspectPayloadCodecs(array $value, string $path, array &$errors): void
+    private static function inspectPayloadRow(array $row, string $path, array $payloadFields, array &$errors): void
     {
-        foreach ($value as $key => $nested) {
-            $key = (string) $key;
-            $fieldPath = $path === '' ? $key : $path . '.' . $key;
+        self::rejectPayloadCodec($row['payload_codec'] ?? null, $path . '.payload_codec', $errors);
 
-            if (self::isPayloadCodecField($value, $path, $key)
-                && $nested !== null
-                && $nested !== ''
-                && $nested !== CodecRegistry::defaultCodec()
-            ) {
-                self::addFinding(
-                    $errors,
-                    'payload_codec.unsupported',
-                    sprintf(
-                        'Bundle payload codec at [%s] must be "avro"; found %s. JSON is only the HTTP document transport and cannot be imported as durable payload data.',
-                        $fieldPath,
-                        is_string($nested) ? sprintf('"%s"', $nested) : get_debug_type($nested),
-                    ),
-                );
-            }
-
-            if (is_array($nested)) {
-                self::inspectPayloadCodecs($nested, $fieldPath, $errors);
-            }
+        foreach ($payloadFields as $payloadField) {
+            self::inspectPayloadEnvelope($row[$payloadField] ?? null, $path . '.' . $payloadField, $errors);
         }
     }
 
     /**
-     * @param array<int|string, mixed> $container
+     * @param list<array<string, string>> $errors
      */
-    private static function isPayloadCodecField(array $container, string $path, string $key): bool
+    private static function inspectPayloadEnvelope(mixed $value, string $path, array &$errors): void
     {
-        if (in_array($key, ['payload_codec', 'output_payload_codec', 'details_payload_codec'], true)) {
-            return true;
+        if (! is_array($value)) {
+            return;
         }
 
-        if ($key !== 'codec') {
-            return false;
+        if (array_key_exists('blob', $value) || array_key_exists('external_storage', $value)) {
+            self::rejectPayloadCodec($value['codec'] ?? null, $path . '.codec', $errors);
         }
 
-        return $path === 'payloads'
-            || $path === 'payloads.output'
-            || str_starts_with($path, 'payload_manifest.entries.')
-            || array_key_exists('blob', $container)
-            || array_key_exists('external_storage', $container)
-            || ($container['schema'] ?? null) === ExternalPayloadReference::SCHEMA;
+        $externalStorage = self::arrayValue($value['external_storage'] ?? null);
+
+        if ($externalStorage !== null) {
+            self::rejectPayloadCodec(
+                $externalStorage['codec'] ?? null,
+                $path . '.external_storage.codec',
+                $errors,
+            );
+        }
+    }
+
+    /**
+     * @param list<array<string, string>> $errors
+     */
+    private static function inspectFailureDetails(mixed $value, string $path, array &$errors): void
+    {
+        if (! is_array($value)) {
+            return;
+        }
+
+        self::rejectPayloadCodec(
+            $value['details_payload_codec'] ?? null,
+            $path . '.details_payload_codec',
+            $errors,
+        );
+        self::inspectPayloadEnvelope($value['details'] ?? null, $path . '.details', $errors);
+    }
+
+    /**
+     * @param list<array<string, string>> $errors
+     */
+    private static function rejectPayloadCodec(mixed $codec, string $path, array &$errors): void
+    {
+        if ($codec === null || $codec === '' || $codec === CodecRegistry::defaultCodec()) {
+            return;
+        }
+
+        self::addFinding(
+            $errors,
+            'payload_codec.unsupported',
+            sprintf(
+                'Bundle payload codec at [%s] must be "avro"; found %s. JSON is only the HTTP document transport and cannot be imported as durable payload data.',
+                $path,
+                is_string($codec) ? sprintf('"%s"', $codec) : get_debug_type($codec),
+            ),
+        );
     }
 
     /**
