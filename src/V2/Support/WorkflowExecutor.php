@@ -59,7 +59,7 @@ final class WorkflowExecutor
         }
 
         $workflowClass = WorkflowDefinitionFingerprint::resolveClassForRun($run);
-        $workflow = new $workflowClass($run);
+        $workflow = RuntimeObjectFactory::workflow($workflowClass, $run);
         $entryMethod = EntryMethod::forWorkflow($workflow);
         $arguments = $workflow->resolveMethodDependencies($run->workflowArguments(), $entryMethod);
 
@@ -1592,7 +1592,7 @@ final class WorkflowExecutor
             'schedule_to_close_deadline_at' => $scheduleToCloseDeadlineAt,
         ]);
         $activityClass = TypeRegistry::resolveActivityClass($execution->activity_class, $execution->activity_type);
-        $activity = new $activityClass($execution, $run, $task->id);
+        $activity = RuntimeObjectFactory::activity($activityClass, $execution, $run, $task->id);
 
         $execution->forceFill([
             'retry_policy' => ActivityRetryPolicy::snapshot($activity, $options),

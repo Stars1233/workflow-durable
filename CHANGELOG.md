@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Advanced the Workflow package source to `2.0.0-rc.33`. Laravel now
+  container-constructs embedded v2 workflow and activity classes before the
+  engine binds durable runtime context. A package-owned transition contract,
+  isolated v2 queue default, upgrade-status command, supported-intersection
+  matrix, and published-artifact smoke make the stable-v1 to embedded-v2 path
+  executable without transferring v1 history.
 - Advanced the Workflow package source to `2.0.0-rc.32`. History import now
   validates Avro codec declarations only at schema-owned payload rows and
   envelopes, preserving codec-looking memo and search-attribute data while

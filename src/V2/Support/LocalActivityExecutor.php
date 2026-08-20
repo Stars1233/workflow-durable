@@ -63,7 +63,7 @@ final class LocalActivityExecutor
         $attempt = $started['attempt'];
 
         $activityClass = TypeRegistry::resolveActivityClass($execution->activity_class, $execution->activity_type);
-        $activity = new $activityClass($execution, $run, $task->id);
+        $activity = RuntimeObjectFactory::activity($activityClass, $execution, $run, $task->id);
         $entryMethod = EntryMethod::forActivity($activity);
         $activityArguments = $execution->activityArguments();
         $arguments = $activity->resolveMethodDependencies($activityArguments, $entryMethod);
@@ -227,7 +227,7 @@ final class LocalActivityExecutor
         ]);
 
         $activityClass = TypeRegistry::resolveActivityClass($execution->activity_class, $execution->activity_type);
-        $activity = new $activityClass($execution, $run, $task->id);
+        $activity = RuntimeObjectFactory::activity($activityClass, $execution, $run, $task->id);
 
         $execution->forceFill([
             'retry_policy' => ActivityRetryPolicy::snapshot($activity, $activityOptions),

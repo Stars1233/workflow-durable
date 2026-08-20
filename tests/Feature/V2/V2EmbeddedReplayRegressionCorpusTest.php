@@ -39,6 +39,7 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
     public function testFixturesExecuteThroughDeclaredReplayConsumers(): void
     {
         config([
+            'app.name' => 'Embedded Upgrade Host',
             'queue.default' => 'database',
         ]);
         Queue::fake();

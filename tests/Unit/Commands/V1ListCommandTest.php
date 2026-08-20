@@ -129,7 +129,8 @@ final class V1ListCommandTest extends SchemaTestCase
 
         $this->assertSame(0, $exitCode);
         $this->assertStringContainsString('No active v1 workflows found in the workflows table.', $output);
-        $this->assertStringContainsString('DROP TABLE IF EXISTS workflows;', $output);
+        $this->assertStringContainsString('workflow:v2:upgrade-status --strategy=drain', $output);
+        $this->assertStringNotContainsString('DROP TABLE', $output);
     }
 
     /**

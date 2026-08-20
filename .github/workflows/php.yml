@@ -62,6 +62,7 @@ jobs:
       changed_path_categories: ${{ steps.qualification.outputs.changed_path_categories }}
       baseline_run_id: ${{ steps.qualification.outputs.baseline_run_id }}
       baseline_elapsed_seconds: ${{ steps.qualification.outputs.baseline_elapsed_seconds }}
+      laravel_source_matrix: ${{ steps.laravel-matrix.outputs.matrix }}
       started_at: ${{ steps.clock.outputs.started_at }}
 
     steps:
@@ -121,10 +122,12 @@ jobs:
       run: |
         bash -n \
           scripts/ci/check-docs-release-audit.sh \
+          scripts/ci/laravel-embedded-upgrade-smoke.sh \
           scripts/ci/check-packagist-release.sh \
           scripts/ci/check-platform-conformance-mirror.sh
         php -l scripts/ci/classify-target-qualification.php
         php -l scripts/ci/compare-platform-conformance-mirrors.php
+        php -l scripts/ci/laravel-embedded-upgrade-matrix.php
         python - <<'PY'
         import ast
         from pathlib import Path
@@ -149,6 +152,10 @@ jobs:
 
     - name: Install payload consumer dependencies
       run: composer install --prefer-dist --no-progress --no-dev --no-scripts
+
+    - name: Derive bounded Laravel source qualification
+      id: laravel-matrix
+      run: echo "matrix=$(php scripts/ci/laravel-embedded-upgrade-matrix.php --scope=source)" >> "$GITHUB_OUTPUT"
 
     - name: Require durable replay and codec evidence
       env:
@@ -328,6 +335,37 @@ jobs:
 
     - name: Run static analysis via PHPStan
       run: vendor/bin/phpstan analyse src tests
+
+  laravel-embedded-upgrade-source:
+    name: Laravel ${{ matrix.laravel }} / PHP ${{ matrix.php }} embedded upgrade
+    needs: route
+    if: >-
+      ${{
+        needs.route.outputs.route == 'complete'
+        && needs.route.outputs.qualification == 'full'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.route.outputs.laravel_source_matrix) }}
+
+    steps:
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      with:
+        persist-credentials: false
+
+    - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240  # v2
+      with:
+        php-version: ${{ matrix.php }}
+        tools: composer
+
+    - name: Run the clean stable-v1 to source-v2 journey
+      env:
+        LARAVEL_VERSION: ${{ matrix.laravel }}
+        WORKFLOW_V2_PATH: ${{ github.workspace }}
+      run: scripts/ci/laravel-embedded-upgrade-smoke.sh
 
   pr-unit-contracts:
     needs: route
@@ -1075,6 +1113,7 @@ jobs:
     - feature-mariadb
     - feature-postgresql
     - coverage
+    - laravel-embedded-upgrade-source
     - action-policy
     if: always()
 
@@ -1111,6 +1150,7 @@ jobs:
         test "${{ needs.feature-mariadb.result }}" = "skipped"
         test "${{ needs.feature-postgresql.result }}" = "skipped"
         test "${{ needs.coverage.result }}" = "skipped"
+        test "${{ needs.laravel-embedded-upgrade-source.result }}" = "skipped"
         echo "Bounded external pull-request validation succeeded."
 
     - name: Check complete public matrix
@@ -1127,6 +1167,7 @@ jobs:
         test "${{ needs.feature-mariadb.result }}" = "success"
         test "${{ needs.feature-postgresql.result }}" = "success"
         test "${{ needs.coverage.result }}" = "success"
+        test "${{ needs.laravel-embedded-upgrade-source.result }}" = "success"
         echo "The complete public release matrix succeeded for this SHA."
 
     - name: Check focused release and recovery qualification
@@ -1143,6 +1184,7 @@ jobs:
         test "${{ needs.feature-mariadb.result }}" = "skipped"
         test "${{ needs.feature-postgresql.result }}" = "skipped"
         test "${{ needs.coverage.result }}" = "skipped"
+        test "${{ needs.laravel-embedded-upgrade-source.result }}" = "skipped"
         echo "Focused release and recovery qualification succeeded without the runtime matrix."
 
     - name: Check structural candidate gate
@@ -1155,6 +1197,7 @@ jobs:
         test "${{ needs.feature-mariadb.result }}" = "skipped"
         test "${{ needs.feature-postgresql.result }}" = "skipped"
         test "${{ needs.coverage.result }}" = "skipped"
+        test "${{ needs.laravel-embedded-upgrade-source.result }}" = "skipped"
         echo "Structural candidate validation succeeded without starting broad deterministic tests."
 
     - name: Check local landed-SHA sentinel
@@ -1167,6 +1210,7 @@ jobs:
         test "${{ needs.feature-mariadb.result }}" = "skipped"
         test "${{ needs.feature-postgresql.result }}" = "skipped"
         test "${{ needs.coverage.result }}" = "skipped"
+        test "${{ needs.laravel-embedded-upgrade-source.result }}" = "skipped"
         echo "Local landed-SHA sentinel succeeded."
 
     - name: Report qualification class and elapsed time

@@ -18,6 +18,7 @@ final class WorkflowsConfigTest extends NonDatabaseTestCase
      */
     private const CONFIG_ENV_KEYS = [
         'DW_V2_NAMESPACE', 'WORKFLOW_V2_NAMESPACE',
+        'DW_V2_CONNECTION', 'DW_V2_QUEUE',
         'DW_V2_CURRENT_COMPATIBILITY', 'WORKFLOW_V2_CURRENT_COMPATIBILITY',
         'DW_V2_SUPPORTED_COMPATIBILITIES', 'WORKFLOW_V2_SUPPORTED_COMPATIBILITIES',
         'DW_V2_COMPATIBILITY_NAMESPACE', 'WORKFLOW_V2_COMPATIBILITY_NAMESPACE',
@@ -159,6 +160,8 @@ final class WorkflowsConfigTest extends NonDatabaseTestCase
             $config = require dirname(__DIR__, 3) . '/src/config/workflows.php';
 
             $this->assertNull($config['v2']['namespace']);
+            $this->assertNull($config['v2']['connection']);
+            $this->assertNull($config['v2']['queue']);
             $this->assertNull($config['v2']['compatibility']['current']);
             $this->assertNull($config['v2']['compatibility']['supported']);
             $this->assertNull($config['v2']['compatibility']['namespace']);
@@ -170,6 +173,36 @@ final class WorkflowsConfigTest extends NonDatabaseTestCase
             $this->assertSame('queue', $config['v2']['task_dispatch_mode']);
             $this->assertSame(300, $config['v2']['workflow_task_lease_seconds']);
             $this->assertSame('warn', $config['v2']['guardrails']['boot']);
+        } finally {
+            $this->restoreEnv($previous);
+        }
+    }
+
+    public function testEmbeddedV2RoutingDefaultsUseOnlyTheSupportedEnvironmentNames(): void
+    {
+        $keys = ['DW_V2_CONNECTION', 'DW_V2_QUEUE', 'WORKFLOW_V2_CONNECTION', 'WORKFLOW_V2_QUEUE'];
+        $previous = $this->snapshotEnv($keys);
+        $this->clearEnv($keys);
+
+        putenv('WORKFLOW_V2_CONNECTION=legacy-connection');
+        $_ENV['WORKFLOW_V2_CONNECTION'] = 'legacy-connection';
+        $_SERVER['WORKFLOW_V2_CONNECTION'] = 'legacy-connection';
+        putenv('WORKFLOW_V2_QUEUE=legacy-queue');
+        $_ENV['WORKFLOW_V2_QUEUE'] = 'legacy-queue';
+        $_SERVER['WORKFLOW_V2_QUEUE'] = 'legacy-queue';
+
+        putenv('DW_V2_CONNECTION=redis');
+        $_ENV['DW_V2_CONNECTION'] = 'redis';
+        $_SERVER['DW_V2_CONNECTION'] = 'redis';
+        putenv('DW_V2_QUEUE=workflow-v2');
+        $_ENV['DW_V2_QUEUE'] = 'workflow-v2';
+        $_SERVER['DW_V2_QUEUE'] = 'workflow-v2';
+
+        try {
+            $config = require dirname(__DIR__, 3) . '/src/config/workflows.php';
+
+            $this->assertSame('redis', $config['v2']['connection']);
+            $this->assertSame('workflow-v2', $config['v2']['queue']);
         } finally {
             $this->restoreEnv($previous);
         }

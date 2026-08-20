@@ -73,7 +73,8 @@
     },
     "extra": {
         "durable-workflow": {
-            "product-train": "2.0.0-rc.32"
+            "product-train": "2.0.0-rc.33",
+            "laravel-embedded-upgrade-contract": "resources/laravel-embedded-upgrade-contract.json"
         },
         "laravel": {
             "providers": [

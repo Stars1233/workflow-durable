@@ -22,9 +22,13 @@ final class RoutingResolver
 
         $defaults = DefaultPropertyCache::for($workflow);
 
-        return isset($defaults['connection']) && is_string($defaults['connection'])
-            ? $defaults['connection']
-            : null;
+        if (isset($defaults['connection']) && is_string($defaults['connection']) && $defaults['connection'] !== '') {
+            return $defaults['connection'];
+        }
+
+        $configured = config('workflows.v2.connection');
+
+        return is_string($configured) && $configured !== '' ? $configured : null;
     }
 
     /**
@@ -42,6 +46,12 @@ final class RoutingResolver
 
         if (isset($defaults['queue']) && is_string($defaults['queue']) && $defaults['queue'] !== '') {
             return $defaults['queue'];
+        }
+
+        $configured = config('workflows.v2.queue');
+
+        if (is_string($configured) && $configured !== '') {
+            return $configured;
         }
 
         $connection = self::workflowConnection($workflow, $metadata) ?? config('queue.default');

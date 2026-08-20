@@ -33,6 +33,12 @@ return [
     'workflow_relationships_table' => 'workflow_relationships',
 
     'v2' => [
+        // Optional embedded-v2 routing defaults. During a v1 drain, set
+        // DW_V2_QUEUE to a queue that no v1 workflow uses so new starts can
+        // move to v2 without changing the host application's default queue.
+        'connection' => env('DW_V2_CONNECTION'),
+        'queue' => env('DW_V2_QUEUE'),
+
         // Optional. When null, workflow instances are not scoped to a namespace and
         // are visible to every consumer. Set to a string (e.g. "production") to
         // isolate multi-namespace deployments.

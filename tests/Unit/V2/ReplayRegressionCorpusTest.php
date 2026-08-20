@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Tests\Unit\V2;
 
+use Illuminate\Config\Repository;
+use Illuminate\Container\Container;
+use Illuminate\Foundation\Application;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Tests\Fixtures\V2\TestReplayMapOrderWorkflow;
@@ -25,6 +28,28 @@ final class ReplayRegressionCorpusTest extends TestCase
         'workflow-executor',
         'workflow-fiber-runner',
     ];
+
+    private Container $previousContainer;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->previousContainer = Container::getInstance();
+        $application = new Application(dirname(__DIR__, 3));
+        $application->instance('config', new Repository([
+            'app' => [
+                'name' => 'Embedded Upgrade Host',
+            ],
+        ]));
+    }
+
+    protected function tearDown(): void
+    {
+        Container::setInstance($this->previousContainer);
+
+        parent::tearDown();
+    }
 
     /**
      * @param array<string, mixed> $fixture

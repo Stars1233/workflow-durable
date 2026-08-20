@@ -35,13 +35,34 @@ abstract class Activity
 
     public int $tries = 1;
 
+    public ActivityExecution $execution;
+
+    public WorkflowRun $run;
+
+    public ?string $taskId;
+
     private Container $container;
 
-    final public function __construct(
-        public readonly ActivityExecution $execution,
-        public readonly WorkflowRun $run,
-        public readonly ?string $taskId = null,
-    ) {
+    /**
+     * Attach engine-owned context after Laravel constructs the activity.
+     *
+     * @internal
+     */
+    final public function bindRuntime(
+        ActivityExecution $execution,
+        WorkflowRun $run,
+        ?string $taskId = null,
+    ): void {
+        if (isset($this->execution) || isset($this->run)) {
+            throw new \LogicException(sprintf(
+                'Activity runtime context is already bound for [%s]. Configure activity classes as transient Laravel services.',
+                static::class,
+            ));
+        }
+
+        $this->execution = $execution;
+        $this->run = $run;
+        $this->taskId = $taskId;
         $this->container = Container::getInstance();
     }
 

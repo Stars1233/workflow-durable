@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Tests\Feature\V2;
 
 use Illuminate\Support\Facades\Queue;
+use Tests\Fixtures\V2\TestConstructorInjectionActivity;
+use Tests\Fixtures\V2\TestConstructorInjectionWorkflow;
 use Tests\Fixtures\V2\TestDependencyInjectionActivity;
 use Tests\Fixtures\V2\TestDependencyInjectionWorkflow;
 use Tests\Fixtures\V2\TestDocsDependencyInjectionWorkflow;
@@ -17,6 +19,7 @@ use Workflow\V2\Jobs\RunTimerTask;
 use Workflow\V2\Jobs\RunWorkflowTask;
 use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowFailure;
+use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowTask;
 use Workflow\V2\Support\LocalActivityRuntime;
 use Workflow\V2\WorkflowStub;
@@ -43,6 +46,50 @@ final class V2DependencyInjectionTest extends TestCase
 
         $this->assertTrue($workflow->refresh()->completed());
         $this->assertSame('console', $workflow->output());
+        $this->assertNoWorkflowFailures($workflow->runId());
+    }
+
+    public function testLaravelConstructsWorkflowsAndActivitiesBeforeRuntimeContextIsBound(): void
+    {
+        config()->set('app.name', 'Embedded Upgrade Host');
+        config()
+            ->set('workflows.v2.queue', 'workflow-v2');
+
+        $workflow = WorkflowStub::make(TestConstructorInjectionWorkflow::class, 'constructor-injection-upgrade');
+        $workflow->start('Taylor');
+
+        $this->drainReadyTasks();
+
+        $this->assertTrue($workflow->refresh()->completed());
+        $this->assertSame([
+            'workflow_application' => 'Embedded Upgrade Host',
+            'activity' => [
+                'application' => 'Embedded Upgrade Host',
+                'name' => 'Taylor',
+                'workflow_id' => 'constructor-injection-upgrade',
+                'run_id' => $workflow->runId(),
+            ],
+            'workflow_id' => 'constructor-injection-upgrade',
+            'run_id' => $workflow->runId(),
+        ], $workflow->output());
+
+        $this->assertSame(
+            TestConstructorInjectionActivity::class,
+            ActivityExecution::query()
+                ->where('workflow_run_id', $workflow->runId())
+                ->firstOrFail()
+                ->activity_class,
+        );
+        $this->assertSame('workflow-v2', WorkflowRun::query()->findOrFail($workflow->runId())->queue);
+        $this->assertSame(
+            ['workflow-v2'],
+            WorkflowTask::query()
+                ->where('workflow_run_id', $workflow->runId())
+                ->pluck('queue')
+                ->unique()
+                ->values()
+                ->all(),
+        );
         $this->assertNoWorkflowFailures($workflow->runId());
     }
 

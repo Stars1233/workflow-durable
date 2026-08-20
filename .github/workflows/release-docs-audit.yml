@@ -20,6 +20,8 @@ jobs:
   docs-release-audit:
     name: Verify public docs release-audit tuple
     runs-on: ubuntu-latest
+    outputs:
+      laravel_published_matrix: ${{ steps.laravel-matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
         with:
@@ -29,6 +31,10 @@ jobs:
         with:
           php-version: '8.3'
           tools: composer
+
+      - name: Derive exhaustive Laravel release qualification
+        id: laravel-matrix
+        run: echo "matrix=$(php scripts/ci/laravel-embedded-upgrade-matrix.php --scope=published)" >> "$GITHUB_OUTPUT"
 
       - name: Resolve release tag
         id: release
@@ -77,3 +83,42 @@ jobs:
             docs-release-audit-evidence.json
             docs-release-audit-handoff.json
           if-no-files-found: warn
+
+  laravel-embedded-upgrade-published:
+    name: Published Laravel ${{ matrix.laravel }} / PHP ${{ matrix.php }} upgrade
+    needs: docs-release-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.docs-release-audit.outputs.laravel_published_matrix) }}
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240  # v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer
+
+      - name: Resolve published Workflow version
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          version="${version#v}"
+          if ! printf '%s\n' "$version" | grep -Eq '^2\.0\.0((-(alpha|beta|rc)\.[0-9]+)?)$'; then
+            echo "::error::Invalid Workflow release tag for Laravel upgrade audit: $version"
+            exit 1
+          fi
+          echo "WORKFLOW_V2_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Run the clean published-artifact upgrade journey
+        env:
+          LARAVEL_VERSION: ${{ matrix.laravel }}
+        run: scripts/ci/laravel-embedded-upgrade-smoke.sh

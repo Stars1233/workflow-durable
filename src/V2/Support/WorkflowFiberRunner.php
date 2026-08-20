@@ -178,7 +178,7 @@ final class WorkflowFiberRunner
         $run->payload_codec = $payloadCodec;
         $run->namespace = $namespace;
 
-        $workflow = new $workflowClass($run);
+        $workflow = RuntimeObjectFactory::workflow($workflowClass, $run);
 
         if (! $workflow instanceof Workflow) {
             throw new RuntimeException(sprintf(

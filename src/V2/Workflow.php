@@ -52,6 +52,8 @@ abstract class Workflow
 
     public ?string $queue = null;
 
+    public WorkflowRun $run;
+
     private Container $container;
 
     private int $visibleSequence = 1;
@@ -67,9 +69,25 @@ abstract class Workflow
 
     private bool $continueWithError = false;
 
-    final public function __construct(
-        public readonly WorkflowRun $run,
-    ) {
+    /**
+     * Attach the engine-owned context after Laravel constructs the workflow.
+     *
+     * Application workflow constructors remain available for ordinary
+     * container injection. Runtime code must create instances through
+     * RuntimeObjectFactory so each replay receives a fresh object.
+     *
+     * @internal
+     */
+    final public function bindRuntime(WorkflowRun $run): void
+    {
+        if (isset($this->run)) {
+            throw new \LogicException(sprintf(
+                'Workflow runtime context is already bound for [%s]. Configure workflow classes as transient Laravel services.',
+                static::class,
+            ));
+        }
+
+        $this->run = $run;
         $this->container = Container::getInstance();
     }
 

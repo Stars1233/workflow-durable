@@ -87,6 +87,7 @@ use Workflow\V2\Support\QueryStateReplayer;
 use Workflow\V2\Support\RunDetailView;
 use Workflow\V2\Support\RunSummaryProjector;
 use Workflow\V2\Support\RunSummarySortKey;
+use Workflow\V2\Support\RuntimeObjectFactory;
 use Workflow\V2\Support\SelectedRunLocator;
 use Workflow\V2\Support\WorkflowInstanceId;
 use Workflow\V2\TaskWatchdog;
@@ -1792,7 +1793,12 @@ final class V2WorkflowTest extends TestCase
                 ],
             ];
 
-            $activity = new TestHeartbeatActivity($execution->fresh(), $run->fresh(), $task->id);
+            $activity = RuntimeObjectFactory::activity(
+                TestHeartbeatActivity::class,
+                $execution->fresh(),
+                $run->fresh(),
+                $task->id,
+            );
             $activity->heartbeat($expectedProgress);
 
             $this->assertSame($attemptId, $activity->attemptId());
@@ -1912,7 +1918,12 @@ final class V2WorkflowTest extends TestCase
                 'attempt_count' => 1,
             ]);
 
-            $activity = new TestHeartbeatActivity($execution->fresh(), $run->fresh(), $oldTask->id);
+            $activity = RuntimeObjectFactory::activity(
+                TestHeartbeatActivity::class,
+                $execution->fresh(),
+                $run->fresh(),
+                $oldTask->id,
+            );
 
             $reclaimedAt = $startedAt->copy()
                 ->addMinutes(6);
@@ -2070,7 +2081,12 @@ final class V2WorkflowTest extends TestCase
                 ->addMinutes(ActivityLease::DURATION_MINUTES);
             Carbon::setTestNow($heartbeatAt);
 
-            $activity = new TestHeartbeatActivity($execution->fresh(), $run->fresh(), $task->id);
+            $activity = RuntimeObjectFactory::activity(
+                TestHeartbeatActivity::class,
+                $execution->fresh(),
+                $run->fresh(),
+                $task->id,
+            );
             $activity->heartbeat();
 
             $execution->refresh();

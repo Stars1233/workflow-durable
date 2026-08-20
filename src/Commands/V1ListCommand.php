@@ -42,14 +42,8 @@ class V1ListCommand extends Command
         if ($workflows->isEmpty()) {
             $this->info('No active v1 workflows found in the workflows table.');
             $this->line('');
-            $this->line('All v1 workflows have completed. You may safely drop v1 tables if desired:');
-            $this->line('');
-            $this->line('  DROP TABLE IF EXISTS workflow_relationships;');
-            $this->line('  DROP TABLE IF EXISTS workflow_exceptions;');
-            $this->line('  DROP TABLE IF EXISTS workflow_timers;');
-            $this->line('  DROP TABLE IF EXISTS workflow_signals;');
-            $this->line('  DROP TABLE IF EXISTS workflow_logs;');
-            $this->line('  DROP TABLE IF EXISTS workflows;');
+            $this->line('Verify the drain contract before stopping v1 workers or changing retained v1 state:');
+            $this->line('  php artisan workflow:v2:upgrade-status --strategy=drain --json');
             $this->line('');
 
             return self::SUCCESS;

@@ -32,6 +32,7 @@ use Workflow\V2\Support\ActivityTimeoutEnforcer;
 use Workflow\V2\Support\DefaultHistoryProjectionRole;
 use Workflow\V2\Support\FailureSnapshots;
 use Workflow\V2\Support\RunActivityView;
+use Workflow\V2\Support\RuntimeObjectFactory;
 use Workflow\V2\TaskWatchdog;
 
 final class V2ActivityTimeoutTest extends TestCase
@@ -747,7 +748,12 @@ final class V2ActivityTimeoutTest extends TestCase
         $expiredSnapshot = ActivityTimeoutEnforcer::expiredExecutionIds();
         $this->assertContains($execution->id, $expiredSnapshot);
 
-        $activity = new TestGreetingActivity($execution->fresh(), $run->fresh(), $activityTask->id);
+        $activity = RuntimeObjectFactory::activity(
+            TestGreetingActivity::class,
+            $execution->fresh(),
+            $run->fresh(),
+            $activityTask->id,
+        );
         $activity->heartbeat([
             'message' => 'still working',
         ]);
@@ -853,7 +859,8 @@ final class V2ActivityTimeoutTest extends TestCase
 
             $children['heartbeat'] = $this->forkDatabaseOperation(
                 static function () use ($execution, $run, $activityTask): array {
-                    $activity = new TestGreetingActivity(
+                    $activity = RuntimeObjectFactory::activity(
+                        TestGreetingActivity::class,
                         ActivityExecution::query()->findOrFail($execution->id),
                         WorkflowRun::query()->findOrFail($run->id),
                         $activityTask->id,

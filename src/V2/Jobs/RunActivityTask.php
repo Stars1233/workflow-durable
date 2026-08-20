@@ -17,6 +17,7 @@ use Workflow\V2\Support\ActivityRetryPolicy;
 use Workflow\V2\Support\ActivityTaskClaim;
 use Workflow\V2\Support\ActivityTaskClaimer;
 use Workflow\V2\Support\EntryMethod;
+use Workflow\V2\Support\RuntimeObjectFactory;
 use Workflow\V2\Support\TaskDispatcher;
 use Workflow\V2\Support\TypeRegistry;
 use Workflow\V2\Support\WorkerCompatibilityFleet;
@@ -65,7 +66,7 @@ final class RunActivityTask implements ShouldQueue
         $execution->setRelation('run', $claim->run);
 
         $activityClass = TypeRegistry::resolveActivityClass($execution->activity_class, $execution->activity_type);
-        $activity = new $activityClass($execution, $execution->run, $this->taskId);
+        $activity = RuntimeObjectFactory::activity($activityClass, $execution, $execution->run, $this->taskId);
         $entryMethod = EntryMethod::forActivity($activity);
         $arguments = $activity->resolveMethodDependencies($execution->activityArguments(), $entryMethod);
         $activityArguments = $execution->activityArguments();
