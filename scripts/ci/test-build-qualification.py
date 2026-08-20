@@ -32,6 +32,50 @@ def workflow_job_source(source: str, name: str) -> str:
     return job if next_job is None else job[: next_job.start()]
 
 
+def workflow_job_needs(source: str, name: str) -> list[str]:
+    job = workflow_job_source(source, name)
+    needs = re.search(r"(?m)^    needs:\s*(.*)$", job)
+
+    if needs is None:
+        return []
+
+    inline = needs.group(1).strip()
+    if inline:
+        if inline.startswith("[") and inline.endswith("]"):
+            return [
+                dependency.strip().strip("'\"")
+                for dependency in inline[1:-1].split(",")
+                if dependency.strip()
+            ]
+
+        return [inline.strip("'\"")]
+
+    dependencies = []
+    for line in job[needs.end() :].splitlines():
+        dependency = re.match(r"^      -\s+(['\"]?)([a-z0-9-]+)\1\s*$", line)
+        if dependency:
+            dependencies.append(dependency.group(2))
+            continue
+        if line.strip():
+            break
+
+    return dependencies
+
+
+def workflow_job_ancestors(source: str, name: str) -> set[str]:
+    ancestors = set()
+    pending = workflow_job_needs(source, name)
+
+    while pending:
+        dependency = pending.pop()
+        if dependency in ancestors:
+            continue
+        ancestors.add(dependency)
+        pending.extend(workflow_job_needs(source, dependency))
+
+    return ancestors
+
+
 class QualificationClassificationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -435,6 +479,23 @@ class QualificationWorkflowTrustTest(unittest.TestCase):
             self.assertNotIn("pull_request", trigger)
 
         self.assertIn("if: github.ref == 'refs/heads/v2'", self.recovery)
+
+    def test_published_laravel_and_docs_evidence_are_independent(
+        self,
+    ) -> None:
+        published_ancestors = workflow_job_ancestors(
+            self.release_audit,
+            "laravel-embedded-upgrade-published",
+        )
+        docs_ancestors = workflow_job_ancestors(
+            self.release_audit,
+            "docs-release-audit",
+        )
+
+        self.assertIn("release-artifact", published_ancestors)
+        self.assertNotIn("docs-release-audit", published_ancestors)
+        self.assertIn("release-artifact", docs_ancestors)
+        self.assertNotIn("laravel-embedded-upgrade-published", docs_ancestors)
 
     def test_recovery_discovery_has_no_publication_authority(self) -> None:
         discover = workflow_job_source(self.recovery, "discover")
