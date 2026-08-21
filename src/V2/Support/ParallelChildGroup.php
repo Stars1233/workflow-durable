@@ -236,13 +236,15 @@ final class ParallelChildGroup
     public static function shouldWakeParentOnChildClosure(
         WorkflowRun $parentRun,
         array $metadata,
-        RunStatus $closedChildStatus
+        RunStatus $closedChildStatus,
+        bool $lockHistoryForUpdate = false,
     ): bool {
         return self::shouldWakeParentOnClosure(
             $parentRun,
             self::normalizedPath($metadata),
             'child',
             $closedChildStatus,
+            $lockHistoryForUpdate,
         );
     }
 
@@ -286,6 +288,7 @@ final class ParallelChildGroup
         array $metadataPath,
         string $closedKind,
         ActivityStatus|RunStatus|TimerStatus $closedStatus,
+        bool $lockHistoryForUpdate = false,
     ): bool {
         if (
             ($closedKind === 'activity' && $closedStatus !== ActivityStatus::Completed)
@@ -296,7 +299,7 @@ final class ParallelChildGroup
         }
 
         foreach ($metadataPath as $metadata) {
-            if (! self::groupCompletedSuccessfully($parentRun, $metadata)) {
+            if (! self::groupCompletedSuccessfully($parentRun, $metadata, $lockHistoryForUpdate)) {
                 return false;
             }
         }
@@ -310,8 +313,11 @@ final class ParallelChildGroup
      *     parallel_group_size: int
      * } $metadata
      */
-    private static function groupCompletedSuccessfully(WorkflowRun $parentRun, array $metadata): bool
-    {
+    private static function groupCompletedSuccessfully(
+        WorkflowRun $parentRun,
+        array $metadata,
+        bool $lockHistoryForUpdate,
+    ): bool {
         if ($metadata['parallel_group_size'] < 1) {
             return true;
         }
@@ -320,6 +326,12 @@ final class ParallelChildGroup
         $parentRun->unsetRelation('activityExecutions');
         $parentRun->unsetRelation('childLinks');
         $parentRun->unsetRelation('timers');
+
+        if ($lockHistoryForUpdate) {
+            // Observe the resolution event committed by the previous holder of
+            // the parent lock even when this transaction has an older snapshot.
+            $parentRun->setRelation('historyEvents', $parentRun->historyEvents() ->lockForUpdate() ->get());
+        }
 
         $activitiesBySequence = collect(RunActivityView::activitiesForRun($parentRun))
             ->filter(static fn (array $activity): bool => is_int($activity['sequence'] ?? null))

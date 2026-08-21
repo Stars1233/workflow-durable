@@ -3611,6 +3611,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
 
             /** @var WorkflowRun|null $parentRun */
             $parentRun = ConfiguredV2Models::query('run_model', WorkflowRun::class)
+                ->lockForUpdate()
                 ->find($parentLink->parent_workflow_run_id);
 
             if ($parentRun === null || $parentRun->status->isTerminal()) {
@@ -3620,6 +3621,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             $sequence = is_int($parentLink->sequence) ? $parentLink->sequence : null;
             $parentTaskPayload = [];
             $resolutionEvent = null;
+            $parallelMetadataPath = [];
 
             if ($sequence !== null) {
                 $parentRun->loadMissing([
@@ -3652,6 +3654,27 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
 
                 $resolutionEvent = $this->recordChildResolution($parentRun, null, $sequence, $childRun);
                 $parentTaskPayload = WorkflowTaskPayload::forChildResolution($resolutionEvent);
+                $parallelMetadataPath = ChildRunHistory::parallelGroupPathForSequence($parentRun, $sequence);
+                $childStatus = ChildRunHistory::resolvedStatus($resolutionEvent, $childRun);
+
+                if (
+                    $parallelMetadataPath !== []
+                    && $childStatus instanceof RunStatus
+                    && ! ParallelChildGroup::shouldWakeParentOnChildClosure(
+                        $parentRun,
+                        $parallelMetadataPath,
+                        $childStatus,
+                        lockHistoryForUpdate: true,
+                    )
+                ) {
+                    self::projectRunBestEffort(
+                        $parentRun,
+                        self::PROJECTION_RUN_RELATIONS_WITH_CHILDREN,
+                        'child_workflow_parallel_wait',
+                    );
+
+                    continue;
+                }
             }
 
             $existingTask = ConfiguredV2Models::query('task_model', WorkflowTask::class)
@@ -3682,9 +3705,63 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 $parentRun->unsetRelation('childLinks');
                 $parentRun->unsetRelation('tasks');
                 $parentRun->unsetRelation('failures');
-                self::projectChildResolutionBestEffort($parentRun, $parentTask, $resolutionEvent);
+
+                foreach (
+                    $this->childResolutionEventsForParallelBarrier(
+                        $parentRun,
+                        $resolutionEvent,
+                        $parallelMetadataPath,
+                    ) as $event
+                ) {
+                    self::projectChildResolutionBestEffort($parentRun, $parentTask, $event);
+                }
             }
         }
+    }
+
+    /**
+     * Associate every child outcome released by one parallel barrier with the
+     * workflow task that will replay the joined result. Earlier successful
+     * children were deliberately recorded without a resume task while their
+     * siblings were open.
+     *
+     * @param list<array{
+     *     parallel_group_id: string,
+     *     parallel_group_kind: string,
+     *     parallel_group_base_sequence: int,
+     *     parallel_group_size: int,
+     *     parallel_group_index: int
+     * }> $parallelMetadataPath
+     * @return list<WorkflowHistoryEvent>
+     */
+    private function childResolutionEventsForParallelBarrier(
+        WorkflowRun $parentRun,
+        WorkflowHistoryEvent $currentEvent,
+        array $parallelMetadataPath,
+    ): array {
+        $outermostGroup = $parallelMetadataPath[array_key_first($parallelMetadataPath)] ?? null;
+
+        if (! is_array($outermostGroup)) {
+            return [$currentEvent];
+        }
+
+        $groupSequences = ParallelChildGroup::sequences($outermostGroup);
+
+        return ConfiguredV2Models::query('history_event_model', WorkflowHistoryEvent::class)
+            ->where('workflow_run_id', $parentRun->id)
+            ->whereIn('event_type', array_map(
+                static fn (HistoryEventType $eventType): string => $eventType->value,
+                ChildRunHistory::resolutionEventTypes(),
+            ))
+            ->orderBy('sequence')
+            ->get()
+            ->filter(static fn (WorkflowHistoryEvent $event): bool => in_array(
+                $event->payload['sequence'] ?? null,
+                $groupSequences,
+                true,
+            ))
+            ->values()
+            ->all();
     }
 
     private function recordChildResolution(
