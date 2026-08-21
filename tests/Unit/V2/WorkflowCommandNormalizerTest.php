@@ -1195,6 +1195,65 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
         $this->assertSame(true, $out[0]['non_retryable']);
     }
 
+    public function testParallelMetadataIsPreservedForActivityChildAndTimerCommands(): void
+    {
+        $commands = [];
+        foreach ([
+            ['schedule_activity', 'activity_type', 'fetch'],
+            ['start_child_workflow', 'workflow_type', 'child'],
+            ['start_timer', 'delay_seconds', 5],
+        ] as $index => [$type, $detailField, $detail]) {
+            $kind = 'mixed';
+            $entry = [
+                'parallel_group_id' => 'parallel-calls:1:3',
+                'parallel_group_kind' => $kind,
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 3,
+                'parallel_group_index' => $index,
+            ];
+            $commands[] = [
+                'type' => $type,
+                $detailField => $detail,
+                ...$entry,
+                'parallel_group_path' => [$entry],
+            ];
+        }
+
+        $normalized = WorkflowCommandNormalizer::normalize($commands);
+
+        $this->assertSame(['parallel-calls:1:3', 'parallel-calls:1:3', 'parallel-calls:1:3'], array_column(
+            $normalized,
+            'parallel_group_id',
+        ));
+        $this->assertSame([0, 1, 2], array_column($normalized, 'parallel_group_index'));
+        $this->assertSame('parallel-calls:1:3', $normalized[2]['parallel_group_path'][0]['parallel_group_id']);
+    }
+
+    public function testParallelMetadataRejectsPartialOrIncompatibleIdentity(): void
+    {
+        $errors = $this->normalizeAndCaptureErrors([[
+            'type' => 'schedule_activity',
+            'activity_type' => 'fetch',
+            'parallel_group_id' => 'parallel-activities:1:2',
+        ]]);
+        $this->assertArrayHasKey('commands.0.parallel_group_path', $errors);
+
+        $entry = [
+            'parallel_group_id' => 'parallel-children:1:1',
+            'parallel_group_kind' => 'child',
+            'parallel_group_base_sequence' => 1,
+            'parallel_group_size' => 1,
+            'parallel_group_index' => 0,
+        ];
+        $errors = $this->normalizeAndCaptureErrors([[
+            'type' => 'schedule_activity',
+            'activity_type' => 'fetch',
+            ...$entry,
+            'parallel_group_path' => [$entry],
+        ]]);
+        $this->assertArrayHasKey('commands.0.parallel_group_path', $errors);
+    }
+
     /**
      * @param  list<array<string, mixed>>  $commands
      * @return array<string, list<string>>

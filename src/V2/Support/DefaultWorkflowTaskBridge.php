@@ -926,6 +926,17 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 ];
             }
 
+            if (! self::parallelCommandsMatchSequences($parsed['non_terminal'], $sequence)) {
+                return [
+                    'completed' => false,
+                    'task_id' => $taskId,
+                    'workflow_run_id' => $run->id,
+                    'run_status' => $run->status->value,
+                    'created_task_ids' => [],
+                    'reason' => 'invalid_commands',
+                ];
+            }
+
             $this->recordAppliedSignalForSignalResume($run, $task);
             $this->recordSatisfiedConditionWaitForSignalResume($run, $task);
 
@@ -2163,6 +2174,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'activity_type' => $activityType,
             'sequence' => $sequence,
             'activity' => ActivitySnapshot::fromExecution($execution),
+            ...self::parallelMetadataForCommand($command),
         ], $task);
 
         /** @var WorkflowTask $activityTask */
@@ -2215,6 +2227,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'sequence' => $sequence,
             'delay_seconds' => $delaySeconds,
             'fire_at' => $fireAt->toJSON(),
+            ...self::parallelMetadataForCommand($command),
         ], $task);
 
         /** @var WorkflowTask $timerTask */
@@ -2226,6 +2239,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'available_at' => $fireAt,
             'payload' => [
                 'timer_id' => $timer->id,
+                ...self::parallelMetadataForCommand($command),
             ],
             'connection' => $run->connection,
             'queue' => $run->queue,
@@ -2932,6 +2946,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'child_workflow_instance_id' => $childInstance->id,
             'child_workflow_run_id' => $childRun->id,
             'is_primary_parent' => true,
+            'parallel_group_path' => $command['parallel_group_path'] ?? null,
             'parent_close_policy' => $parentClosePolicy,
         ]);
 
@@ -2946,6 +2961,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'parent_close_policy' => $parentClosePolicy,
             'retry_policy' => $retryPolicy,
             'timeout_policy' => $timeoutPolicy,
+            ...self::parallelMetadataForCommand($command),
         ], $task);
 
         WorkflowHistoryEvent::record($run, HistoryEventType::ChildRunStarted, [
@@ -2964,6 +2980,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'run_timeout_seconds' => $runTimeoutSeconds,
             'execution_deadline_at' => $executionDeadlineAt?->toIso8601String(),
             'run_deadline_at' => $runDeadlineAt?->toIso8601String(),
+            ...self::parallelMetadataForCommand($command),
         ], $task);
 
         WorkflowHistoryEvent::record($childRun, HistoryEventType::WorkflowStarted, [
@@ -4016,6 +4033,11 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             }
         }
 
+        $parallelMetadata = self::normalizeParallelCommandMetadata($command, 'activity');
+        if ($parallelMetadata === null) {
+            return null;
+        }
+
         return array_filter([
             'type' => 'schedule_activity',
             'activity_type' => $activityType,
@@ -4029,6 +4051,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'schedule_to_close_timeout' => $scheduleToCloseTimeout,
             'heartbeat_timeout' => $heartbeatTimeout,
             'worker_session' => self::normalizeWorkerSessionCommand($command['worker_session'] ?? null),
+            ...$parallelMetadata,
         ], static fn (mixed $value): bool => $value !== null);
     }
 
@@ -4102,9 +4125,15 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             return null;
         }
 
+        $parallelMetadata = self::normalizeParallelCommandMetadata($command, 'timer');
+        if ($parallelMetadata === null) {
+            return null;
+        }
+
         return [
             'type' => 'start_timer',
             'delay_seconds' => (int) $command['delay_seconds'],
+            ...$parallelMetadata,
         ];
     }
 
@@ -4154,6 +4183,11 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             }
         }
 
+        $parallelMetadata = self::normalizeParallelCommandMetadata($command, 'child');
+        if ($parallelMetadata === null) {
+            return null;
+        }
+
         return array_filter([
             'type' => 'start_child_workflow',
             'workflow_type' => $workflowType,
@@ -4165,7 +4199,159 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'retry_policy' => $retryPolicy,
             'execution_timeout_seconds' => $executionTimeoutSeconds,
             'run_timeout_seconds' => $runTimeoutSeconds,
+            ...$parallelMetadata,
         ], static fn (mixed $value): bool => $value !== null);
+    }
+
+    /**
+     * @param array<string, mixed> $command
+     * @return array<string, mixed>|null
+     */
+    private static function normalizeParallelCommandMetadata(array $command, string $leafKind): ?array
+    {
+        $fields = [
+            'parallel_group_id',
+            'parallel_group_kind',
+            'parallel_group_base_sequence',
+            'parallel_group_size',
+            'parallel_group_index',
+        ];
+        $present = array_key_exists('parallel_group_path', $command);
+        foreach ($fields as $field) {
+            $present = $present || array_key_exists($field, $command);
+        }
+        if (! $present) {
+            return [];
+        }
+
+        $path = $command['parallel_group_path'] ?? null;
+        $top = self::normalizeParallelCommandEntry($command, $leafKind);
+        if ($top === null || ! is_array($path) || ! array_is_list($path) || $path === []) {
+            return null;
+        }
+
+        $normalizedPath = [];
+        foreach ($path as $entry) {
+            $normalized = is_array($entry)
+                ? self::normalizeParallelCommandEntry($entry, $leafKind)
+                : null;
+            if ($normalized === null) {
+                return null;
+            }
+            $normalizedPath[] = $normalized;
+        }
+
+        if ($normalizedPath[array_key_last($normalizedPath)] !== $top) {
+            return null;
+        }
+
+        return [
+            ...$top,
+            'parallel_group_path' => $normalizedPath,
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $value
+     * @return array<string, mixed>|null
+     */
+    private static function normalizeParallelCommandEntry(array $value, string $leafKind): ?array
+    {
+        $id = $value['parallel_group_id'] ?? null;
+        $kind = $value['parallel_group_kind'] ?? null;
+        $base = $value['parallel_group_base_sequence'] ?? null;
+        $size = $value['parallel_group_size'] ?? null;
+        $index = $value['parallel_group_index'] ?? null;
+        $limit = StructuralLimits::commandBatchSizeLimit();
+        if (! is_string($id) || $id === ''
+            || ! is_string($kind) || ! in_array($kind, [$leafKind, 'mixed'], true)
+            || ! is_int($base) || $base < 1
+            || ! is_int($size) || $size < 1 || ($limit > 0 && $size > $limit)
+            || ! is_int($index) || $index < 0 || $index >= $size) {
+            return null;
+        }
+
+        $prefix = match ($kind) {
+            'activity' => 'parallel-activities',
+            'child' => 'parallel-children',
+            'timer' => 'parallel-timers',
+            default => 'parallel-calls',
+        };
+        if ($id !== sprintf('%s:%d:%d', $prefix, $base, $size)) {
+            return null;
+        }
+
+        return [
+            'parallel_group_id' => $id,
+            'parallel_group_kind' => $kind,
+            'parallel_group_base_sequence' => $base,
+            'parallel_group_size' => $size,
+            'parallel_group_index' => $index,
+        ];
+    }
+
+    /** @param array<string, mixed> $command
+     *  @return array<string, mixed>
+     */
+    private static function parallelMetadataForCommand(array $command): array
+    {
+        $path = $command['parallel_group_path'] ?? null;
+
+        return is_array($path) ? ParallelChildGroup::payloadForPath($path) : [];
+    }
+
+    /**
+     * @param list<array{type: string, ...}> $commands
+     */
+    private static function parallelCommandsMatchSequences(array $commands, int $baseSequence): bool
+    {
+        $commandsBySequence = [];
+        $sequence = $baseSequence;
+        foreach ($commands as $command) {
+            $commandsBySequence[$sequence] = $command;
+            $path = $command['parallel_group_path'] ?? null;
+            if (is_array($path)) {
+                foreach ($path as $entry) {
+                    if (! is_array($entry)
+                        || ($entry['parallel_group_base_sequence'] ?? null)
+                            + ($entry['parallel_group_index'] ?? null) !== $sequence) {
+                        return false;
+                    }
+                }
+            }
+            ++$sequence;
+        }
+
+        foreach ($commandsBySequence as $command) {
+            $path = $command['parallel_group_path'] ?? null;
+            if (! is_array($path)) {
+                continue;
+            }
+            foreach ($path as $depth => $entry) {
+                if (! is_array($entry)) {
+                    return false;
+                }
+                $groupBase = $entry['parallel_group_base_sequence'] ?? null;
+                $groupSize = $entry['parallel_group_size'] ?? null;
+                if (! is_int($groupBase) || ! is_int($groupSize)) {
+                    return false;
+                }
+                for ($index = 0; $index < $groupSize; ++$index) {
+                    $memberPath = $commandsBySequence[$groupBase + $index]['parallel_group_path'] ?? null;
+                    $member = is_array($memberPath) ? ($memberPath[$depth] ?? null) : null;
+                    if (! is_array($member)
+                        || ($member['parallel_group_id'] ?? null) !== ($entry['parallel_group_id'] ?? null)
+                        || ($member['parallel_group_kind'] ?? null) !== ($entry['parallel_group_kind'] ?? null)
+                        || ($member['parallel_group_base_sequence'] ?? null) !== $groupBase
+                        || ($member['parallel_group_size'] ?? null) !== $groupSize
+                        || ($member['parallel_group_index'] ?? null) !== $index) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
     }
 
     /**

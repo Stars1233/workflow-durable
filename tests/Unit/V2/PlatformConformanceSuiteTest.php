@@ -724,7 +724,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $suiteManifest = PlatformConformanceSuite::manifest();
         $contracts = $suiteManifest['fixture_catalog']['signal_query_runtime_contract']['required_scenario_contracts'];
 
-        $this->assertSame('2.0.0-rc.33', $workflowSourceRelease);
+        $this->assertSame('2.0.0-rc.34', $workflowSourceRelease);
 
         foreach ($sdkCompatibility as $sdk) {
             $this->assertSame('2.0.0-rc.5', $sdk['release_line']);

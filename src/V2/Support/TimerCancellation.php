@@ -50,6 +50,7 @@ final class TimerCancellation
             'signal_wait_id' => self::stringValue($scheduledPayload['signal_wait_id'] ?? null),
             'signal_name' => self::stringValue($scheduledPayload['signal_name'] ?? null),
             'cancelled_at' => $cancelledAt->toJSON(),
+            ...ParallelChildGroup::payloadForPath(ParallelChildGroup::metadataPathFromPayload($scheduledPayload)),
         ], static fn (mixed $value): bool => $value !== null), $task, $command);
 
         if ($run->relationLoaded('historyEvents')) {

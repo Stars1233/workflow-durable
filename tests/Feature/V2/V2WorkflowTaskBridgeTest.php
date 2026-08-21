@@ -8682,6 +8682,245 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertNotNull($timerTask);
     }
 
+    public function testCompletePreservesParallelMetadataAcrossActivityChildAndTimerHistory(): void
+    {
+        $run = $this->createWaitingRun();
+
+        /** @var WorkflowTask $task */
+        $task = $this->createLeasedTask($run);
+        $commands = [];
+        foreach ([
+            ['schedule_activity', 'activity_type', 'activity-a'],
+            ['start_child_workflow', 'workflow_type', 'child-a'],
+            ['start_timer', 'delay_seconds', 0],
+        ] as $index => [$type, $field, $value]) {
+            $entry = [
+                'parallel_group_id' => 'parallel-calls:1:3',
+                'parallel_group_kind' => 'mixed',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 3,
+                'parallel_group_index' => $index,
+            ];
+            $commands[] = [
+                'type' => $type,
+                $field => $value,
+                ...$entry,
+                'parallel_group_path' => [$entry],
+            ];
+        }
+
+        $result = $this->bridge->complete($task->id, $commands);
+
+        $this->assertTrue($result['completed']);
+        $events = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->whereIn('event_type', [
+                HistoryEventType::ActivityScheduled->value,
+                HistoryEventType::ChildWorkflowScheduled->value,
+                HistoryEventType::TimerScheduled->value,
+            ])
+            ->orderBy('sequence')
+            ->get();
+        $this->assertSame([0, 1, 2], $events->pluck('payload')->map(
+            static fn (array $payload): mixed => $payload['parallel_group_index'] ?? null,
+        )->all());
+        $this->assertSame(
+            ['parallel-calls:1:3', 'parallel-calls:1:3', 'parallel-calls:1:3'],
+            $events->pluck('payload')
+                ->map(
+                    static fn (array $payload): mixed => $payload['parallel_group_path'][0]['parallel_group_id'] ?? null
+                )->all(),
+        );
+
+        /** @var WorkflowLink $link */
+        $link = WorkflowLink::query()
+            ->where('parent_workflow_run_id', $run->id)
+            ->where('link_type', 'child_workflow')
+            ->firstOrFail();
+        $this->assertSame('parallel-calls:1:3', $link->parallel_group_path[0]['parallel_group_id']);
+
+        /** @var WorkflowTask $timerTask */
+        $timerTask = WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Timer->value)
+            ->firstOrFail();
+        Queue::fake();
+        (new RunTimerTask($timerTask->id))->handle();
+        $fired = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::TimerFired->value)
+            ->firstOrFail();
+        $this->assertSame('parallel-calls:1:3', $fired->payload['parallel_group_id']);
+
+        $waits = \Workflow\V2\Support\RunWaitView::forRun($run->fresh());
+        $timerWait = collect($waits)
+            ->firstWhere('kind', 'timer');
+        $this->assertSame('parallel-calls:1:3', $timerWait['parallel_group_id'] ?? null);
+        $this->assertSame(2, $timerWait['parallel_group_index'] ?? null);
+    }
+
+    public function testParallelTimerGroupWakesWorkflowOnlyAfterEveryTimerFires(): void
+    {
+        Queue::fake();
+
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+        $commands = [];
+
+        foreach ([0, 1] as $index) {
+            $entry = [
+                'parallel_group_id' => 'parallel-timers:1:2',
+                'parallel_group_kind' => 'timer',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 2,
+                'parallel_group_index' => $index,
+            ];
+            $commands[] = [
+                'type' => 'start_timer',
+                'delay_seconds' => 0,
+                ...$entry,
+                'parallel_group_path' => [$entry],
+            ];
+        }
+
+        $result = $this->bridge->complete($task->id, $commands);
+
+        $this->assertTrue($result['completed']);
+        $this->assertCount(2, $result['created_task_ids']);
+
+        /** @var WorkflowTask $secondTimerTask */
+        $secondTimerTask = WorkflowTask::query()->findOrFail($result['created_task_ids'][1]);
+        $this->app->call([new RunTimerTask($secondTimerTask->id), 'handle']);
+
+        $this->assertSame(0, $this->readyWorkflowTaskCount($run));
+
+        /** @var WorkflowTask $firstTimerTask */
+        $firstTimerTask = WorkflowTask::query()->findOrFail($result['created_task_ids'][0]);
+        $this->app->call([new RunTimerTask($firstTimerTask->id), 'handle']);
+
+        $this->assertSame(1, $this->readyWorkflowTaskCount($run));
+        $this->assertSame([2, 1], WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::TimerFired->value)
+            ->orderBy('sequence')
+            ->get()
+            ->pluck('payload')
+            ->map(static fn (array $payload): mixed => $payload['sequence'] ?? null)
+            ->all());
+
+        $this->app->call([new RunTimerTask($secondTimerTask->id), 'handle']);
+
+        $this->assertSame(1, $this->readyWorkflowTaskCount($run));
+    }
+
+    public function testMixedParallelGroupWakesWorkflowOnceForEitherCompletionOrder(): void
+    {
+        Queue::fake();
+
+        foreach ([true, false] as $timerFirst) {
+            $run = $this->createWaitingRun();
+            $task = $this->createLeasedTask($run);
+            $commands = [];
+
+            foreach ([
+                ['schedule_activity', 'activity_type', 'activity-a'],
+                ['start_timer', 'delay_seconds', 0],
+            ] as $index => [$type, $field, $value]) {
+                $entry = [
+                    'parallel_group_id' => 'parallel-calls:1:2',
+                    'parallel_group_kind' => 'mixed',
+                    'parallel_group_base_sequence' => 1,
+                    'parallel_group_size' => 2,
+                    'parallel_group_index' => $index,
+                ];
+                $commands[] = [
+                    'type' => $type,
+                    $field => $value,
+                    ...$entry,
+                    'parallel_group_path' => [$entry],
+                ];
+            }
+
+            $result = $this->bridge->complete($task->id, $commands);
+
+            $this->assertTrue($result['completed']);
+            $this->assertCount(2, $result['created_task_ids']);
+
+            /** @var WorkflowTask $activityTask */
+            $activityTask = WorkflowTask::query()->findOrFail($result['created_task_ids'][0]);
+            /** @var WorkflowTask $timerTask */
+            $timerTask = WorkflowTask::query()->findOrFail($result['created_task_ids'][1]);
+            /** @var ActivityTaskBridge $activityBridge */
+            $activityBridge = $this->app->make(ActivityTaskBridge::class);
+            $completeActivity = function () use ($activityBridge, $activityTask): array {
+                $claim = $activityBridge->claim($activityTask->id, 'activity-worker-1');
+
+                $this->assertNotNull($claim);
+                $this->assertIsString($claim['activity_attempt_id']);
+
+                return $activityBridge->complete($claim['activity_attempt_id'], 'activity-result');
+            };
+            $fireTimer = fn () => $this->app->call([new RunTimerTask($timerTask->id), 'handle']);
+
+            $firstResult = $timerFirst ? $fireTimer() : $completeActivity();
+
+            $this->assertSame(0, $this->readyWorkflowTaskCount($run));
+            if (! $timerFirst) {
+                $this->assertIsArray($firstResult);
+                $this->assertNull($firstResult['next_task_id']);
+            }
+
+            $secondResult = $timerFirst ? $completeActivity() : $fireTimer();
+
+            $this->assertSame(1, $this->readyWorkflowTaskCount($run));
+            if ($timerFirst) {
+                $this->assertIsArray($secondResult);
+                $this->assertIsString($secondResult['next_task_id']);
+            }
+
+            $expectedResolutionOrder = $timerFirst
+                ? [HistoryEventType::TimerFired->value, HistoryEventType::ActivityCompleted->value]
+                : [HistoryEventType::ActivityCompleted->value, HistoryEventType::TimerFired->value];
+            $this->assertSame($expectedResolutionOrder, WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $run->id)
+                ->whereIn('event_type', [
+                    HistoryEventType::ActivityCompleted->value,
+                    HistoryEventType::TimerFired->value,
+                ])
+                ->orderBy('sequence')
+                ->pluck('event_type')
+                ->map(static fn (HistoryEventType $eventType): string => $eventType->value)
+                ->all());
+        }
+    }
+
+    public function testCompleteRejectsIncompleteParallelGroupBeforeRecordingHistory(): void
+    {
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+        $entry = [
+            'parallel_group_id' => 'parallel-activities:1:2',
+            'parallel_group_kind' => 'activity',
+            'parallel_group_base_sequence' => 1,
+            'parallel_group_size' => 2,
+            'parallel_group_index' => 0,
+        ];
+
+        $result = $this->bridge->complete($task->id, [[
+            'type' => 'schedule_activity',
+            'activity_type' => 'only-one',
+            ...$entry,
+            'parallel_group_path' => [$entry],
+        ]]);
+
+        $this->assertFalse($result['completed']);
+        $this->assertSame('invalid_commands', $result['reason']);
+        $this->assertDatabaseMissing('workflow_history_events', [
+            'workflow_run_id' => $run->id,
+            'event_type' => HistoryEventType::ActivityScheduled->value,
+        ]);
+    }
+
     public function testCompleteWithNonTerminalAndTerminalCommands(): void
     {
         $run = $this->createWaitingRun();
@@ -9266,6 +9505,15 @@ SQL);
         ]);
 
         return $task;
+    }
+
+    private function readyWorkflowTaskCount(WorkflowRun $run): int
+    {
+        return WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Workflow->value)
+            ->where('status', TaskStatus::Ready->value)
+            ->count();
     }
 
     private function recordReceivedSignal(

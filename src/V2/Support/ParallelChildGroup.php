@@ -7,6 +7,7 @@ namespace Workflow\V2\Support;
 use Workflow\V2\Enums\ActivityStatus;
 use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Enums\RunStatus;
+use Workflow\V2\Enums\TimerStatus;
 use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowRun;
 
@@ -96,6 +97,9 @@ final class ParallelChildGroup
                     HistoryEventType::ActivityFailed,
                     HistoryEventType::ActivityCancelled,
                     HistoryEventType::ActivityTimedOut,
+                    HistoryEventType::TimerScheduled,
+                    HistoryEventType::TimerFired,
+                    HistoryEventType::TimerCancelled,
                     HistoryEventType::ChildWorkflowScheduled,
                     HistoryEventType::ChildRunStarted,
                     HistoryEventType::ChildRunCompleted,
@@ -255,6 +259,19 @@ final class ParallelChildGroup
         );
     }
 
+    public static function shouldWakeParentOnTimerClosure(
+        WorkflowRun $parentRun,
+        array $metadata,
+        TimerStatus $closedTimerStatus
+    ): bool {
+        return self::shouldWakeParentOnClosure(
+            $parentRun,
+            self::normalizedPath($metadata),
+            'timer',
+            $closedTimerStatus,
+        );
+    }
+
     /**
      * @param list<array{
      *     parallel_group_id: string,
@@ -268,11 +285,12 @@ final class ParallelChildGroup
         WorkflowRun $parentRun,
         array $metadataPath,
         string $closedKind,
-        ActivityStatus|RunStatus $closedStatus,
+        ActivityStatus|RunStatus|TimerStatus $closedStatus,
     ): bool {
         if (
             ($closedKind === 'activity' && $closedStatus !== ActivityStatus::Completed)
             || ($closedKind === 'child' && $closedStatus !== RunStatus::Completed)
+            || ($closedKind === 'timer' && $closedStatus !== TimerStatus::Fired)
         ) {
             return true;
         }
@@ -301,10 +319,14 @@ final class ParallelChildGroup
         $parentRun->unsetRelation('historyEvents');
         $parentRun->unsetRelation('activityExecutions');
         $parentRun->unsetRelation('childLinks');
+        $parentRun->unsetRelation('timers');
 
         $activitiesBySequence = collect(RunActivityView::activitiesForRun($parentRun))
             ->filter(static fn (array $activity): bool => is_int($activity['sequence'] ?? null))
             ->keyBy(static fn (array $activity): string => (string) $activity['sequence']);
+        $timersBySequence = collect(RunTimerView::timersForRun($parentRun))
+            ->filter(static fn (array $timer): bool => is_int($timer['sequence'] ?? null))
+            ->keyBy(static fn (array $timer): string => (string) $timer['sequence']);
 
         foreach (self::sequences($metadata) as $sequence) {
             $activity = $activitiesBySequence->get((string) $sequence);
@@ -322,6 +344,16 @@ final class ParallelChildGroup
                 }
 
                 if ($status !== ActivityStatus::Completed->value) {
+                    return false;
+                }
+
+                continue;
+            }
+
+            $timer = $timersBySequence->get((string) $sequence);
+
+            if (is_array($timer)) {
+                if (($timer['status'] ?? null) !== TimerStatus::Fired->value) {
                     return false;
                 }
 
@@ -457,6 +489,7 @@ final class ParallelChildGroup
         $prefix = match ($kind) {
             'activity' => 'parallel-activities',
             'mixed' => 'parallel-calls',
+            'timer' => 'parallel-timers',
             default => 'parallel-children',
         };
 
@@ -469,6 +502,7 @@ final class ParallelChildGroup
             $groupId === null => null,
             str_starts_with($groupId, 'parallel-activities:') => 'activity',
             str_starts_with($groupId, 'parallel-calls:') => 'mixed',
+            str_starts_with($groupId, 'parallel-timers:') => 'timer',
             str_starts_with($groupId, 'parallel-children:') => 'child',
             default => null,
         };

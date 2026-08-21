@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Standalone workflow-task completion now validates and records deterministic
+  parallel activity, child-workflow, and timer metadata. Nested groups must be
+  complete and sequence-aligned before transport, and timer waits now expose the
+  same group/path diagnostics as activity and child waits.
+- Advanced the Workflow package source to `2.0.0-rc.34` for the service-mode
+  parallel-group contract.
 - Advanced the Workflow package source to `2.0.0-rc.33`. Laravel now
   container-constructs embedded v2 workflow and activity classes before the
   engine binds durable runtime context. A package-owned transition contract,

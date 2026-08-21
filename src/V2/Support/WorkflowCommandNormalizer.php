@@ -224,6 +224,7 @@ final class WorkflowCommandNormalizer
                 $scheduleToClose = self::optionalPositiveInt($command, 'schedule_to_close_timeout', $index, $errors);
                 $heartbeat = self::optionalPositiveInt($command, 'heartbeat_timeout', $index, $errors);
                 $workerSession = self::optionalWorkerSession($command, $index, $errors);
+                $parallelMetadata = self::optionalParallelMetadata($command, 'activity', $index, $errors);
 
                 self::assertActivityTimeoutOrdering($startToClose, $scheduleToClose, $heartbeat, $index, $errors);
 
@@ -249,6 +250,7 @@ final class WorkflowCommandNormalizer
                     'schedule_to_close_timeout' => $scheduleToClose,
                     'heartbeat_timeout' => $heartbeat,
                     'worker_session' => $workerSession,
+                    ...$parallelMetadata,
                 ], static fn (mixed $value): bool => $value !== null);
 
                 continue;
@@ -266,6 +268,7 @@ final class WorkflowCommandNormalizer
                 $normalized[] = [
                     'type' => $type,
                     'delay_seconds' => (int) $command['delay_seconds'],
+                    ...self::optionalParallelMetadata($command, 'timer', $index, $errors),
                 ];
 
                 continue;
@@ -282,6 +285,7 @@ final class WorkflowCommandNormalizer
 
                 $parentClosePolicy = self::optionalCommandString($command, 'parent_close_policy', $index, $errors);
                 $retryPolicy = self::optionalRetryPolicy($command, $index, $errors, 'Child workflow');
+                $parallelMetadata = self::optionalParallelMetadata($command, 'child', $index, $errors);
 
                 if ($parentClosePolicy !== null && ! in_array(
                     $parentClosePolicy,
@@ -320,6 +324,7 @@ final class WorkflowCommandNormalizer
                     'retry_policy' => $retryPolicy,
                     'execution_timeout_seconds' => $executionTimeout,
                     'run_timeout_seconds' => $runTimeout,
+                    ...$parallelMetadata,
                 ], static fn (mixed $value): bool => $value !== null);
 
                 continue;
@@ -688,6 +693,110 @@ final class WorkflowCommandNormalizer
         }
 
         return $normalized;
+    }
+
+    /**
+     * @param array<string, mixed> $command
+     * @param array<string, list<string>> $errors
+     * @return array<string, mixed>
+     */
+    private static function optionalParallelMetadata(
+        array $command,
+        string $leafKind,
+        int $index,
+        array &$errors,
+    ): array {
+        $fields = [
+            'parallel_group_id',
+            'parallel_group_kind',
+            'parallel_group_base_sequence',
+            'parallel_group_size',
+            'parallel_group_index',
+        ];
+        $present = array_key_exists('parallel_group_path', $command);
+        foreach ($fields as $field) {
+            $present = $present || array_key_exists($field, $command);
+        }
+        if (! $present) {
+            return [];
+        }
+
+        $top = self::parallelMetadataEntry($command, $leafKind);
+        $path = $command['parallel_group_path'] ?? null;
+        if ($top === null || ! is_array($path) || ! array_is_list($path) || $path === []) {
+            $errors["commands.{$index}.parallel_group_path"] = [
+                'Parallel workflow commands require complete top-level metadata and a non-empty group path.',
+            ];
+
+            return [];
+        }
+
+        $normalizedPath = [];
+        foreach ($path as $pathIndex => $entry) {
+            $normalized = is_array($entry)
+                ? self::parallelMetadataEntry($entry, $leafKind)
+                : null;
+            if ($normalized === null) {
+                $errors["commands.{$index}.parallel_group_path.{$pathIndex}"] = [
+                    'Each parallel group path entry must contain valid identity, kind, base, size, and index fields.',
+                ];
+
+                return [];
+            }
+            $normalizedPath[] = $normalized;
+        }
+
+        if ($normalizedPath[array_key_last($normalizedPath)] !== $top) {
+            $errors["commands.{$index}.parallel_group_path"] = [
+                'The innermost parallel group path entry must match the top-level parallel metadata.',
+            ];
+
+            return [];
+        }
+
+        return [
+            ...$top,
+            'parallel_group_path' => $normalizedPath,
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $value
+     * @return array<string, mixed>|null
+     */
+    private static function parallelMetadataEntry(array $value, string $leafKind): ?array
+    {
+        $id = $value['parallel_group_id'] ?? null;
+        $kind = $value['parallel_group_kind'] ?? null;
+        $base = $value['parallel_group_base_sequence'] ?? null;
+        $size = $value['parallel_group_size'] ?? null;
+        $index = $value['parallel_group_index'] ?? null;
+        $limit = StructuralLimits::commandBatchSizeLimit();
+        if (! is_string($id) || $id === ''
+            || ! is_string($kind) || ! in_array($kind, [$leafKind, 'mixed'], true)
+            || ! is_int($base) || $base < 1
+            || ! is_int($size) || $size < 1 || ($limit > 0 && $size > $limit)
+            || ! is_int($index) || $index < 0 || $index >= $size) {
+            return null;
+        }
+
+        $prefix = match ($kind) {
+            'activity' => 'parallel-activities',
+            'child' => 'parallel-children',
+            'timer' => 'parallel-timers',
+            default => 'parallel-calls',
+        };
+        if ($id !== sprintf('%s:%d:%d', $prefix, $base, $size)) {
+            return null;
+        }
+
+        return [
+            'parallel_group_id' => $id,
+            'parallel_group_kind' => $kind,
+            'parallel_group_base_sequence' => $base,
+            'parallel_group_size' => $size,
+            'parallel_group_index' => $index,
+        ];
     }
 
     /**

@@ -12,6 +12,8 @@ use PHPUnit\Framework\TestCase;
 use Tests\Fixtures\V2\TestReplayMapOrderWorkflow;
 use Throwable;
 use Workflow\Serializers\Serializer;
+use Workflow\V2\Enums\HistoryEventType;
+use Workflow\V2\Support\HistoryEventPayloadContract;
 use Workflow\V2\Support\WorkflowFiberRunner;
 use Workflow\V2\Support\WorkflowStep;
 use Workflow\V2\Workflow;
@@ -57,6 +59,8 @@ final class ReplayRegressionCorpusTest extends TestCase
     #[DataProvider('replayRegressionFixtures')]
     public function testFixtureExecutesThroughColdReplayRunner(array $fixture): void
     {
+        $this->assertHistoryPayloadContract($fixture);
+
         $workflow = $fixture['workflow'];
         $workflowClass = $workflow['type'];
 
@@ -248,6 +252,23 @@ final class ReplayRegressionCorpusTest extends TestCase
         }
 
         return $fixtures;
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     */
+    private function assertHistoryPayloadContract(array $fixture): void
+    {
+        foreach ($fixture['history'] ?? [] as $event) {
+            $this->assertIsArray($event);
+            $this->assertIsString($event['event_type'] ?? null);
+            $this->assertIsArray($event['payload'] ?? null);
+
+            HistoryEventPayloadContract::assertKnownPayloadKeys(
+                HistoryEventType::from($event['event_type']),
+                $event['payload'],
+            );
+        }
     }
 
     /**

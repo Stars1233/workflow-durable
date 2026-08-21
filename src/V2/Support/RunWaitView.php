@@ -239,6 +239,12 @@ final class RunWaitView
             'history_authority' => $historyAuthority,
             'history_unsupported_reason' => $unsupportedReason,
             'row_status' => self::stringValue($timer['row_status'] ?? null),
+            'parallel_group_kind' => $timer['parallel_group_kind'] ?? null,
+            'parallel_group_id' => $timer['parallel_group_id'] ?? null,
+            'parallel_group_base_sequence' => $timer['parallel_group_base_sequence'] ?? null,
+            'parallel_group_size' => $timer['parallel_group_size'] ?? null,
+            'parallel_group_index' => $timer['parallel_group_index'] ?? null,
+            'parallel_group_path' => $timer['parallel_group_path'] ?? [],
         ];
     }
 

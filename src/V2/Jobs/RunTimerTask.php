@@ -20,6 +20,7 @@ use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowTask;
 use Workflow\V2\Models\WorkflowTimer;
+use Workflow\V2\Support\ParallelChildGroup;
 use Workflow\V2\Support\TaskBackendCapabilities;
 use Workflow\V2\Support\TaskCompatibility;
 use Workflow\V2\Support\TaskDispatcher;
@@ -166,6 +167,8 @@ final class RunTimerTask implements ShouldQueue
                 $signalWaitId !== null => 'signal_timeout',
                 default => null,
             };
+            $parallelMetadataPath = ParallelChildGroup::metadataPathFromPayload($task->payload);
+            $parallelMetadata = ParallelChildGroup::payloadForPath($parallelMetadataPath);
 
             $firedEvent = WorkflowHistoryEvent::record($run, HistoryEventType::TimerFired, array_filter([
                 'timer_id' => $timer->id,
@@ -179,12 +182,26 @@ final class RunTimerTask implements ShouldQueue
                 'condition_definition_fingerprint' => $conditionDefinitionFingerprint,
                 'signal_wait_id' => $signalWaitId,
                 'signal_name' => $signalName,
+                ...$parallelMetadata,
             ], static fn (mixed $value): bool => $value !== null), $task);
 
             $task->forceFill([
                 'status' => TaskStatus::Completed,
                 'lease_expires_at' => null,
             ])->save();
+
+            if (
+                $parallelMetadataPath !== []
+                && ! ParallelChildGroup::shouldWakeParentOnTimerClosure(
+                    $run,
+                    $parallelMetadataPath,
+                    TimerStatus::Fired,
+                )
+            ) {
+                $this->projectRun($run, self::PROJECTION_RUN_RELATIONS);
+
+                return null;
+            }
 
             /** @var WorkflowTask $resumeTask */
             $resumeTask = WorkflowTask::query()->create([
