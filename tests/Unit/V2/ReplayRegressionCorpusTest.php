@@ -115,6 +115,10 @@ final class ReplayRegressionCorpusTest extends TestCase
         }
 
         $this->assertStepMatches($fixture['expected'], $step, "{$fixture['id']} final outcome");
+
+        if (($fixture['id'] ?? null) === 'parallel-child-group-final-sibling-release') {
+            $this->assertParallelChildReplayPrefix($fixture, $step);
+        }
     }
 
     public function testRawBlobsAndInlineEnvelopesProduceTheSameWorkflowResult(): void
@@ -269,6 +273,30 @@ final class ReplayRegressionCorpusTest extends TestCase
                 $event['payload'],
             );
         }
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     */
+    private function assertParallelChildReplayPrefix(array $fixture, WorkflowStep $completed): void
+    {
+        $workflow = $fixture['workflow'];
+        $partialHistory = array_slice($fixture['history'], 0, -1);
+        $waiting = WorkflowFiberRunner::forClass(
+            $workflow['type'],
+            'regression-corpus-parallel-child-prefix',
+            'regression-corpus-run-parallel-child-prefix',
+            $workflow['arguments'],
+            $workflow['payload_codec'],
+            $partialHistory,
+        )->step();
+
+        $this->assertFalse($waiting->completed);
+        $this->assertSame([], $waiting->commands);
+        $this->assertTrue($completed->completed);
+        $this->assertCount(1, $completed->commands);
+        $this->assertSame('complete_workflow', $completed->commands[0]['type']);
+        $this->assertSame($fixture['expected']['result'], $completed->result);
     }
 
     /**

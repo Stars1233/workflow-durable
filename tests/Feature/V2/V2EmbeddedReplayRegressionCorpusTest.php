@@ -8,7 +8,9 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 use Throwable;
+use Workflow\Serializers\Serializer;
 use Workflow\V2\Contracts\HistoryProjectionRole;
+use Workflow\V2\Contracts\WorkflowTaskBridge;
 use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Enums\TaskStatus;
 use Workflow\V2\Enums\TaskType;
@@ -17,6 +19,7 @@ use Workflow\V2\Models\ActivityAttempt;
 use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowFailure;
 use Workflow\V2\Models\WorkflowHistoryEvent;
+use Workflow\V2\Models\WorkflowLink;
 use Workflow\V2\Models\WorkflowMemo;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowRunSummary;
@@ -38,14 +41,22 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
 
     public function testFixturesExecuteThroughDeclaredReplayConsumers(): void
     {
+        self::stopWorkers();
+
         config([
             'app.name' => 'Embedded Upgrade Host',
             'queue.default' => 'database',
+            'workflows.v2.compatibility.current' => 'build-a',
+            'workflows.v2.compatibility.supported' => ['build-a'],
         ]);
         Queue::fake();
 
         foreach ($this->fixtures() as $fixture) {
             $this->executeColdReplayFixture($fixture);
+
+            if (($fixture['id'] ?? null) === 'parallel-child-group-final-sibling-release') {
+                $this->assertStandaloneParallelChildBarrierFixture($fixture);
+            }
 
             $consumers = $fixture['consumers'] ?? ['workflow-fiber-runner'];
             if (in_array('embedded-history-import', $consumers, true)) {
@@ -96,6 +107,137 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
 
             $this->assertSame([], $mismatches, implode(' ', $mismatches));
         }
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     */
+    private function assertStandaloneParallelChildBarrierFixture(array $fixture): void
+    {
+        $this->clearWorkflowState();
+
+        $workflow = $fixture['workflow'];
+        $bridge = $this->app->make(WorkflowTaskBridge::class);
+        $stub = WorkflowStub::make(
+            $workflow['type'],
+            sprintf('regression-corpus-bridge-%d', ++$this->workflowNumber),
+        );
+        $stub->start(...$workflow['arguments']);
+
+        /** @var WorkflowRun $parentRun */
+        $parentRun = WorkflowRun::query()->findOrFail($stub->runId());
+        /** @var WorkflowTask $parentTask */
+        $parentTask = WorkflowTask::query()
+            ->where('workflow_run_id', $parentRun->id)
+            ->where('task_type', TaskType::Workflow->value)
+            ->where('status', TaskStatus::Ready->value)
+            ->firstOrFail();
+
+        $claim = $bridge->claimStatus($parentTask->id, 'regression-corpus-parent-worker');
+        $this->assertTrue($claim['claimed']);
+
+        $scheduledEvents = array_values(array_filter(
+            $fixture['history'],
+            static fn (array $event): bool => ($event['event_type'] ?? null) === 'ChildWorkflowScheduled',
+        ));
+        $this->assertCount(2, $scheduledEvents);
+
+        $parallelKeys = array_flip([
+            'parallel_group_id',
+            'parallel_group_kind',
+            'parallel_group_base_sequence',
+            'parallel_group_size',
+            'parallel_group_index',
+            'parallel_group_path',
+        ]);
+        $commands = array_map(
+            static function (array $event) use ($parallelKeys, $workflow): array {
+                $payload = $event['payload'];
+                $groupIndex = $payload['parallel_group_index'];
+
+                return [
+                    'type' => 'start_child_workflow',
+                    'workflow_type' => $payload['child_workflow_type'],
+                    'arguments' => Serializer::serializeWithCodec(
+                        $workflow['payload_codec'],
+                        [$workflow['arguments'][$groupIndex]],
+                    ),
+                    'payload_codec' => $workflow['payload_codec'],
+                    ...array_intersect_key($payload, $parallelKeys),
+                ];
+            },
+            $scheduledEvents,
+        );
+
+        $scheduled = $bridge->complete($parentTask->id, $commands);
+        $this->assertTrue($scheduled['completed'], json_encode($scheduled, JSON_THROW_ON_ERROR));
+        $this->assertCount(2, $scheduled['created_task_ids']);
+
+        $childTasks = WorkflowLink::query()
+            ->where('parent_workflow_run_id', $parentRun->id)
+            ->where('link_type', 'child_workflow')
+            ->get()
+            ->mapWithKeys(static fn (WorkflowLink $link): array => [
+                $link->sequence => WorkflowTask::query()
+                    ->where('workflow_run_id', $link->child_workflow_run_id)
+                    ->where('task_type', TaskType::Workflow->value)
+                    ->firstOrFail(),
+            ]);
+        $completionEvents = array_values(array_filter(
+            $fixture['history'],
+            static fn (array $event): bool => ($event['event_type'] ?? null) === 'ChildRunCompleted',
+        ));
+        $this->assertSame([4, 3], array_column(array_column($completionEvents, 'payload'), 'sequence'));
+
+        $openParentTaskCount = static fn (): int => WorkflowTask::query()
+            ->where('workflow_run_id', $parentRun->id)
+            ->where('task_type', TaskType::Workflow->value)
+            ->whereIn('status', [TaskStatus::Ready->value, TaskStatus::Leased->value])
+            ->count();
+
+        foreach ($completionEvents as $index => $event) {
+            $payload = $event['payload'];
+            $sequence = $payload['sequence'];
+            /** @var WorkflowTask $childTask */
+            $childTask = $childTasks->get($sequence);
+            $this->assertInstanceOf(WorkflowTask::class, $childTask);
+
+            $childClaim = $bridge->claimStatus($childTask->id, "regression-corpus-child-{$sequence}");
+            $this->assertTrue($childClaim['claimed']);
+
+            $completion = $bridge->complete($childTask->id, [[
+                'type' => 'complete_workflow',
+                'result' => $payload['output'],
+                'payload_codec' => $payload['payload_codec'],
+            ]]);
+            $this->assertTrue($completion['completed'], json_encode($completion, JSON_THROW_ON_ERROR));
+
+            if ($index === 0) {
+                $this->assertSame(0, $openParentTaskCount());
+                continue;
+            }
+
+            $this->assertSame(1, $openParentTaskCount());
+        }
+
+        $firstPayload = $completionEvents[0]['payload'];
+        /** @var WorkflowTask $firstChildTask */
+        $firstChildTask = $childTasks->get($firstPayload['sequence']);
+        $this->assertInstanceOf(WorkflowTask::class, $firstChildTask);
+        $duplicate = $bridge->complete($firstChildTask->id, [[
+            'type' => 'complete_workflow',
+            'result' => $firstPayload['output'],
+            'payload_codec' => $firstPayload['payload_codec'],
+        ]]);
+
+        $this->assertFalse($duplicate['completed']);
+        $this->assertSame('task_not_leased', $duplicate['reason']);
+        $this->assertSame(1, $openParentTaskCount());
+
+        $this->assertSame(2, WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $parentRun->id)
+            ->where('event_type', HistoryEventType::ChildRunCompleted->value)
+            ->count());
     }
 
     /**

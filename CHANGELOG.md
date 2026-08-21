@@ -6,7 +6,7 @@
   path before resuming the parent. Successful child-only and mixed groups wait
   for every member, serialize concurrent child closures on the parent run, and
   create a single replay task while preserving retry and fail-fast behavior.
-- Advanced the Workflow package source to `2.0.0-rc.35` for the service-mode
+- Advanced the Workflow package source to `2.0.0-rc.36` for the service-mode
   child-completion barrier.
 - Standalone workflow-task completion now validates and records deterministic
   parallel activity, child-workflow, and timer metadata. Nested groups must be
