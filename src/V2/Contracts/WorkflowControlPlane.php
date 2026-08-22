@@ -88,6 +88,17 @@ interface WorkflowControlPlane
     public function signal(string $instanceId, string $name, array $options = []): array;
 
     /**
+     * Deliver the package-owned message-stream transport signal.
+     *
+     * @internal Runtime infrastructure only. User-authored signals must call
+     *           {@see self::signal()} and remain subject to declared-signal
+     *           admission.
+     *
+     * @return array<string, mixed>
+     */
+    public function runtimeSignal(string $instanceId, string $name, array $options = []): array;
+
+    /**
      * Execute a query against a workflow instance.
      *
      * Query requires replaying the workflow, which needs the workflow

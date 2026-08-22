@@ -29,7 +29,7 @@ final class WorkerProtocolVersion
      * pagination semantics). Bump the minor for additive changes (new
      * optional fields, new non-terminal command types).
      */
-    public const VERSION = '1.13';
+    public const VERSION = '1.15';
 
     /**
      * Worker registration capability for server-routed workflow query

@@ -371,39 +371,12 @@ final class DefaultWorkflowControlPlane implements WorkflowControlPlane
 
     public function signal(string $instanceId, string $name, array $options = []): array
     {
-        $payloadCodec = is_string($options['payload_codec'] ?? null)
-            ? CodecRegistry::canonicalize($options['payload_codec'])
-            : null;
-        $payloadBlob = $options['payload_blob'] ?? null;
-        $loaded = $this->loadControlPlaneWorkflow($instanceId, $options);
+        return $this->deliverSignal($instanceId, $name, $options, false);
+    }
 
-        if (($loaded['error'] ?? null) !== null) {
-            return $loaded['error'];
-        }
-
-        $stub = $loaded['workflow'] ?? null;
-
-        if (! $stub instanceof WorkflowStub) {
-            return $this->notFoundControlPlaneResult($instanceId, 'workflow_command_id');
-        }
-
-        $arguments = $this->commandArguments($options);
-        $result = $stub
-            ->withCommandContext($this->commandContext($options))
-            ->attemptSignalWithArguments($name, $arguments, $payloadCodec, $payloadBlob);
-
-        return array_merge(
-            CommandResponse::payload($result),
-            [
-                'accepted' => $result->accepted(),
-                'workflow_instance_id' => $instanceId,
-                'workflow_command_id' => $result->commandId(),
-                'signal_name' => $name,
-                'command_reason' => $result->reason(),
-                'reason' => $result->rejected() ? $result->rejectionReason() : null,
-                'status' => $this->signalStatus($result),
-            ],
-        );
+    public function runtimeSignal(string $instanceId, string $name, array $options = []): array
+    {
+        return $this->deliverSignal($instanceId, $name, $options, true);
     }
 
     public function query(string $instanceId, string $name, array $options = []): array
@@ -788,6 +761,51 @@ final class DefaultWorkflowControlPlane implements WorkflowControlPlane
             ],
             'reason' => null,
         ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function deliverSignal(
+        string $instanceId,
+        string $name,
+        array $options,
+        bool $runtimeReserved,
+    ): array {
+        $payloadCodec = is_string($options['payload_codec'] ?? null)
+            ? CodecRegistry::canonicalize($options['payload_codec'])
+            : null;
+        $payloadBlob = $options['payload_blob'] ?? null;
+        $loaded = $this->loadControlPlaneWorkflow($instanceId, $options);
+
+        if (($loaded['error'] ?? null) !== null) {
+            return $loaded['error'];
+        }
+
+        $stub = $loaded['workflow'] ?? null;
+
+        if (! $stub instanceof WorkflowStub) {
+            return $this->notFoundControlPlaneResult($instanceId, 'workflow_command_id');
+        }
+
+        $arguments = $this->commandArguments($options);
+        $stub = $stub->withCommandContext($this->commandContext($options));
+        $result = $runtimeReserved
+            ? $stub->attemptRuntimeSignalWithArguments($name, $arguments, $payloadCodec, $payloadBlob)
+            : $stub->attemptSignalWithArguments($name, $arguments, $payloadCodec, $payloadBlob);
+
+        return array_merge(
+            CommandResponse::payload($result),
+            [
+                'accepted' => $result->accepted(),
+                'workflow_instance_id' => $instanceId,
+                'workflow_command_id' => $result->commandId(),
+                'signal_name' => $name,
+                'command_reason' => $result->reason(),
+                'reason' => $result->rejected() ? $result->rejectionReason() : null,
+                'status' => $this->signalStatus($result),
+            ],
+        );
     }
 
     private function tryResolveWorkflowClass(string $workflowType): ?string

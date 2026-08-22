@@ -1131,6 +1131,11 @@ final class FakeServiceWorkflowControlPlane implements WorkflowControlPlane
     /**
      * @var list<array{instance_id: string, name: string, options: array<string, mixed>}>
      */
+    public array $runtimeSignals = [];
+
+    /**
+     * @var list<array{instance_id: string, name: string, options: array<string, mixed>}>
+     */
     public array $queries = [];
 
     /**
@@ -1184,6 +1189,23 @@ final class FakeServiceWorkflowControlPlane implements WorkflowControlPlane
             'accepted' => true,
             'workflow_instance_id' => $instanceId,
             'workflow_command_id' => 'command-signal-1',
+            'run_id' => 'run-service-1',
+            'reason' => null,
+        ];
+    }
+
+    public function runtimeSignal(string $instanceId, string $name, array $options = []): array
+    {
+        $this->runtimeSignals[] = [
+            'instance_id' => $instanceId,
+            'name' => $name,
+            'options' => $options,
+        ];
+
+        return [
+            'accepted' => true,
+            'workflow_instance_id' => $instanceId,
+            'workflow_command_id' => 'command-runtime-signal-1',
             'run_id' => 'run-service-1',
             'reason' => null,
         ];

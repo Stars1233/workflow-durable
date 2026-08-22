@@ -83,6 +83,8 @@ use Workflow\WorkflowMetadata;
 
 final class WorkflowStub
 {
+    public const MESSAGE_STREAM_RUNTIME_SIGNAL = '__durable_workflow_message_stream';
+
     public const DEFAULT_VERSION = -1;
 
     private const DISPATCHED_LIST = 'workflow.v2.dispatched';
@@ -1455,6 +1457,29 @@ final class WorkflowStub
         return $this->attemptSignalInternal($name, $arguments, $payloadCodec, $payloadBlob);
     }
 
+    /**
+     * Deliver a runtime-owned signal that is intentionally absent from the
+     * workflow's user-declared signal contract.
+     *
+     * @param array<int|string, mixed> $arguments
+     */
+    public function attemptRuntimeSignalWithArguments(
+        string $name,
+        array $arguments,
+        ?string $payloadCodec = null,
+        ?string $payloadBlob = null,
+    ): CommandResult {
+        if ($name !== self::MESSAGE_STREAM_RUNTIME_SIGNAL) {
+            throw new LogicException(sprintf('Signal [%s] is not runtime-reserved.', $name));
+        }
+
+        $arguments = array_is_list($arguments)
+            ? array_values($arguments)
+            : $arguments;
+
+        return $this->attemptSignalInternal($name, $arguments, $payloadCodec, $payloadBlob, true);
+    }
+
     public function attemptRepair(): CommandResult
     {
         /** @var WorkflowCommand|null $command */
@@ -2230,6 +2255,7 @@ final class WorkflowStub
         array $arguments,
         ?string $payloadCodec = null,
         ?string $payloadBlob = null,
+        bool $runtimeReserved = false,
     ): CommandResult {
         if ($name === '') {
             throw new LogicException('Signal name cannot be empty.');
@@ -2243,7 +2269,15 @@ final class WorkflowStub
         $command = null;
         $task = null;
 
-        DB::transaction(function () use ($name, $arguments, $payloadCodec, $payloadBlob, &$command, &$task): void {
+        DB::transaction(function () use (
+            $name,
+            $arguments,
+            $payloadCodec,
+            $payloadBlob,
+            $runtimeReserved,
+            &$command,
+            &$task
+        ): void {
             /** @var WorkflowInstance $instance */
             $instance = self::instanceQuery()
                 ->lockForUpdate()
@@ -2311,50 +2345,52 @@ final class WorkflowStub
 
             $this->loadLockedRunRelations($run, $instance);
 
-            $signalAdmission = $this->signalAdmissionForRun($run, $name);
+            if (! $runtimeReserved) {
+                $signalAdmission = $this->signalAdmissionForRun($run, $name);
 
-            if (($signalAdmission['allowed'] ?? false) !== true) {
-                $command = $this->rejectCommand(
-                    $instance,
-                    $run,
-                    CommandType::Signal,
-                    'unknown_signal',
-                    $this->commandTargetScope(),
-                    $this->signalCommandPayloadAttributes(
-                        $name,
-                        $arguments,
-                        [],
-                        $payloadCodec,
-                        $signalAdmission['payload'] ?? [],
-                    ),
-                );
-                $this->recordRejectedSignal($command, $name, $arguments);
+                if (($signalAdmission['allowed'] ?? false) !== true) {
+                    $command = $this->rejectCommand(
+                        $instance,
+                        $run,
+                        CommandType::Signal,
+                        'unknown_signal',
+                        $this->commandTargetScope(),
+                        $this->signalCommandPayloadAttributes(
+                            $name,
+                            $arguments,
+                            [],
+                            $payloadCodec,
+                            $signalAdmission['payload'] ?? [],
+                        ),
+                    );
+                    $this->recordRejectedSignal($command, $name, $arguments);
 
-                return;
+                    return;
+                }
+
+                $validatedArguments = $this->validatedSignalArgumentsForRun($run, $name, $arguments);
+
+                if ($validatedArguments['validation_errors'] !== []) {
+                    $command = $this->rejectCommand(
+                        $instance,
+                        $run,
+                        CommandType::Signal,
+                        'invalid_signal_arguments',
+                        $this->commandTargetScope(),
+                        $this->signalCommandPayloadAttributes(
+                            $name,
+                            $arguments,
+                            $validatedArguments['validation_errors'],
+                            $payloadCodec,
+                        ),
+                    );
+                    $this->recordRejectedSignal($command, $name, $arguments, $validatedArguments['validation_errors']);
+
+                    return;
+                }
+
+                $arguments = $validatedArguments['arguments'];
             }
-
-            $validatedArguments = $this->validatedSignalArgumentsForRun($run, $name, $arguments);
-
-            if ($validatedArguments['validation_errors'] !== []) {
-                $command = $this->rejectCommand(
-                    $instance,
-                    $run,
-                    CommandType::Signal,
-                    'invalid_signal_arguments',
-                    $this->commandTargetScope(),
-                    $this->signalCommandPayloadAttributes(
-                        $name,
-                        $arguments,
-                        $validatedArguments['validation_errors'],
-                        $payloadCodec,
-                    ),
-                );
-                $this->recordRejectedSignal($command, $name, $arguments, $validatedArguments['validation_errors']);
-
-                return;
-            }
-
-            $arguments = $validatedArguments['arguments'];
 
             try {
                 StructuralLimits::guardPendingSignals($run);
@@ -3696,6 +3732,19 @@ final class WorkflowStub
     {
         $contract = RunCommandContract::forRun($run);
         $diagnostics = $this->signalContractDiagnostics($contract);
+
+        if ($signalName === self::MESSAGE_STREAM_RUNTIME_SIGNAL) {
+            return [
+                'allowed' => false,
+                'payload' => [
+                    ...$diagnostics,
+                    'signal_admission' => 'runtime_reserved_signal',
+                    'reason' => 'unknown_signal',
+                    'message' => 'This signal name is reserved for runtime-owned message-stream delivery.',
+                ],
+                'message' => 'This signal name is reserved for runtime-owned message-stream delivery.',
+            ];
+        }
 
         if (in_array($signalName, $contract['signals'], true)) {
             return [

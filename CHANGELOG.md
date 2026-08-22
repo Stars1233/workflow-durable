@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reserved runtime delivery now keeps durable message-stream input separate
+  from user-authored one-shot signals. The Workflow package source advances to
+  `2.0.0-rc.37` with worker protocol 1.15 for portable stream consumption.
 - Standalone child-workflow completion now applies the recorded parallel-group
   path before resuming the parent. Successful child-only and mixed groups wait
   for every member, serialize concurrent child closures on the parent run, and

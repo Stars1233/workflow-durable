@@ -939,6 +939,63 @@ final class V2WorkflowControlPlaneTest extends TestCase
 
     // ── Query happy path ────────────────────────────────────────────
 
+    public function testMessageStreamTransportSignalRequiresRuntimeReservedDelivery(): void
+    {
+        config()->set('workflows.v2.types.workflows', [
+            'test-signal-workflow' => TestSignalWorkflow::class,
+        ]);
+
+        $this->controlPlane->start('test-signal-workflow', 'ctrl-plane-runtime-signal', [
+            'queue' => 'default',
+        ]);
+
+        $forged = $this->controlPlane->signal(
+            'ctrl-plane-runtime-signal',
+            WorkflowStub::MESSAGE_STREAM_RUNTIME_SIGNAL,
+            [
+                'arguments' => [[
+                    'stream' => 'orders',
+                ]],
+            ],
+        );
+
+        $this->assertFalse($forged['accepted']);
+        $this->assertSame('unknown_signal', $forged['reason']);
+
+        $forgedOption = $this->controlPlane->signal(
+            'ctrl-plane-runtime-signal',
+            WorkflowStub::MESSAGE_STREAM_RUNTIME_SIGNAL,
+            [
+                'arguments' => [[
+                    'stream' => 'orders',
+                ]],
+                'runtime_reserved_signal' => true,
+            ],
+        );
+
+        $this->assertFalse($forgedOption['accepted']);
+        $this->assertSame('unknown_signal', $forgedOption['reason']);
+
+        $runtime = $this->controlPlane->runtimeSignal(
+            'ctrl-plane-runtime-signal',
+            WorkflowStub::MESSAGE_STREAM_RUNTIME_SIGNAL,
+            [
+                'arguments' => [[
+                    'stream' => 'orders',
+                ]],
+            ],
+        );
+
+        $this->assertTrue($runtime['accepted']);
+        $this->assertNull($runtime['reason']);
+
+        $normal = $this->controlPlane->signal('ctrl-plane-runtime-signal', 'name-provided', [
+            'arguments' => ['Taylor'],
+        ]);
+
+        $this->assertTrue($normal['accepted']);
+    }
+
     public function testQueryReturnsResult(): void
     {
         config()->set('workflows.v2.types.workflows', [
