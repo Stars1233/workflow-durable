@@ -25,9 +25,9 @@ final class PlatformConformanceSuite
 {
     public const SCHEMA = 'durable-workflow.v2.platform-conformance.suite';
 
-    public const VERSION = 41;
+    public const VERSION = 42;
 
-    public const MIRROR_SHA256 = '7c6fa0f79d1b274b50f2e2804ca8763b79e80fbd74cc84d478b32501e36717fc';
+    public const MIRROR_SHA256 = 'b472d0fe5f4aa6d412f338d2784feaf09d86c9d9b40b175a36f7de1669a49652';
 
     public const RUNTIME_SOURCE_REVISION = '75dfd5c869823409ef3d6c4b009a7882159ae9a2';
 
@@ -64,7 +64,7 @@ final class PlatformConformanceSuite
 
     private const SUITE_SOURCE_DIRECTORY = 'resources/conformance/suite-v38/';
 
-    private const CURRENT_PROTOCOL_SPEC_DIRECTORY = 'resources/conformance/suite-v41/platform-protocol-specs/';
+    private const CURRENT_PROTOCOL_SPEC_DIRECTORY = 'resources/conformance/suite-v42/platform-protocol-specs/';
 
     private const RUNTIME_SOURCE_DIRECTORY = self::SUITE_SOURCE_DIRECTORY . 'platform-conformance/';
 
@@ -984,6 +984,7 @@ final class PlatformConformanceSuite
             . '/' . self::RUNTIME_SOURCE_DIRECTORY;
         $protocolPrefix = '/durable-workflow/durable-workflow.github.io/' . self::PROTOCOL_SOURCE_REVISION
             . '/static/platform-protocol-specs/';
+        $currentWorkerProtocolPrefix = '/platform-protocol-specs/v1.15/';
 
         if (
             ! is_array($url)
@@ -1015,6 +1016,12 @@ final class PlatformConformanceSuite
             $relativePath = self::CURRENT_PROTOCOL_SPEC_DIRECTORY . $filename;
         } elseif (
             ($url['host'] ?? null) === 'durable-workflow.github.io'
+            && str_starts_with($url['path'], $currentWorkerProtocolPrefix)
+        ) {
+            $filename = substr($url['path'], strlen($currentWorkerProtocolPrefix));
+            $relativePath = self::CURRENT_PROTOCOL_SPEC_DIRECTORY . $filename;
+        } elseif (
+            ($url['host'] ?? null) === 'durable-workflow.github.io'
             && str_starts_with($url['path'], '/cli-json-envelopes/v3/')
         ) {
             $filename = substr($url['path'], strlen('/cli-json-envelopes/v3/'));
@@ -1039,7 +1046,7 @@ final class PlatformConformanceSuite
         if (
             preg_match('/\A[a-z0-9.-]+\.(?:json|ya?ml)\z/D', $filename) !== 1
             || preg_match(
-                '/\Aresources\/conformance\/suite-v(?:38|41)\/platform-(?:conformance|protocol-specs)\/'
+                '/\Aresources\/conformance\/suite-v(?:38|42)\/platform-(?:conformance|protocol-specs)\/'
                     . '[a-z0-9.-]+\.(?:json|ya?ml)\z/D',
                 $relativePath,
             ) !== 1

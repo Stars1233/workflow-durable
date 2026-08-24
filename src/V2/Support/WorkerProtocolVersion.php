@@ -39,6 +39,13 @@ final class WorkerProtocolVersion
     public const CAPABILITY_QUERY_TASKS = 'query_tasks';
 
     /**
+     * Worker registration capability for portable service-mode message
+     * streams. The capability and its workflow-task completion metadata are
+     * version-gated together so an older worker cannot partially opt in.
+     */
+    public const CAPABILITY_MESSAGE_STREAMS = 'message_streams';
+
+    /**
      * Stable fail-closed reason a worker or server must return when it
      * receives an input task whose payload codec is not in the universal
      * advertised codec set or its declared engine-specific opt-in. The
@@ -118,6 +125,10 @@ final class WorkerProtocolVersion
 
     private const SERVICE_OPERATION_COMMAND_MINIMUM_PROTOCOL_VERSION = '1.13';
 
+    private const MESSAGE_STREAMS_MINIMUM_PROTOCOL_VERSION = '1.15';
+
+    private const MESSAGE_STREAM_COMPLETION_FIELDS = ['message_stream_cursors', 'message_stream_waits'];
+
     /**
      * Workflow task bridge verbs — the canonical set of operations an
      * external workflow worker may invoke.
@@ -172,7 +183,44 @@ final class WorkerProtocolVersion
      */
     public static function workerCapabilities(): array
     {
-        return [self::CAPABILITY_QUERY_TASKS];
+        return self::workerCapabilitiesForVersion(self::VERSION);
+    }
+
+    /**
+     * Protocol-defined worker capabilities available at a negotiated version.
+     *
+     * @return list<string>
+     */
+    public static function workerCapabilitiesForVersion(string $protocolVersion): array
+    {
+        $capabilities = [];
+
+        if (self::supportsFeatureVersion($protocolVersion, self::QUERY_TASKS_MINIMUM_PROTOCOL_VERSION)) {
+            $capabilities[] = self::CAPABILITY_QUERY_TASKS;
+        }
+
+        if (self::supportsMessageStreams($protocolVersion)) {
+            $capabilities[] = self::CAPABILITY_MESSAGE_STREAMS;
+        }
+
+        return $capabilities;
+    }
+
+    public static function supportsMessageStreams(string $protocolVersion): bool
+    {
+        return self::supportsFeatureVersion($protocolVersion, self::MESSAGE_STREAMS_MINIMUM_PROTOCOL_VERSION);
+    }
+
+    /**
+     * Version-gated workflow-task completion fields a worker may submit.
+     *
+     * @return list<string>
+     */
+    public static function messageStreamCompletionFieldsForVersion(string $protocolVersion): array
+    {
+        return self::supportsMessageStreams($protocolVersion)
+            ? self::MESSAGE_STREAM_COMPLETION_FIELDS
+            : [];
     }
 
     /**
@@ -303,6 +351,7 @@ final class WorkerProtocolVersion
      *     query_tasks: array<string, mixed>,
      *     upsert_search_attributes_command: array<string, mixed>,
      *     service_operation_command: array<string, mixed>,
+     *     message_streams: array<string, mixed>,
      *     fail_workflow_command: array<string, mixed>,
      *     invocable_carrier: array<string, mixed>,
      *     task_queue_priority_fairness: array<string, mixed>,
@@ -335,6 +384,7 @@ final class WorkerProtocolVersion
             'query_tasks' => self::queryTaskSemantics(),
             'upsert_search_attributes_command' => self::upsertSearchAttributesCommandShape(),
             'service_operation_command' => self::serviceOperationCommandShape(),
+            'message_streams' => self::messageStreamSemantics(),
             'fail_workflow_command' => self::failWorkflowCommandShape(),
             'payload_codecs_universal' => CodecRegistry::universal(),
             'unsupported_payload_codec_reason' => self::REASON_UNSUPPORTED_PAYLOAD_CODEC,
@@ -448,6 +498,65 @@ final class WorkerProtocolVersion
                 'ServiceCallCompleted',
                 'ServiceCallFailed',
                 'ServiceCallCancelled',
+            ],
+        ];
+    }
+
+    /**
+     * Portable service-mode message-stream completion contract.
+     *
+     * @return array<string, mixed>
+     */
+    public static function messageStreamSemantics(): array
+    {
+        return [
+            'feature' => self::CAPABILITY_MESSAGE_STREAMS,
+            'minimum_protocol_version' => self::MESSAGE_STREAMS_MINIMUM_PROTOCOL_VERSION,
+            'worker_capability' => self::CAPABILITY_MESSAGE_STREAMS,
+            'registration_field' => 'capabilities',
+            'completion_fields' => [
+                'message_stream_cursors' => [
+                    'required' => false,
+                    'shape' => 'list<message_stream_cursor_advance>',
+                    'max_items' => 100,
+                    'item' => [
+                        'additional_fields_allowed' => false,
+                        'required_fields' => ['stream_name', 'through_position'],
+                        'stream_name' => [
+                            'shape' => 'string',
+                            'pattern' => '^[A-Za-z0-9._:-]{1,128}$',
+                        ],
+                        'through_position' => [
+                            'shape' => 'integer',
+                            'minimum' => 0,
+                            'meaning' => 'highest_contiguous_consumed_position',
+                        ],
+                    ],
+                ],
+                'message_stream_waits' => [
+                    'required' => false,
+                    'shape' => 'list<message_stream_wait>',
+                    'max_items' => 100,
+                    'item' => [
+                        'additional_fields_allowed' => false,
+                        'required_fields' => ['stream_name', 'after_position'],
+                        'stream_name' => [
+                            'shape' => 'string',
+                            'pattern' => '^[A-Za-z0-9._:-]{1,128}$',
+                        ],
+                        'after_position' => [
+                            'shape' => 'integer',
+                            'minimum' => 0,
+                            'meaning' => 'wait_for_the_first_message_after_position',
+                        ],
+                    ],
+                ],
+            ],
+            'version_gate' => [
+                'workers_below_minimum_must_not_advertise_capability' => true,
+                'workers_below_minimum_must_not_submit_completion_fields' => true,
+                'rejection_status' => 409,
+                'rejection_reason' => 'message_streams_unavailable',
             ],
         ];
     }
@@ -720,5 +829,18 @@ final class WorkerProtocolVersion
                 'prefer_one_larger_activity_for_atomic_side_effects',
             ],
         ];
+    }
+
+    private static function supportsFeatureVersion(string $candidate, string $minimum): bool
+    {
+        if (
+            preg_match('/\A(\d+)\.(\d+)\z/D', $candidate, $candidateParts) !== 1
+            || preg_match('/\A(\d+)\.(\d+)\z/D', $minimum, $minimumParts) !== 1
+        ) {
+            return false;
+        }
+
+        return (int) $candidateParts[1] === (int) $minimumParts[1]
+            && (int) $candidateParts[2] >= (int) $minimumParts[2];
     }
 }

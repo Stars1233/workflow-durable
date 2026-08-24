@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.38` publishes worker protocol 1.15 as the current
+  conformance authority. The package contract and retained OpenAPI and AsyncAPI
+  specs now define the version-gated message-stream completion fields together.
 - Reserved runtime delivery now keeps durable message-stream input separate
   from user-authored one-shot signals. The Workflow package source advances to
   `2.0.0-rc.37` with worker protocol 1.15 for portable stream consumption.

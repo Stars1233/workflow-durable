@@ -158,7 +158,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $authority = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
 
         $this->assertSame($authority, PlatformConformanceSuite::manifest());
-        $this->assertSame(41, $authority['version']);
+        $this->assertSame(42, $authority['version']);
         $this->assertSame(PlatformConformanceSuite::VERSION, $authority['version']);
         $this->assertSame(PlatformConformanceSuite::SCHEMA, $authority['schema']);
         $this->assertSame(SurfaceStabilityContract::SCHEMA, $authority['surface_stability_authority']);
@@ -239,6 +239,15 @@ final class PlatformConformanceSuiteTest extends TestCase
                             . '[a-z0-9.-]+\.json$#',
                         $source['resolver_url'],
                     );
+                } elseif (str_starts_with(
+                    $source['resolver_url'],
+                    'https://durable-workflow.github.io/platform-protocol-specs/v1.15/',
+                )) {
+                    $this->assertMatchesRegularExpression(
+                        '#^https://durable-workflow\.github\.io/platform-protocol-specs/v1\.15/'
+                            . 'worker-protocol-(?:api\.openapi|stream\.asyncapi)\.yaml$#',
+                        $source['resolver_url'],
+                    );
                 } else {
                     $this->assertMatchesRegularExpression(
                         '#^' . preg_quote($protocolSourcePrefix, '#') . '[a-z0-9.-]+\.(?:json|ya?ml)$#',
@@ -249,46 +258,71 @@ final class PlatformConformanceSuiteTest extends TestCase
         }
     }
 
-    public function testWorkerProtocolHistorySeparatesBetaEvidenceFromCurrentAuthority(): void
+    public function testWorkerProtocolHistoryPreservesPriorEvidenceAndAdvancesCurrentAuthority(): void
     {
         $manifest = PlatformConformanceSuite::manifest();
-        $history = $manifest['artifact_version_history']['worker_protocol_api'];
-        $historical = $history['bindings'][0];
-        $current = $history['bindings'][1];
+        $apiHistory = $manifest['artifact_version_history']['worker_protocol_api'];
+        $streamHistory = $manifest['artifact_version_history']['worker_protocol_stream'];
+        $beta = $apiHistory['bindings'][0];
+        $protocol113Api = $apiHistory['bindings'][1];
+        $currentApi = $apiHistory['bindings'][2];
+        $protocol113Stream = $streamHistory['bindings'][0];
+        $currentStream = $streamHistory['bindings'][1];
         $activeSources = $manifest['fixture_catalog']['worker_task_lifecycle']['sources'];
-        $active = array_values(array_filter(
-            $activeSources,
-            static fn (array $source): bool => $source['artifact_id'] === $current['artifact_id'],
-        ));
 
-        $this->assertSame('immutable_lifecycle_bindings', $history['history_mode']);
-        $this->assertSame('historical', $historical['status']);
-        $this->assertSame(
-            'durable-workflow.v2.worker-protocol-api@catalog-16-beta-history',
-            $historical['artifact_id']
-        );
-        $this->assertSame('current', $current['status']);
-        $this->assertSame('lifecycle_neutral', $current['lifecycle']);
-        $this->assertCount(1, $active);
+        $this->assertSame('immutable_lifecycle_bindings', $apiHistory['history_mode']);
+        $this->assertSame('immutable_lifecycle_bindings', $streamHistory['history_mode']);
+        $this->assertSame('historical', $beta['status']);
+        $this->assertSame('durable-workflow.v2.worker-protocol-api@catalog-16-beta-history', $beta['artifact_id']);
+        $this->assertSame('historical', $protocol113Api['status']);
+        $this->assertSame('historical', $protocol113Stream['status']);
+        $this->assertSame('current', $currentApi['status']);
+        $this->assertSame('current', $currentStream['status']);
+        $this->assertSame('lifecycle_neutral', $currentApi['lifecycle']);
+        $this->assertSame('lifecycle_neutral', $currentStream['lifecycle']);
+        $this->assertCount(2, $activeSources);
 
-        foreach (['suite_version', 'status', 'lifecycle'] as $historyField) {
-            unset($current[$historyField]);
+        foreach ([$currentApi, $currentStream] as $index => $current) {
+            foreach (['suite_version', 'status', 'lifecycle'] as $historyField) {
+                unset($current[$historyField]);
+            }
+            $this->assertSame($current, $activeSources[$index]);
         }
-        $this->assertSame($current, $active[0]);
 
         $root = dirname(__DIR__, 3);
         $this->assertSame(
-            $historical['sha256'],
+            $beta['sha256'],
             'sha256:' . hash_file(
                 'sha256',
                 $root . '/resources/conformance/suite-v38/platform-protocol-specs/worker-protocol-api.openapi.yaml',
             ),
         );
         $this->assertSame(
-            $current['sha256'],
+            $protocol113Api['sha256'],
             'sha256:' . hash_file(
                 'sha256',
                 $root . '/resources/conformance/suite-v41/platform-protocol-specs/worker-protocol-api.openapi.yaml',
+            ),
+        );
+        $this->assertSame(
+            $protocol113Stream['sha256'],
+            'sha256:' . hash_file(
+                'sha256',
+                $root . '/resources/conformance/suite-v41/platform-protocol-specs/worker-protocol-stream.asyncapi.yaml',
+            ),
+        );
+        $this->assertSame(
+            $currentApi['sha256'],
+            'sha256:' . hash_file(
+                'sha256',
+                $root . '/resources/conformance/suite-v42/platform-protocol-specs/worker-protocol-api.openapi.yaml',
+            ),
+        );
+        $this->assertSame(
+            $currentStream['sha256'],
+            'sha256:' . hash_file(
+                'sha256',
+                $root . '/resources/conformance/suite-v42/platform-protocol-specs/worker-protocol-stream.asyncapi.yaml',
             ),
         );
     }

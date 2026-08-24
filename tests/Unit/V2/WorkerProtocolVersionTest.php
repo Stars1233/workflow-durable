@@ -68,9 +68,15 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
         $this->assertSame(['poll', 'complete', 'fail'], WorkerProtocolVersion::queryTaskVerbs());
     }
 
-    public function testWorkerCapabilitiesIncludeQueryTasks(): void
+    public function testWorkerCapabilitiesRespectTheirProtocolFloors(): void
     {
-        $this->assertSame(['query_tasks'], WorkerProtocolVersion::workerCapabilities());
+        $this->assertSame(['query_tasks', 'message_streams'], WorkerProtocolVersion::workerCapabilities());
+        $this->assertSame([], WorkerProtocolVersion::workerCapabilitiesForVersion('1.7'));
+        $this->assertSame(['query_tasks'], WorkerProtocolVersion::workerCapabilitiesForVersion('1.14'));
+        $this->assertSame(
+            ['query_tasks', 'message_streams'],
+            WorkerProtocolVersion::workerCapabilitiesForVersion('1.15'),
+        );
     }
 
     public function testNonTerminalCommandTypesAreFrozen(): void
@@ -211,6 +217,57 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
             'published_artifact_worker_execution',
             $shape['metadata']['reserved_conformance_keys'],
         );
+    }
+
+    public function testMessageStreamCompletionContractIsUnavailableBeforeProtocolOneFifteen(): void
+    {
+        $this->assertFalse(WorkerProtocolVersion::supportsMessageStreams('1.14'));
+        $this->assertSame([], WorkerProtocolVersion::messageStreamCompletionFieldsForVersion('1.14'));
+        $this->assertNotContains(
+            WorkerProtocolVersion::CAPABILITY_MESSAGE_STREAMS,
+            WorkerProtocolVersion::workerCapabilitiesForVersion('1.14'),
+        );
+
+        $this->assertTrue(WorkerProtocolVersion::supportsMessageStreams('1.15'));
+        $this->assertSame(
+            ['message_stream_cursors', 'message_stream_waits'],
+            WorkerProtocolVersion::messageStreamCompletionFieldsForVersion('1.15'),
+        );
+        $this->assertContains(
+            WorkerProtocolVersion::CAPABILITY_MESSAGE_STREAMS,
+            WorkerProtocolVersion::workerCapabilitiesForVersion('1.15'),
+        );
+
+        foreach (['1.14.0', '2.15', 'not-a-version'] as $invalidOrDifferentMajor) {
+            $this->assertFalse(WorkerProtocolVersion::supportsMessageStreams($invalidOrDifferentMajor));
+        }
+    }
+
+    public function testDescribeIncludesMessageStreamCompletionShapes(): void
+    {
+        $shape = WorkerProtocolVersion::describe()['message_streams'];
+
+        $this->assertSame('message_streams', $shape['feature']);
+        $this->assertSame('1.15', $shape['minimum_protocol_version']);
+        $this->assertSame('message_streams', $shape['worker_capability']);
+        $this->assertSame('capabilities', $shape['registration_field']);
+        $this->assertSame(
+            ['message_stream_cursors', 'message_stream_waits'],
+            array_keys($shape['completion_fields']),
+        );
+
+        $cursors = $shape['completion_fields']['message_stream_cursors'];
+        $this->assertSame(100, $cursors['max_items']);
+        $this->assertSame(['stream_name', 'through_position'], $cursors['item']['required_fields']);
+        $this->assertSame(0, $cursors['item']['through_position']['minimum']);
+
+        $waits = $shape['completion_fields']['message_stream_waits'];
+        $this->assertSame(100, $waits['max_items']);
+        $this->assertSame(['stream_name', 'after_position'], $waits['item']['required_fields']);
+        $this->assertSame(0, $waits['item']['after_position']['minimum']);
+        $this->assertTrue($shape['version_gate']['workers_below_minimum_must_not_advertise_capability']);
+        $this->assertTrue($shape['version_gate']['workers_below_minimum_must_not_submit_completion_fields']);
+        $this->assertSame('message_streams_unavailable', $shape['version_gate']['rejection_reason']);
     }
 
     public function testDescribeIncludesQueryTaskSemantics(): void
