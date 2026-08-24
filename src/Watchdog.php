@@ -10,10 +10,12 @@ use Illuminate\Contracts\Bus\Dispatcher;
 use Illuminate\Contracts\Queue\ShouldBeEncrypted;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\Jobs\SyncJob;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Workflow\Models\StoredWorkflow;
 use Workflow\States\WorkflowPendingStatus;
 
@@ -26,15 +28,24 @@ class Watchdog implements ShouldBeEncrypted, ShouldQueue
 
     private const CACHE_KEY = 'workflow:watchdog';
 
+    private const CHAIN_LOCK_KEY = 'workflow:watchdog:chain';
+
     private const LOOP_THROTTLE_KEY = 'workflow:watchdog:looping';
 
     private const RECOVERY_LOCK_PREFIX = 'workflow:watchdog:recovering:';
 
-    public int $tries = 0;
+    public int $tries = 3;
 
-    public int $maxExceptions = 0;
+    public int $maxExceptions = 3;
 
     public $timeout = 0;
+
+    public ?string $generation = null;
+
+    public function __construct(?string $generation = null)
+    {
+        $this->generation = $generation;
+    }
 
     public static function wake(string $connection, ?string $queue = null): void
     {
@@ -47,40 +58,29 @@ class Watchdog implements ShouldBeEncrypted, ShouldQueue
         $queue = self::normalizeQueue($queue);
 
         DB::afterCommit(static function () use ($connection, $queue, $timeout): void {
-            if (! self::storedWorkflowTableExists()) {
-                return;
-            }
+            $generation = self::newGeneration();
 
-            if (Cache::has(self::CACHE_KEY)) {
-                return;
-            }
+            $watchdog = Cache::lock(self::CHAIN_LOCK_KEY, self::leaseDuration($timeout))
+                ->get(static function () use ($connection, $queue, $timeout, $generation): ?self {
+                    if (! self::storedWorkflowTableExists() || Cache::has(self::CACHE_KEY)) {
+                        return null;
+                    }
 
-            if (! Cache::add(self::LOOP_THROTTLE_KEY, true, 60)) {
-                return;
-            }
+                    if (! Cache::add(self::LOOP_THROTTLE_KEY, $generation, self::bootstrapWindow($timeout))) {
+                        return null;
+                    }
 
-            if (! self::hasRecoverablePendingWorkflows($timeout)) {
-                return;
-            }
+                    if (! self::hasRecoverablePendingWorkflows($timeout) || Cache::has(self::CACHE_KEY)) {
+                        return null;
+                    }
 
-            if (! Cache::add(self::CACHE_KEY, true, $timeout)) {
-                return;
-            }
+                    Cache::put(self::CACHE_KEY, $generation, self::leaseDuration($timeout));
 
-            $watchdog = (new self())
-                ->onConnection($connection);
+                    return self::make($generation, $connection, $queue);
+                });
 
-            if ($queue !== null) {
-                $watchdog->onQueue($queue);
-            }
-
-            try {
-                app(Dispatcher::class)->dispatch($watchdog);
-            } catch (\Throwable $exception) {
-                Cache::forget(self::CACHE_KEY);
-                Cache::forget(self::LOOP_THROTTLE_KEY);
-
-                throw $exception;
+            if ($watchdog instanceof self) {
+                self::dispatch($watchdog, $generation, $timeout);
             }
         });
     }
@@ -93,20 +93,112 @@ class Watchdog implements ShouldBeEncrypted, ShouldQueue
 
         $timeout = self::timeout();
 
-        Cache::put(self::CACHE_KEY, true, $timeout);
+        $nextWatchdog = Cache::lock(self::CHAIN_LOCK_KEY, self::leaseDuration($timeout))
+            ->block(self::bootstrapWindow($timeout), function () use ($timeout): ?self {
+                if (! $this->claim($timeout)) {
+                    return null;
+                }
 
-        $model = config('workflows.stored_workflow_model', StoredWorkflow::class);
+                $model = config('workflows.stored_workflow_model', StoredWorkflow::class);
 
-        $model::where('status', WorkflowPendingStatus::$name)
-            ->where('updated_at', '<=', Carbon::now()->subSeconds($timeout))
-            ->whereNotNull('arguments')
-            ->each(static function (StoredWorkflow $storedWorkflow) use ($timeout): void {
-                self::recover($storedWorkflow, $timeout);
+                $model::where('status', WorkflowPendingStatus::$name)
+                    ->where('updated_at', '<=', Carbon::now()->subSeconds($timeout))
+                    ->whereNotNull('arguments')
+                    ->each(static function (StoredWorkflow $storedWorkflow) use ($timeout): void {
+                        self::recover($storedWorkflow, $timeout);
+                    });
+
+                if ($this->job === null || $this->job instanceof SyncJob) {
+                    return null;
+                }
+
+                if ($this->generation === null || Cache::get(self::CACHE_KEY) !== $this->generation) {
+                    return null;
+                }
+
+                $nextGeneration = self::newGeneration();
+
+                Cache::put(self::CACHE_KEY, $nextGeneration, self::leaseDuration($timeout));
+                Cache::put(self::LOOP_THROTTLE_KEY, $nextGeneration, self::bootstrapWindow($timeout));
+
+                return self::make($nextGeneration, $this->connection, $this->queue)
+                    ->delay($timeout);
             });
 
-        if ($this->job !== null) {
-            $this->release($timeout);
+        if ($nextWatchdog instanceof self && $nextWatchdog->generation !== null) {
+            self::dispatch($nextWatchdog, $nextWatchdog->generation, $timeout);
         }
+    }
+
+    private function claim(int $timeout): bool
+    {
+        $generation = $this->generation;
+
+        if ($this->job !== null && $generation === null) {
+            return false;
+        }
+
+        if ($generation === null) {
+            $generation = self::newGeneration();
+            $this->generation = $generation;
+        }
+
+        $marker = Cache::get(self::CACHE_KEY);
+
+        if ($marker !== null && $marker !== $generation) {
+            return false;
+        }
+
+        Cache::put(self::CACHE_KEY, $generation, self::leaseDuration($timeout));
+
+        return true;
+    }
+
+    private static function dispatch(self $watchdog, string $generation, int $timeout): void
+    {
+        try {
+            app(Dispatcher::class)->dispatch($watchdog);
+        } catch (\Throwable $exception) {
+            self::releaseOwnership($generation, $timeout);
+
+            throw $exception;
+        }
+    }
+
+    private static function releaseOwnership(string $generation, int $timeout): void
+    {
+        Cache::lock(self::CHAIN_LOCK_KEY, self::leaseDuration($timeout))
+            ->block(self::leaseDuration($timeout) + 1, static function () use ($generation): void {
+                if (Cache::get(self::CACHE_KEY) !== $generation) {
+                    return;
+                }
+
+                Cache::forget(self::CACHE_KEY);
+
+                if (Cache::get(self::LOOP_THROTTLE_KEY) === $generation) {
+                    Cache::forget(self::LOOP_THROTTLE_KEY);
+                }
+            });
+    }
+
+    private static function make(string $generation, ?string $connection, ?string $queue): self
+    {
+        $watchdog = new self($generation);
+
+        if ($connection !== null) {
+            $watchdog->onConnection($connection);
+        }
+
+        if ($queue !== null) {
+            $watchdog->onQueue($queue);
+        }
+
+        return $watchdog;
+    }
+
+    private static function newGeneration(): string
+    {
+        return (string) Str::uuid();
     }
 
     private static function recover(StoredWorkflow $storedWorkflow, int $timeout): bool
@@ -157,6 +249,11 @@ class Watchdog implements ShouldBeEncrypted, ShouldQueue
     private static function bootstrapWindow(int $timeout): int
     {
         return max(1, min($timeout, 60));
+    }
+
+    private static function leaseDuration(int $timeout): int
+    {
+        return $timeout + self::bootstrapWindow($timeout);
     }
 
     private static function normalizeQueue(?string $queue): ?string

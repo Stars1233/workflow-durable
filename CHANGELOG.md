@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.39` keeps database-backed Watchdog chains on fresh
+  delayed jobs, preserving queue affinity without accumulating attempts. A
+  generation lease converges duplicate ticks and safely releases ownership
+  when successor dispatch fails.
 - Workflow `2.0.0-rc.38` publishes worker protocol 1.15 as the current
   conformance authority. The package contract and retained OpenAPI and AsyncAPI
   specs now define the version-gated message-stream completion fields together.
