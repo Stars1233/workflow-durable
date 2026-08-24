@@ -60,11 +60,19 @@ function validatePolicy(string $root, array $policy, array $composer, array $upg
     }
 
     $package = $policy['package'] ?? null;
+    $dependabot = $policy['dependabot'] ?? null;
     $majors = $policy['supported_majors'] ?? null;
     $acceptedAdvisories = $policy['accepted_advisories'] ?? null;
 
-    if (! is_string($package) || ! is_array($majors) || ! is_array($acceptedAdvisories)) {
+    if (! is_string($package) || ! is_array($dependabot) || ! is_array($majors) || ! is_array($acceptedAdvisories)) {
         fail('Laravel dependency security policy is missing required objects.');
+    }
+
+    if (($dependabot['dependency_alerts'] ?? null) !== 'enabled'
+        || ($dependabot['automated_security_fixes'] ?? null) !== 'disabled'
+        || ($dependabot['root_composer_updates'] ?? null) !== 'prohibited'
+    ) {
+        fail('The Dependabot repository posture must keep alerts enabled and prohibit root Composer updates.');
     }
 
     $constraints = [];
@@ -119,7 +127,7 @@ function validatePolicy(string $root, array $policy, array $composer, array $upg
     }
 
     validateAcceptedAdvisories($majors, $acceptedAdvisories);
-    validateDependabotConfiguration($root, $package);
+    validateDependabotConfiguration($root);
 }
 
 /**
@@ -188,31 +196,50 @@ function validateAcceptedAdvisories(array $majors, array $acceptedAdvisories): v
     }
 }
 
-function validateDependabotConfiguration(string $root, string $package): void
+function validateDependabotConfiguration(string $root): void
 {
-    $contents = file_get_contents($root . '/.github/dependabot.yml');
+    $path = $root . '/.github/dependabot.yml';
 
-    if (! is_string($contents)) {
-        fail('The Dependabot configuration is missing.');
+    if (! is_file($path)) {
+        return;
     }
 
-    $hasComposerBlock = preg_match(
+    $contents = file_get_contents($path);
+
+    if (! is_string($contents)) {
+        fail('The Dependabot configuration cannot be read.');
+    }
+
+    $matchCount = preg_match_all(
         '/^\s*-\s+package-ecosystem:\s*["\']?composer["\']?\s*$(.*?)(?=^\s*-\s+package-ecosystem:|\z)/ms',
         $contents,
         $matches,
-    ) === 1;
-    $composerBlock = $hasComposerBlock ? $matches[0] : '';
-    $hasComposerRoot = preg_match('/^\s+directory:\s*["\']?\/["\']?\s*$/m', $composerBlock) === 1;
-    $disablesVersionUpdates = preg_match('/^\s+open-pull-requests-limit:\s*0\s*$/m', $composerBlock) === 1;
-    $hasPackageIgnore = preg_match(
-        '/ignore:[\s\S]*dependency-name:\s*["\']?' . preg_quote($package, '/') . '["\']?/',
-        $composerBlock,
-    ) === 1;
-    $hasTargetBranch = preg_match('/^\s+target-branch:/m', $composerBlock) === 1;
+    );
 
-    if (! $hasComposerRoot || ! $disablesVersionUpdates || ! $hasPackageIgnore || $hasTargetBranch) {
-        fail('Dependabot must delegate the unlocked root Laravel range to the per-major security audit.');
+    if ($matchCount === false) {
+        fail('The Dependabot configuration cannot be inspected.');
     }
+
+    foreach ($matches[0] as $composerBlock) {
+        if (composerBlockTargetsRoot($composerBlock)) {
+            fail(
+                'Dependabot root Composer updates are unsupported for this unlocked library; use the per-major security audit.'
+            );
+        }
+    }
+}
+
+function composerBlockTargetsRoot(string $block): bool
+{
+    if (preg_match('/^\s+directory:\s*["\']?\/["\']?\s*$/m', $block) === 1) {
+        return true;
+    }
+
+    if (preg_match('/^\s+directories:\s*\[[^\]]*["\']?\/["\']?[^\]]*\]\s*$/m', $block) === 1) {
+        return true;
+    }
+
+    return preg_match('/^\s+directories:\s*$\R(?:(?!^\s+\w[\w-]*:).*$\R)*^\s+-\s*["\']?\/["\']?\s*$/m', $block) === 1;
 }
 
 /**

@@ -48,24 +48,37 @@ final class LaravelDependencySecurityPolicyTest extends TestCase
         );
     }
 
-    public function testDependabotDelegatesLaravelToThePerMajorMonitor(): void
+    public function testRootComposerDependabotUpdatesCannotBeConfigured(): void
     {
         $root = dirname(__DIR__, 3);
-        $dependabot = Yaml::parseFile($root . '/.github/dependabot.yml');
-        $composerUpdate = $dependabot['updates'][0];
+        $dependabotPath = $root . '/.github/dependabot.yml';
 
-        $this->assertSame('composer', $composerUpdate['package-ecosystem']);
-        $this->assertSame('/', $composerUpdate['directory']);
-        $this->assertArrayNotHasKey('target-branch', $composerUpdate);
-        $this->assertSame(0, $composerUpdate['open-pull-requests-limit']);
-        $this->assertContains([
-            'dependency-name' => 'laravel/framework',
-        ], $composerUpdate['ignore'],);
+        if (is_file($dependabotPath)) {
+            $dependabot = Yaml::parseFile($dependabotPath);
+
+            foreach ($dependabot['updates'] ?? [] as $update) {
+                if (($update['package-ecosystem'] ?? null) !== 'composer') {
+                    continue;
+                }
+
+                $directories = isset($update['directories'])
+                    ? $update['directories']
+                    : [$update['directory'] ?? null];
+
+                $this->assertNotContains(
+                    '/',
+                    $directories,
+                    'Dependabot cannot update the unlocked root Composer library.',
+                );
+            }
+        }
 
         $workflow = Yaml::parseFile($root . '/.github/workflows/dependency-security.yml');
         $steps = $workflow['jobs']['laravel-supported-majors']['steps'];
         $commands = array_column($steps, 'run');
 
+        $this->assertContains('.github/dependabot.yml', $workflow['on']['push']['paths']);
+        $this->assertContains('.github/dependabot.yml', $workflow['on']['pull_request']['paths']);
         $this->assertContains('php scripts/ci/check-laravel-dependency-security.php --policy-only', $commands);
         $this->assertContains('php scripts/ci/check-laravel-dependency-security.php', $commands);
     }

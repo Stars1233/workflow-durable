@@ -4,8 +4,10 @@
   "package": "laravel/framework",
   "root_lockfile": "prohibited_for_library",
   "dependabot": {
-    "handling": "ignored_in_root_composer_updates",
-    "reason": "The host application owns the installed Laravel version and lockfile; the per-major Composer audit is the security authority for this library constraint."
+    "dependency_alerts": "enabled",
+    "automated_security_fixes": "disabled",
+    "root_composer_updates": "prohibited",
+    "reason": "The host application owns the installed Laravel version and lockfile; GitHub dependency alerts remain visible while the per-major Composer audit owns resolution and accepted-risk tracking for this library constraint."
   },
   "supported_majors": {
     "9": {

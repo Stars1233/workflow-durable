@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.41` removes the unsupported root Composer Dependabot
+  update path for this lockfile-free library. GitHub dependency alerts remain
+  enabled, automated security-fix pull requests remain disabled, and the
+  scheduled per-major Composer audit continues to reconcile Laravel 9-13 with
+  the accepted-risk policy.
 - Workflow `2.0.0-rc.40` raises the embedded runtime's Laravel minimums to 9.52.17, 10.48.29,
   11.44.1, 12.61.1, and 13.12.0 so every supported major receives all
   available upstream fixes. Laravel 9-11 remain available for embedded upgrade
