@@ -127,6 +127,7 @@ jobs:
           scripts/ci/check-platform-conformance-mirror.sh
         php -l scripts/ci/classify-target-qualification.php
         php -l scripts/ci/compare-platform-conformance-mirrors.php
+        php -l scripts/ci/check-laravel-dependency-security.php
         php -l scripts/ci/laravel-embedded-upgrade-matrix.php
         python - <<'PY'
         import ast
@@ -135,6 +136,9 @@ jobs:
         for path in Path("scripts/ci").glob("*.py"):
             ast.parse(path.read_text(), filename=str(path))
         PY
+
+    - name: Validate Laravel dependency security policy
+      run: php scripts/ci/check-laravel-dependency-security.php --policy-only
 
     - name: Verify release recovery source contracts
       env:

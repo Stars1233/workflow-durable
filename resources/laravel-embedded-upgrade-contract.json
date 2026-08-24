@@ -27,7 +27,7 @@
       },
       "embedded_v2": {
         "php": "^8.1",
-        "laravel": "^9.0|^10.0|^11.0|^12.0|^13.0"
+        "laravel": "^9.52.17|^10.48.29|^11.44.1|^12.61.1|^13.12.0"
       },
       "qualified_php_minors": ["8.1", "8.2", "8.3", "8.4"],
       "laravel_minimum_php": {
@@ -133,6 +133,7 @@
   },
   "qualification": {
     "source_script": "scripts/ci/laravel-embedded-upgrade-smoke.sh",
+    "dependency_security_policy": "resources/laravel-dependency-security-policy.json",
     "published_artifacts_required": true,
     "clean_application_required": true,
     "application_bootstrap_patch_allowed": false,

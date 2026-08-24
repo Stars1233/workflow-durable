@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.40` raises the embedded runtime's Laravel minimums to 9.52.17, 10.48.29,
+  11.44.1, 12.61.1, and 13.12.0 so every supported major receives all
+  available upstream fixes. Laravel 9-11 remain available for embedded upgrade
+  and drain paths, but upstream has not patched their remaining active
+  advisories; applications on those lines should move to Laravel 12.61.1 or
+  Laravel 13.12.0 and newer. A scheduled per-major Composer audit now owns this
+  library dependency instead of Dependabot trying to infer one installed
+  version from the package's intentionally unlocked multi-major constraint.
 - Workflow `2.0.0-rc.39` keeps database-backed Watchdog chains on fresh
   delayed jobs, preserving queue affinity without accumulating attempts. A
   generation lease converges duplicate ticks and safely releases ownership
