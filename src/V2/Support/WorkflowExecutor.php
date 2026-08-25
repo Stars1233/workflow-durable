@@ -609,6 +609,12 @@ final class WorkflowExecutor
                 try {
                     if ($upsertEvent === null) {
                         $upsertEvent = $this->recordSearchAttributesUpserted($run, $task, $sequence, $current);
+                    } else {
+                        SearchAttributeReplayIdentity::assertCompatible(
+                            $sequence,
+                            $upsertEvent->payload,
+                            $current,
+                        );
                     }
 
                     $this->syncWorkflowCursor($workflow, $sequence + 1);
@@ -4295,6 +4301,7 @@ final class WorkflowExecutor
         StructuralLimits::guardSearchAttributeSize($serializedSearchAttributes);
 
         $searchAttributeService = app(SearchAttributeUpsertService::class);
+        $attributeTypes = SearchAttributeUpsertService::canonicalTypes($call);
         $searchAttributeService->upsert($run, $call, $sequence);
         $run->unsetRelation('searchAttributes');
 
@@ -4304,6 +4311,7 @@ final class WorkflowExecutor
             [
                 'sequence' => $sequence,
                 'attributes' => $call->attributes,
+                'attribute_types' => $attributeTypes,
                 'merged' => $merged,
             ],
             $task,

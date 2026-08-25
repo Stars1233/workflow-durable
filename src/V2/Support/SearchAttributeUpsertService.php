@@ -116,6 +116,22 @@ final class SearchAttributeUpsertService
         UpsertSearchAttributesCall $call,
         array $attributeTypes,
     ): void {
+        foreach ($attributeTypes as $key => $type) {
+            if (! is_string($key) || ! array_key_exists($key, $call->attributes)) {
+                throw new \InvalidArgumentException(
+                    'Declared search attribute types must name keys present in the attribute update.',
+                );
+            }
+
+            if (! is_string($type) || ! in_array($type, WorkflowSearchAttribute::VALID_TYPES, true)) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Search attribute [%s] declares unsupported type [%s].',
+                    $key,
+                    is_scalar($type) ? (string) $type : get_debug_type($type),
+                ));
+            }
+        }
+
         foreach ($call->attributes as $key => $value) {
             if ($value === null) {
                 continue;
@@ -138,6 +154,35 @@ final class SearchAttributeUpsertService
                 ), previous: $e);
             }
         }
+    }
+
+    /**
+     * Resolve the canonical storage identity written alongside a new history event.
+     *
+     * @param array<string, string> $attributeTypes
+     * @return array<string, string>
+     */
+    public static function canonicalTypes(UpsertSearchAttributesCall $call, array $attributeTypes = []): array
+    {
+        self::assertDeclaredTypesCompatible($call, $attributeTypes);
+
+        $canonical = [];
+
+        foreach ($call->attributes as $key => $value) {
+            if (array_key_exists($key, $attributeTypes)) {
+                $canonical[$key] = $attributeTypes[$key];
+
+                continue;
+            }
+
+            if ($value !== null) {
+                $canonical[$key] = WorkflowSearchAttribute::inferType($value);
+            }
+        }
+
+        ksort($canonical);
+
+        return $canonical;
     }
 
     /**

@@ -321,6 +321,12 @@ final class QueryStateReplayer
                     return new ReplayState($workflow, $sequence, $current);
                 }
 
+                SearchAttributeReplayIdentity::assertCompatible(
+                    $historySequence,
+                    $upsertEvent->payload,
+                    $current,
+                );
+
                 $this->syncWorkflowCursor($workflow, $sequence + 1);
                 $current = $workflowExecution->send(null, $upsertEvent->recorded_at);
 

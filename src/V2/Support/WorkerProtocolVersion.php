@@ -30,7 +30,7 @@ final class WorkerProtocolVersion
      * pagination semantics). Bump the minor for additive changes (new
      * optional fields, new non-terminal command types).
      */
-    public const VERSION = '1.15';
+    public const VERSION = '1.16';
 
     /**
      * Worker registration capability for server-routed workflow query
@@ -52,6 +52,12 @@ final class WorkerProtocolVersion
      * rejected before execution when this capability is unavailable.
      */
     public const CAPABILITY_MEMO_UPSERTS = 'memo_upserts';
+
+    /**
+     * Worker registration capability for canonical typed search-attribute
+     * command identity and replay metadata.
+     */
+    public const CAPABILITY_TYPED_SEARCH_ATTRIBUTES = 'typed_search_attributes';
 
     /**
      * Stable fail-closed reason a worker or server must return when it
@@ -126,6 +132,8 @@ final class WorkerProtocolVersion
     private const QUERY_TASKS_MINIMUM_PROTOCOL_VERSION = '1.8';
 
     private const UPSERT_SEARCH_ATTRIBUTES_MINIMUM_PROTOCOL_VERSION = '1.8';
+
+    private const TYPED_SEARCH_ATTRIBUTES_MINIMUM_PROTOCOL_VERSION = '1.16';
 
     private const UPSERT_MEMO_MINIMUM_PROTOCOL_VERSION = '1.14';
 
@@ -217,12 +225,21 @@ final class WorkerProtocolVersion
             $capabilities[] = self::CAPABILITY_MESSAGE_STREAMS;
         }
 
+        if (self::supportsTypedSearchAttributes($protocolVersion)) {
+            $capabilities[] = self::CAPABILITY_TYPED_SEARCH_ATTRIBUTES;
+        }
+
         return $capabilities;
     }
 
     public static function supportsMessageStreams(string $protocolVersion): bool
     {
         return self::supportsFeatureVersion($protocolVersion, self::MESSAGE_STREAMS_MINIMUM_PROTOCOL_VERSION);
+    }
+
+    public static function supportsTypedSearchAttributes(string $protocolVersion): bool
+    {
+        return self::supportsFeatureVersion($protocolVersion, self::TYPED_SEARCH_ATTRIBUTES_MINIMUM_PROTOCOL_VERSION);
     }
 
     /**
@@ -505,9 +522,15 @@ final class WorkerProtocolVersion
             'attribute_types' => [
                 'shape' => 'map<string, search_attribute_type>',
                 'required' => false,
+                'minimum_protocol_version' => self::TYPED_SEARCH_ATTRIBUTES_MINIMUM_PROTOCOL_VERSION,
                 'valid_values' => WorkflowSearchAttribute::VALID_TYPES,
-                'invalid_values' => 'ignored',
-                'omitted_values' => 'infer_from_attribute_value',
+                'invalid_values' => 'reject_command',
+                'omitted_values' => 'infer from the attribute value; absence in old history is unknown identity, not a typed match',
+            ],
+            'history' => [
+                'event_type' => 'SearchAttributesUpserted',
+                'replay_identity' => ['sequence', 'attributes', 'attribute_types'],
+                'legacy_missing_attribute_types' => 'compare values only and preserve unknown typed identity',
             ],
         ];
     }

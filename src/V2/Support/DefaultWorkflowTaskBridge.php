@@ -3127,6 +3127,12 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         $merged = $existing;
         $attributeTypes = self::normalizeSearchAttributeTypes($command['attribute_types'] ?? null);
 
+        if ($attributeTypes === null) {
+            throw new InvalidArgumentException('Search attribute type declarations are malformed.');
+        }
+
+        $canonicalTypes = SearchAttributeUpsertService::canonicalTypes($call, $attributeTypes);
+
         foreach ($call->attributes as $key => $value) {
             if ($value === null) {
                 unset($merged[$key]);
@@ -3144,6 +3150,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         WorkflowHistoryEvent::record($run, HistoryEventType::SearchAttributesUpserted, [
             'sequence' => $sequence,
             'attributes' => $call->attributes,
+            'attribute_types' => $canonicalTypes,
             'merged' => $merged,
         ], $task);
 
@@ -4830,6 +4837,10 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
 
         $attributeTypes = self::normalizeSearchAttributeTypes($command['attribute_types'] ?? null);
 
+        if ($attributeTypes === null) {
+            return null;
+        }
+
         try {
             SearchAttributeUpsertService::assertDeclaredTypesCompatible($call, $attributeTypes);
         } catch (InvalidArgumentException) {
@@ -4878,21 +4889,25 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
     /**
      * @return array<string, string>
      */
-    private static function normalizeSearchAttributeTypes(mixed $types): array
+    private static function normalizeSearchAttributeTypes(mixed $types): ?array
     {
-        if (! is_array($types)) {
+        if ($types === null) {
             return [];
+        }
+
+        if (! is_array($types)) {
+            return null;
         }
 
         $normalized = [];
 
         foreach ($types as $key => $type) {
-            if (! is_string($key) || ! is_string($type)) {
-                continue;
-            }
-
-            if (! in_array($type, WorkflowSearchAttribute::VALID_TYPES, true)) {
-                continue;
+            if (
+                ! is_string($key)
+                || ! is_string($type)
+                || ! in_array($type, WorkflowSearchAttribute::VALID_TYPES, true)
+            ) {
+                return null;
             }
 
             $normalized[$key] = $type;

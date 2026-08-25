@@ -28,6 +28,7 @@ CODEC_SCHEMA = "durable-workflow.codec-regression/v1"
 REPLAY_SCHEMA = "durable-workflow.replay-regression/v1"
 GOLDEN_HISTORY_SCHEMA = "durable-workflow.golden-history.v1"
 MALFORMED_SERVICE_RESPONSE_ENVELOPE = "malformed_service_response_envelope"
+SEARCH_ATTRIBUTE_TYPE_IDENTITY_MISMATCH = "search_attribute_type_identity_mismatch"
 UNSUPPORTED_PAYLOAD_CODEC = "unsupported_payload_codec"
 PHP_GOLDEN_REPLAY_WORKFLOW = "Tests\\Fixtures\\V2\\TestGoldenReplayWorkflow"
 PHP_REPLAY_CONSUMERS = {
@@ -226,7 +227,7 @@ REPLAY_EVENT_PAYLOAD_FIELDS = {
     "ServiceCallCancelled": set(),
     "SideEffectRecorded": {"payload_codec", "result"},
     "VersionMarkerRecorded": {"change_id", "version"},
-    "SearchAttributesUpserted": set(),
+    "SearchAttributesUpserted": {"attributes", "attribute_types"},
     "UpdateAccepted": {
         "arguments",
         "payload_codec",
@@ -1233,6 +1234,7 @@ def _replay_expected_failure(value: Any, context: str) -> Mapping[str, str]:
     failure_type = _string(expected["type"], f"{context}.type")
     if failure_type not in {
         MALFORMED_SERVICE_RESPONSE_ENVELOPE,
+        SEARCH_ATTRIBUTE_TYPE_IDENTITY_MISMATCH,
         UNSUPPORTED_PAYLOAD_CODEC,
     }:
         raise CorpusError(f"{context}.type is unsupported")
@@ -1384,9 +1386,14 @@ def _replay_fixture(
             )
         expected = {"failure": {"type": UNSUPPORTED_PAYLOAD_CODEC}}
     elif expected_failure is not None:
-        if observed_failures != [expected_failure["type"]]:
+        parser_failure = expected_failure["type"] == MALFORMED_SERVICE_RESPONSE_ENVELOPE
+        if parser_failure and observed_failures != [expected_failure["type"]]:
             raise CorpusError(
                 f"{path}.expected_failure must match exactly one fail-closed payload"
+            )
+        if not parser_failure and observed_failures:
+            raise CorpusError(
+                f"{path}.expected_failure unexpectedly failed while decoding replay payloads"
             )
         expected: Mapping[str, Any] = {"failure": expected_failure}
     else:

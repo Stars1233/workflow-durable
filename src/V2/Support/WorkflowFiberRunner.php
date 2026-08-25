@@ -122,7 +122,7 @@ final class WorkflowFiberRunner
     private array $recordedMemoUpserts = [];
 
     /**
-     * @var array<int, array{recorded_at: CarbonInterface|null}>
+     * @var array<int, array{payload: array<string, mixed>, recorded_at: CarbonInterface|null}>
      */
     private array $recordedSearchAttributeUpserts = [];
 
@@ -369,6 +369,12 @@ final class WorkflowFiberRunner
                     : ($this->recordedSearchAttributeUpserts[$historySequence] ?? null);
 
                 if ($recorded !== null) {
+                    SearchAttributeReplayIdentity::assertCompatible(
+                        $historySequence,
+                        $recorded['payload'],
+                        $current,
+                    );
+
                     ++$this->sequence;
                     $this->execution->send(null, $recorded['recorded_at']);
 
@@ -1694,7 +1700,7 @@ final class WorkflowFiberRunner
 
     /**
      * @param list<array<string, mixed>> $historyEvents
-     * @return array<int, array{recorded_at: CarbonInterface|null}>
+     * @return array<int, array{payload: array<string, mixed>, recorded_at: CarbonInterface|null}>
      */
     private static function indexRecordedSearchAttributeUpserts(array $historyEvents): array
     {
@@ -1713,6 +1719,7 @@ final class WorkflowFiberRunner
             }
 
             $upserts[$sequence] = [
+                'payload' => $payload,
                 'recorded_at' => self::eventRecordedAt($event, $payload),
             ];
         }

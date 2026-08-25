@@ -160,6 +160,7 @@ final class WorkflowStep
             $yielded instanceof UpsertSearchAttributesCall => [
                 'type' => 'upsert_search_attributes',
                 'attributes' => $yielded->attributes,
+                'attribute_types' => SearchAttributeUpsertService::canonicalTypes($yielded),
             ],
             $yielded instanceof ContinueAsNewCall => [
                 'type' => 'continue_as_new',

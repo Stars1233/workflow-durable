@@ -14,6 +14,7 @@ use Workflow\V2\Contracts\WorkflowTaskBridge;
 use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Enums\TaskStatus;
 use Workflow\V2\Enums\TaskType;
+use Workflow\V2\Exceptions\HistoryEventShapeMismatchException;
 use Workflow\V2\Jobs\RunWorkflowTask;
 use Workflow\V2\Models\ActivityAttempt;
 use Workflow\V2\Models\ActivityExecution;
@@ -97,8 +98,21 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
                     ->latest('created_at')
                     ->first();
 
+                $blockedTask = WorkflowTask::query()
+                    ->where('workflow_run_id', $run->id)
+                    ->where('status', TaskStatus::Failed->value)
+                    ->latest('created_at')
+                    ->first();
+                $blockedPayload = is_array($blockedTask?->payload) ? $blockedTask->payload : [];
+                $expectedReplayBlock = $fixture['expected_failure']['exception']
+                    === HistoryEventShapeMismatchException::class
+                    && ($blockedPayload['replay_blocked'] ?? false) === true
+                    && ($blockedPayload['replay_blocked_reason'] ?? null) === 'history_shape_mismatch';
+
                 if ($failure === null) {
-                    $mismatches[] = "{$fixture['id']} was accepted by WorkflowExecutor instead of failing closed.";
+                    if (! $expectedReplayBlock) {
+                        $mismatches[] = "{$fixture['id']} was accepted by WorkflowExecutor instead of failing closed.";
+                    }
                 } elseif ($failure->exception_class !== $fixture['expected_failure']['exception']) {
                     $mismatches[] = "{$fixture['id']} produced the wrong WorkflowExecutor failure "
                         . "[{$failure->exception_class}].";

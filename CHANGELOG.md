@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.43` preserves canonical search-attribute type identity
+  through worker completion, full and paginated history, database restart, and
+  replay. Worker protocol 1.16 gates declared type metadata so older Server
+  nodes reject it instead of silently inferring a different type, while legacy
+  events without metadata retain an explicit unknown-type compatibility rule.
+  Platform conformance suite 44 publishes the versioned 1.16 OpenAPI and
+  AsyncAPI authorities and retains the prior 1.15 bytes.
 - Workflow `2.0.0-rc.42` makes non-indexed memo updates portable across
   service-mode workers. PHP workflow authoring emits the language-neutral
   Avro payload-envelope command and consumes only entry-matching memo history

@@ -18,6 +18,12 @@ final class WorkerProtocolArtifactBindings
     private const RETAINED_STREAM_PROTOCOL_113_PATH =
         'resources/conformance/suite-v41/platform-protocol-specs/worker-protocol-stream.asyncapi.yaml';
 
+    private const RETAINED_API_PROTOCOL_115_PATH =
+        'resources/conformance/suite-v43/platform-protocol-specs/worker-protocol-api.openapi.yaml';
+
+    private const RETAINED_STREAM_PROTOCOL_115_PATH =
+        'resources/conformance/suite-v43/platform-protocol-specs/worker-protocol-stream.asyncapi.yaml';
+
     /**
      * @param  array<string, mixed>  $manifest
      */
@@ -29,7 +35,8 @@ final class WorkerProtocolArtifactBindings
         $historicalProtocol113Base = 'https://raw.githubusercontent.com/durable-workflow/'
             . 'durable-workflow.github.io/' . PlatformConformanceSuite::PROTOCOL_SOURCE_REVISION
             . '/static/platform-protocol-specs/';
-        $currentBase = 'https://durable-workflow.github.io/platform-protocol-specs/v1.15/';
+        $protocol115Base = 'https://durable-workflow.github.io/platform-protocol-specs/v1.15/';
+        $currentBase = 'https://durable-workflow.github.io/platform-protocol-specs/v1.16/';
 
         $expectedApi = [
             'history_mode' => 'immutable_lifecycle_bindings',
@@ -51,12 +58,20 @@ final class WorkerProtocolArtifactBindings
                     'sha256' => 'sha256:55dfede6a9742f955911786eeb588ceecaa4266cebad57b92684c2a1bacefe7b',
                 ],
                 [
+                    'suite_version' => 43,
+                    'status' => 'historical',
+                    'lifecycle' => 'lifecycle_neutral',
+                    'artifact_id' => 'durable-workflow.v2.worker-protocol-api@catalog-16-protocol-1.15-history',
+                    'resolver_url' => $protocol115Base . 'worker-protocol-api.openapi.yaml',
+                    'sha256' => 'sha256:d21a59e98ef46419b0792e716bd359c424a5759140474b838b1398083a291df6',
+                ],
+                [
                     'suite_version' => PlatformConformanceSuite::VERSION,
                     'status' => 'current',
                     'lifecycle' => 'lifecycle_neutral',
                     'artifact_id' => 'durable-workflow.v2.worker-protocol-api@catalog-16',
                     'resolver_url' => $currentBase . 'worker-protocol-api.openapi.yaml',
-                    'sha256' => 'sha256:d21a59e98ef46419b0792e716bd359c424a5759140474b838b1398083a291df6',
+                    'sha256' => 'sha256:2dd330d52b8a36d1de0f364fc5f81311e2146f11ba1f77237e9c948e988c6817',
                 ],
             ],
         ];
@@ -72,12 +87,20 @@ final class WorkerProtocolArtifactBindings
                     'sha256' => 'sha256:15bddb75d0e7183a520e861f87d5315b65e42acdc57a8137f947e00cacbac251',
                 ],
                 [
+                    'suite_version' => 43,
+                    'status' => 'historical',
+                    'lifecycle' => 'lifecycle_neutral',
+                    'artifact_id' => 'durable-workflow.v2.worker-protocol-stream@catalog-16-protocol-1.15-history',
+                    'resolver_url' => $protocol115Base . 'worker-protocol-stream.asyncapi.yaml',
+                    'sha256' => 'sha256:388fd30483c0bb52c6b39cee219be3c9fc933ff815ccf4a06f9063c85902b458',
+                ],
+                [
                     'suite_version' => PlatformConformanceSuite::VERSION,
                     'status' => 'current',
                     'lifecycle' => 'lifecycle_neutral',
                     'artifact_id' => 'durable-workflow.v2.worker-protocol-stream@catalog-16',
                     'resolver_url' => $currentBase . 'worker-protocol-stream.asyncapi.yaml',
-                    'sha256' => 'sha256:388fd30483c0bb52c6b39cee219be3c9fc933ff815ccf4a06f9063c85902b458',
+                    'sha256' => 'sha256:05c966ba9e328a8d73e769f1303bd1d456be363e6dbb22cfa592c5177c47b5d0',
                 ],
             ],
         ];
@@ -87,7 +110,7 @@ final class WorkerProtocolArtifactBindings
             || ($manifest['artifact_version_history']['worker_protocol_stream'] ?? null) !== $expectedStream
         ) {
             throw new RuntimeException(
-                'Worker protocol artifact history must retain prior bytes and identify the current 1.15 authority.'
+                'Worker protocol artifact history must retain prior bytes and identify the current 1.16 authority.'
             );
         }
 
@@ -97,10 +120,15 @@ final class WorkerProtocolArtifactBindings
             self::RETAINED_STREAM_PROTOCOL_113_PATH,
             $expectedStream['bindings'][0]['sha256'],
         );
+        self::assertRetainedBinding(self::RETAINED_API_PROTOCOL_115_PATH, $expectedApi['bindings'][2]['sha256']);
+        self::assertRetainedBinding(
+            self::RETAINED_STREAM_PROTOCOL_115_PATH,
+            $expectedStream['bindings'][1]['sha256'],
+        );
 
         $activeSources = $manifest['fixture_catalog']['worker_task_lifecycle']['sources'] ?? [];
-        self::assertActiveBinding($activeSources, $expectedApi['bindings'][2]);
-        self::assertActiveBinding($activeSources, $expectedStream['bindings'][1]);
+        self::assertActiveBinding($activeSources, $expectedApi['bindings'][3]);
+        self::assertActiveBinding($activeSources, $expectedStream['bindings'][2]);
     }
 
     private static function assertRetainedBinding(string $path, string $expectedDigest): void

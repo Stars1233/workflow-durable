@@ -1456,6 +1456,10 @@ final class WorkflowFiberRunnerTest extends TestCase
                 'phase' => 'worker-protocol',
                 'priority' => 3,
             ],
+            'attribute_types' => [
+                'phase' => 'keyword',
+                'priority' => 'int',
+            ],
         ], $scheduled->commands[0]);
         $this->assertNull(Serializer::unserializeWithCodec('avro', $scheduled->commands[1]['result']));
     }
@@ -1470,6 +1474,9 @@ final class WorkflowFiberRunnerTest extends TestCase
             'type' => 'upsert_search_attributes',
             'attributes' => [
                 'phase' => 'before-activity',
+            ],
+            'attribute_types' => [
+                'phase' => 'keyword',
             ],
         ], $scheduled->commands[0]);
         $this->assertSame('schedule_activity', $scheduled->commands[1]['type']);

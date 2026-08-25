@@ -158,7 +158,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $authority = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
 
         $this->assertSame($authority, PlatformConformanceSuite::manifest());
-        $this->assertSame(43, $authority['version']);
+        $this->assertSame(44, $authority['version']);
         $this->assertSame(PlatformConformanceSuite::VERSION, $authority['version']);
         $this->assertSame(PlatformConformanceSuite::SCHEMA, $authority['schema']);
         $this->assertSame(SurfaceStabilityContract::SCHEMA, $authority['surface_stability_authority']);
@@ -241,10 +241,10 @@ final class PlatformConformanceSuiteTest extends TestCase
                     );
                 } elseif (str_starts_with(
                     $source['resolver_url'],
-                    'https://durable-workflow.github.io/platform-protocol-specs/v1.15/',
+                    'https://durable-workflow.github.io/platform-protocol-specs/v1.16/',
                 )) {
                     $this->assertMatchesRegularExpression(
-                        '#^https://durable-workflow\.github\.io/platform-protocol-specs/v1\.15/'
+                        '#^https://durable-workflow\.github\.io/platform-protocol-specs/v1\.16/'
                             . 'worker-protocol-(?:api\.openapi|stream\.asyncapi)\.yaml$#',
                         $source['resolver_url'],
                     );
@@ -265,9 +265,11 @@ final class PlatformConformanceSuiteTest extends TestCase
         $streamHistory = $manifest['artifact_version_history']['worker_protocol_stream'];
         $beta = $apiHistory['bindings'][0];
         $protocol113Api = $apiHistory['bindings'][1];
-        $currentApi = $apiHistory['bindings'][2];
+        $protocol115Api = $apiHistory['bindings'][2];
+        $currentApi = $apiHistory['bindings'][3];
         $protocol113Stream = $streamHistory['bindings'][0];
-        $currentStream = $streamHistory['bindings'][1];
+        $protocol115Stream = $streamHistory['bindings'][1];
+        $currentStream = $streamHistory['bindings'][2];
         $activeSources = $manifest['fixture_catalog']['worker_task_lifecycle']['sources'];
 
         $this->assertSame('immutable_lifecycle_bindings', $apiHistory['history_mode']);
@@ -276,6 +278,8 @@ final class PlatformConformanceSuiteTest extends TestCase
         $this->assertSame('durable-workflow.v2.worker-protocol-api@catalog-16-beta-history', $beta['artifact_id']);
         $this->assertSame('historical', $protocol113Api['status']);
         $this->assertSame('historical', $protocol113Stream['status']);
+        $this->assertSame('historical', $protocol115Api['status']);
+        $this->assertSame('historical', $protocol115Stream['status']);
         $this->assertSame('current', $currentApi['status']);
         $this->assertSame('current', $currentStream['status']);
         $this->assertSame('lifecycle_neutral', $currentApi['lifecycle']);
@@ -312,17 +316,31 @@ final class PlatformConformanceSuiteTest extends TestCase
             ),
         );
         $this->assertSame(
+            $protocol115Api['sha256'],
+            'sha256:' . hash_file(
+                'sha256',
+                $root . '/resources/conformance/suite-v43/platform-protocol-specs/worker-protocol-api.openapi.yaml',
+            ),
+        );
+        $this->assertSame(
+            $protocol115Stream['sha256'],
+            'sha256:' . hash_file(
+                'sha256',
+                $root . '/resources/conformance/suite-v43/platform-protocol-specs/worker-protocol-stream.asyncapi.yaml',
+            ),
+        );
+        $this->assertSame(
             $currentApi['sha256'],
             'sha256:' . hash_file(
                 'sha256',
-                $root . '/resources/conformance/suite-v42/platform-protocol-specs/worker-protocol-api.openapi.yaml',
+                $root . '/resources/conformance/suite-v44/platform-protocol-specs/worker-protocol-api.openapi.yaml',
             ),
         );
         $this->assertSame(
             $currentStream['sha256'],
             'sha256:' . hash_file(
                 'sha256',
-                $root . '/resources/conformance/suite-v42/platform-protocol-specs/worker-protocol-stream.asyncapi.yaml',
+                $root . '/resources/conformance/suite-v44/platform-protocol-specs/worker-protocol-stream.asyncapi.yaml',
             ),
         );
     }

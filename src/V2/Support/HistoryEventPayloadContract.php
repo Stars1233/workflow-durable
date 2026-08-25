@@ -661,7 +661,7 @@ final class HistoryEventPayloadContract
             'code',
             'exception',
         ],
-        'SearchAttributesUpserted' => ['sequence', 'attributes', 'merged'],
+        'SearchAttributesUpserted' => ['sequence', 'attributes', 'attribute_types', 'merged'],
         'MemoUpserted' => ['sequence', 'entries', 'merged'],
         'RepairRequested' => [
             'workflow_command_id',

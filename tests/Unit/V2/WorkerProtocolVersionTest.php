@@ -19,7 +19,7 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
 
     public function testVersionTracksServiceOperationCommandShape(): void
     {
-        $this->assertSame('1.15', WorkerProtocolVersion::VERSION);
+        $this->assertSame('1.16', WorkerProtocolVersion::VERSION);
         $this->assertContains('start_service_operation', WorkerProtocolVersion::nonTerminalCommandTypes());
         $this->assertSame(0, WorkerProtocolVersion::longPollSemantics()['min_timeout_seconds']);
     }
@@ -71,7 +71,7 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
     public function testWorkerCapabilitiesRespectTheirProtocolFloors(): void
     {
         $this->assertSame(
-            ['query_tasks', 'memo_upserts', 'message_streams'],
+            ['query_tasks', 'memo_upserts', 'message_streams', 'typed_search_attributes'],
             WorkerProtocolVersion::workerCapabilities(),
         );
         $this->assertSame([], WorkerProtocolVersion::workerCapabilitiesForVersion('1.7'));
@@ -82,6 +82,10 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
         $this->assertSame(
             ['query_tasks', 'memo_upserts', 'message_streams'],
             WorkerProtocolVersion::workerCapabilitiesForVersion('1.15'),
+        );
+        $this->assertSame(
+            ['query_tasks', 'memo_upserts', 'message_streams', 'typed_search_attributes'],
+            WorkerProtocolVersion::workerCapabilitiesForVersion('1.16'),
         );
     }
 
@@ -171,8 +175,10 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
         );
         $this->assertSame('map<string, search_attribute_type>', $shape['attribute_types']['shape']);
         $this->assertFalse($shape['attribute_types']['required']);
+        $this->assertSame('1.16', $shape['attribute_types']['minimum_protocol_version']);
         $this->assertSame(WorkflowSearchAttribute::VALID_TYPES, $shape['attribute_types']['valid_values']);
-        $this->assertSame('infer_from_attribute_value', $shape['attribute_types']['omitted_values']);
+        $this->assertSame('reject_command', $shape['attribute_types']['invalid_values']);
+        $this->assertSame(['sequence', 'attributes', 'attribute_types'], $shape['history']['replay_identity']);
     }
 
     public function testDescribeIncludesPortableMemoCommandAndHistorySemantics(): void

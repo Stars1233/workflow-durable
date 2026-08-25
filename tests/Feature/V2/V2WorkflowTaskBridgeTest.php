@@ -4893,6 +4893,9 @@ final class V2WorkflowTaskBridgeTest extends TestCase
                     'env' => 'staging',
                     'remove_me' => null,
                 ],
+                'attribute_types' => [
+                    'env' => WorkflowSearchAttribute::TYPE_STRING,
+                ],
             ],
         ]);
 
@@ -4924,7 +4927,57 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             'env' => 'staging',
             'remove_me' => null,
         ], $event->payload['attributes']);
+        $this->assertSame([
+            'env' => WorkflowSearchAttribute::TYPE_STRING,
+        ], $event->payload['attribute_types']);
         $this->assertSame($runAttrs, $event->payload['merged']);
+        $this->assertSame(
+            WorkflowSearchAttribute::TYPE_STRING,
+            WorkflowSearchAttribute::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('key', 'env')
+                ->value('type'),
+        );
+    }
+
+    public function testTypedSearchAttributeJsonCommandPersistsAvroHistoryAcrossRestartAndPagination(): void
+    {
+        $run = $this->createWaitingRun();
+        $run->forceFill([
+            'payload_codec' => CodecRegistry::defaultCodec(),
+        ])->save();
+        $task = $this->createLeasedTask($run);
+        $commands = json_decode(
+            json_encode([[
+                'type' => 'upsert_search_attributes',
+                'attributes' => [
+                    'customer_tier' => 'gold',
+                ],
+                'attribute_types' => [
+                    'customer_tier' => WorkflowSearchAttribute::TYPE_KEYWORD,
+                ],
+            ]], JSON_THROW_ON_ERROR),
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+
+        $result = $this->bridge->complete($task->id, $commands);
+
+        $this->assertTrue($result['completed']);
+        $this->assertSame(CodecRegistry::defaultCodec(), $run->fresh()->payload_codec);
+        DB::purge();
+        DB::reconnect();
+
+        $full = $this->bridge->historyPayload($task->id);
+        $page = $this->bridge->historyPayloadPaginated($task->id, pageSize: 1);
+        $this->assertIsArray($full);
+        $this->assertIsArray($page);
+
+        $expectedTypes = [
+            'customer_tier' => WorkflowSearchAttribute::TYPE_KEYWORD,
+        ];
+        $this->assertSame($expectedTypes, $full['history_events'][0]['payload']['attribute_types']);
+        $this->assertSame($expectedTypes, $page['history_events'][0]['payload']['attribute_types']);
     }
 
     public function testCompleteUpsertsMemoOnceAndRecordsTheMergedReplayIdentity(): void
@@ -5319,6 +5372,37 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             ->where('workflow_run_id', $run->id)
             ->where('event_type', HistoryEventType::SearchAttributesUpserted->value)
             ->count());
+    }
+
+    public function testCompleteRejectsUnknownAndOrphanedDeclaredSearchAttributeTypes(): void
+    {
+        foreach ([
+            [
+                'known' => 'opaque',
+            ],
+            [
+                'orphaned' => WorkflowSearchAttribute::TYPE_KEYWORD,
+            ],
+        ] as $attributeTypes) {
+            $run = $this->createWaitingRun();
+            $task = $this->createLeasedTask($run);
+
+            $result = $this->bridge->complete($task->id, [[
+                'type' => 'upsert_search_attributes',
+                'attributes' => [
+                    'known' => 'value',
+                ],
+                'attribute_types' => $attributeTypes,
+            ]]);
+
+            $this->assertFalse($result['completed']);
+            $this->assertSame('invalid_commands', $result['reason']);
+            $this->assertSame(TaskStatus::Leased, $task->fresh()->status);
+            $this->assertSame(0, WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('event_type', HistoryEventType::SearchAttributesUpserted->value)
+                ->count());
+        }
     }
 
     public function testCompleteUpdateCommandClosesAcceptedUpdateLifecycle(): void
