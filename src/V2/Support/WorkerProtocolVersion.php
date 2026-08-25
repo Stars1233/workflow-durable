@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Workflow\V2\Support;
 
 use Workflow\Serializers\CodecRegistry;
+use Workflow\V2\Models\WorkflowMemo;
 use Workflow\V2\Models\WorkflowSearchAttribute;
 
 /**
@@ -44,6 +45,13 @@ final class WorkerProtocolVersion
      * version-gated together so an older worker cannot partially opt in.
      */
     public const CAPABILITY_MESSAGE_STREAMS = 'message_streams';
+
+    /**
+     * Worker registration capability for lossless portable memo upserts.
+     * Memo command entries use the standard Avro payload envelope and are
+     * rejected before execution when this capability is unavailable.
+     */
+    public const CAPABILITY_MEMO_UPSERTS = 'memo_upserts';
 
     /**
      * Stable fail-closed reason a worker or server must return when it
@@ -118,6 +126,8 @@ final class WorkerProtocolVersion
     private const QUERY_TASKS_MINIMUM_PROTOCOL_VERSION = '1.8';
 
     private const UPSERT_SEARCH_ATTRIBUTES_MINIMUM_PROTOCOL_VERSION = '1.8';
+
+    private const UPSERT_MEMO_MINIMUM_PROTOCOL_VERSION = '1.14';
 
     private const WORKER_SESSIONS_MINIMUM_PROTOCOL_VERSION = '1.8';
 
@@ -199,6 +209,10 @@ final class WorkerProtocolVersion
             $capabilities[] = self::CAPABILITY_QUERY_TASKS;
         }
 
+        if (self::supportsFeatureVersion($protocolVersion, self::UPSERT_MEMO_MINIMUM_PROTOCOL_VERSION)) {
+            $capabilities[] = self::CAPABILITY_MEMO_UPSERTS;
+        }
+
         if (self::supportsMessageStreams($protocolVersion)) {
             $capabilities[] = self::CAPABILITY_MESSAGE_STREAMS;
         }
@@ -240,6 +254,7 @@ final class WorkerProtocolVersion
             'fail_update',
             'record_side_effect',
             'record_version_marker',
+            'upsert_memo',
             'upsert_search_attributes',
             'open_condition_wait',
             'open_signal_wait',
@@ -338,6 +353,7 @@ final class WorkerProtocolVersion
      *     activity_task_verbs: list<string>,
      *     query_task_verbs: list<string>,
      *     worker_capabilities: list<string>,
+     *     workflow_task_command_payload_envelope_fields: array<string, list<string>>,
      *     non_terminal_command_types: list<string>,
      *     terminal_command_types: list<string>,
      *     workflow_history_budget: array<string, mixed>,
@@ -349,6 +365,7 @@ final class WorkerProtocolVersion
      *     sticky_execution: array<string, mixed>,
      *     worker_sessions: array<string, mixed>,
      *     query_tasks: array<string, mixed>,
+     *     upsert_memo_command: array<string, mixed>,
      *     upsert_search_attributes_command: array<string, mixed>,
      *     service_operation_command: array<string, mixed>,
      *     message_streams: array<string, mixed>,
@@ -365,6 +382,7 @@ final class WorkerProtocolVersion
             'activity_task_verbs' => self::activityTaskVerbs(),
             'query_task_verbs' => self::queryTaskVerbs(),
             'worker_capabilities' => self::workerCapabilities(),
+            'workflow_task_command_payload_envelope_fields' => WorkflowCommandNormalizer::payloadEnvelopeFields(),
             'non_terminal_command_types' => self::nonTerminalCommandTypes(),
             'terminal_command_types' => self::terminalCommandTypes(),
             'workflow_history_budget' => WorkerHistoryPayloadContract::manifest(),
@@ -382,6 +400,7 @@ final class WorkerProtocolVersion
             'sticky_execution' => StickyExecution::describe(),
             'worker_sessions' => self::workerSessionSemantics(),
             'query_tasks' => self::queryTaskSemantics(),
+            'upsert_memo_command' => self::upsertMemoCommandShape(),
             'upsert_search_attributes_command' => self::upsertSearchAttributesCommandShape(),
             'service_operation_command' => self::serviceOperationCommandShape(),
             'message_streams' => self::messageStreamSemantics(),
@@ -390,6 +409,72 @@ final class WorkerProtocolVersion
             'unsupported_payload_codec_reason' => self::REASON_UNSUPPORTED_PAYLOAD_CODEC,
             'invocable_carrier' => self::invocableCarrierSemantics(),
             'task_queue_priority_fairness' => self::taskQueuePriorityFairnessSemantics(),
+        ];
+    }
+
+    /**
+     * Published workflow-task command and history contract for memo upserts.
+     *
+     * @return array<string, mixed>
+     */
+    public static function upsertMemoCommandShape(): array
+    {
+        return [
+            'type' => 'upsert_memo',
+            'category' => 'non_terminal_command',
+            'worker_capability' => self::CAPABILITY_MEMO_UPSERTS,
+            'minimum_protocol_version' => self::UPSERT_MEMO_MINIMUM_PROTOCOL_VERSION,
+            'required_fields' => ['type', 'entries'],
+            'optional_fields' => [],
+            'entries' => [
+                'shape' => 'payload-envelope<avro-map<string, Value|null>>',
+                'payload_envelope_field' => true,
+                'codec' => MemoPayload::CODEC,
+                'value_schema' => 'durable_workflow.protocol.Value',
+                'key_pattern' => MemoPayload::KEY_PATTERN,
+                'null_value' => 'delete_key',
+                'max_keys_per_run' => WorkflowMemo::MAX_MEMOS_PER_RUN,
+                'max_value_size_bytes' => WorkflowMemo::MAX_VALUE_SIZE_BYTES,
+                'max_total_size_bytes' => WorkflowMemo::MAX_TOTAL_SIZE_BYTES,
+                'size_measurement' => 'avro_single_object_bytes',
+                'runtime_configured_total_limit' => 'workflows.v2.structural_limits.memo_size_bytes',
+            ],
+            'merge' => [
+                'base' => 'memo visible immediately before the command sequence',
+                'operation' => 'replace named keys; remove keys whose value is null; preserve all other keys',
+                'canonical_order' => 'lexicographic_key_order',
+            ],
+            'history' => [
+                'event_type' => 'MemoUpserted',
+                'required_fields' => ['sequence', 'entries', 'merged'],
+                'replay_identity' => ['sequence', 'entries'],
+                'entries_shape' => 'payload-envelope<avro-map<string, Value|null>>',
+                'merged_shape' => 'payload-envelope<avro-map<string, Value>>',
+                'merged_is_projection' => true,
+            ],
+            'idempotency' => [
+                'fence' => ['workflow_task_id', 'workflow_task_attempt'],
+                'duplicate_completion' => 'does_not_append_or_apply',
+                'redelivery' => 'replay_consumes_matching_history_sequence',
+            ],
+            'continue_as_new' => 'merged memo is inherited before commands on the continued run',
+            'external_payloads' => [
+                'entries_field_authority' => WorkflowCommandNormalizer::class . '::payloadEnvelopeFields',
+                'envelopes_and_references' => 'standard_avro_payload_envelope',
+                'resolution_owner' => 'runtime',
+                'sdk_storage_drivers' => false,
+            ],
+            'published_artifact_conformance' => [
+                'worker_languages' => ['php', 'python', 'rust'],
+                'runtime_targets' => ['standalone_server', 'managed_cloud'],
+                'required_observations' => [
+                    'capability_discovered',
+                    'memo_update_completed',
+                    'waiting_describe_merged',
+                    'completed_describe_merged',
+                    'replay_does_not_duplicate',
+                ],
+            ],
         ];
     }
 

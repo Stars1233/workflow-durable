@@ -12,6 +12,7 @@ use InvalidArgumentException;
 use LogicException;
 use RuntimeException;
 use Throwable;
+use Workflow\Serializers\CodecDecodeException;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Contracts\HistoryProjectionRole;
@@ -37,6 +38,7 @@ use Workflow\V2\Models\WorkflowFailure;
 use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowInstance;
 use Workflow\V2\Models\WorkflowLink;
+use Workflow\V2\Models\WorkflowMemo;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowSearchAttribute;
 use Workflow\V2\Models\WorkflowSignal;
@@ -121,6 +123,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         'fail_update',
         'record_side_effect',
         'record_version_marker',
+        'upsert_memo',
         'upsert_search_attributes',
         'open_condition_wait',
         'open_signal_wait',
@@ -1532,6 +1535,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'fail_update' => $this->applyFailUpdate($run, $task, $command, $sequence),
             'record_side_effect' => $this->applyRecordSideEffect($run, $task, $command, $sequence),
             'record_version_marker' => $this->applyRecordVersionMarker($run, $task, $command, $sequence),
+            'upsert_memo' => $this->applyUpsertMemo($run, $task, $command, $sequence),
             'upsert_search_attributes' => $this->applyUpsertSearchAttributes($run, $task, $command, $sequence),
             'open_condition_wait' => $this->applyOpenConditionWait($run, $task, $command, $sequence, $createdTaskIds),
             'open_signal_wait' => $this->applyOpenSignalWait($run, $task, $command, $sequence, $createdTaskIds),
@@ -3147,6 +3151,59 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
     }
 
     /**
+     * @param array{type: string, entries: array{codec: string, blob: string}} $command
+     */
+    private function applyUpsertMemo(WorkflowRun $run, WorkflowTask $task, array $command, int $sequence): int
+    {
+        $call = new UpsertMemosCall(MemoPayload::decodeEntries($command['entries']));
+        $merged = $run->typedMemos();
+
+        foreach ($call->memos as $key => $value) {
+            if ($value === null) {
+                unset($merged[$key]);
+
+                continue;
+            }
+
+            $merged[$key] = $value;
+        }
+
+        ksort($merged);
+
+        if (count($merged) > WorkflowMemo::MAX_MEMOS_PER_RUN) {
+            throw new InvalidArgumentException(sprintf(
+                'Memo count exceeds maximum of %d entries.',
+                WorkflowMemo::MAX_MEMOS_PER_RUN,
+            ));
+        }
+
+        foreach ($merged as $key => $value) {
+            $bytes = MemoPayload::encodedSize($value);
+            if ($bytes > WorkflowMemo::MAX_VALUE_SIZE_BYTES) {
+                throw new InvalidArgumentException(sprintf(
+                    'Memo value for key "%s" exceeds maximum size of %d bytes.',
+                    $key,
+                    WorkflowMemo::MAX_VALUE_SIZE_BYTES,
+                ));
+            }
+        }
+
+        $serializedMemo = MemoPayload::encodedMapBytes($merged);
+        StructuralLimits::guardMemoSize($serializedMemo);
+
+        app(MemoUpsertService::class)->upsert($run, $call, $sequence);
+        $run->unsetRelation('memos');
+
+        WorkflowHistoryEvent::record($run, HistoryEventType::MemoUpserted, [
+            'sequence' => $sequence,
+            'entries' => $command['entries'],
+            'merged' => MemoPayload::mapEnvelope($merged),
+        ], $task);
+
+        return $sequence + 1;
+    }
+
+    /**
      * @param array{type: string, arguments?: string|null, payload_codec?: string|null, workflow_type?: string|null, queue?: string|null} $command
      * @param list<string> $createdTaskIds
      */
@@ -3929,6 +3986,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'fail_update' => self::normalizeFailUpdateCommand($command),
             'record_side_effect' => self::normalizeRecordSideEffectCommand($command),
             'record_version_marker' => self::normalizeRecordVersionMarkerCommand($command),
+            'upsert_memo' => self::normalizeUpsertMemoCommand($command),
             'upsert_search_attributes' => self::normalizeUpsertSearchAttributesCommand($command),
             'open_condition_wait' => self::normalizeOpenConditionWaitCommand($command),
             'open_signal_wait' => self::normalizeOpenSignalWaitCommand($command),
@@ -4784,6 +4842,37 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         ] + array_filter([
             'attribute_types' => $attributeTypes,
         ], static fn (mixed $value): bool => $value !== []);
+    }
+
+    /**
+     * @param array<string, mixed> $command
+     * @return array{type: string, entries: array{codec: string, blob: string}}|null
+     */
+    private static function normalizeUpsertMemoCommand(array $command): ?array
+    {
+        if (! is_array($command['entries'] ?? null)) {
+            return null;
+        }
+
+        try {
+            $resolved = PayloadEnvelopeResolver::resolveCommandPayloadWithCodec($command['entries'], 'entries');
+            if (($resolved['codec'] ?? null) !== MemoPayload::CODEC || ! is_string($resolved['payload'])) {
+                return null;
+            }
+
+            $entries = MemoPayload::canonicalMapEnvelope([
+                'codec' => $resolved['codec'],
+                'blob' => $resolved['payload'],
+            ]);
+            new UpsertMemosCall(MemoPayload::decodeEntries($entries));
+        } catch (CodecDecodeException|InvalidArgumentException|LogicException|ValidationException) {
+            return null;
+        }
+
+        return [
+            'type' => 'upsert_memo',
+            'entries' => $entries,
+        ];
     }
 
     /**

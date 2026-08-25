@@ -7,6 +7,7 @@ namespace Tests\Unit\V2;
 use Tests\NonDatabaseTestCase;
 use Workflow\V2\Support\BundleIntegrityVerifier;
 use Workflow\V2\Support\HistoryExport;
+use Workflow\V2\Support\MemoPayload;
 
 final class BundleIntegrityVerifierTest extends NonDatabaseTestCase
 {
@@ -106,6 +107,32 @@ final class BundleIntegrityVerifierTest extends NonDatabaseTestCase
         $rules = array_column($report['findings'], 'rule');
         $this->assertContains('workflow.last_history_sequence_stale', $rules);
         $this->assertSame(BundleIntegrityVerifier::STATUS_WARNING, $report['status']);
+    }
+
+    public function testMissingPortableMemoAuthorityIsRejected(): void
+    {
+        $bundle = self::wellFormedBundle();
+        unset($bundle['workflow']['memo_payload']);
+        $bundle['integrity'] = self::buildIntegrity($bundle);
+
+        $report = BundleIntegrityVerifier::verify($bundle);
+
+        $this->assertSame(BundleIntegrityVerifier::STATUS_FAILED, $report['status']);
+        $this->assertContains('workflow.memo_payload_missing', array_column($report['findings'], 'rule'));
+    }
+
+    public function testMemoProjectionMustMatchPortableAuthority(): void
+    {
+        $bundle = self::wellFormedBundle();
+        $bundle['workflow']['memo'] = [
+            'display' => 'drifted',
+        ];
+        $bundle['integrity'] = self::buildIntegrity($bundle);
+
+        $report = BundleIntegrityVerifier::verify($bundle);
+
+        $this->assertSame(BundleIntegrityVerifier::STATUS_FAILED, $report['status']);
+        $this->assertContains('workflow.memo_projection_mismatch', array_column($report['findings'], 'rule'));
     }
 
     public function testPayloadManifestMissingPayloadIsReported(): void
@@ -254,6 +281,8 @@ final class BundleIntegrityVerifierTest extends NonDatabaseTestCase
                 'run_number' => 1,
                 'workflow_type' => 'verifier.test',
                 'workflow_class' => 'Tests\\Fixtures\\Verifier',
+                'memo' => [],
+                'memo_payload' => MemoPayload::mapEnvelope([]),
                 'status' => 'completed',
                 'last_history_sequence' => 2,
             ],

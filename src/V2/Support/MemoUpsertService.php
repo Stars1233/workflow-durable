@@ -77,10 +77,11 @@ class MemoUpsertService
                     'workflow_run_id' => $childRun->id,
                     'workflow_instance_id' => $childRun->workflow_instance_id,
                     'key' => $parentMemo->key,
-                    'value' => $parentMemo->value,
                     'upserted_at_sequence' => $childStartSequence,
                     'inherited_from_parent' => true,
                 ]);
+
+                $childMemo->setValue($parentMemo->getValue());
 
                 $childMemo->save();
             }

@@ -10,6 +10,7 @@ use InvalidArgumentException;
 use LogicException;
 use Throwable;
 use Workflow\Serializers\Avro;
+use Workflow\Serializers\AvroValueJsonProjection;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\V2\Contracts\HistoryExportRedactor;
 use Workflow\V2\Enums\ActivityStatus;
@@ -26,25 +27,17 @@ use Workflow\V2\Models\WorkflowUpdate;
 /**
  * Builds the v2 workflow history-export bundle.
  *
- * The schema is defined once for the v2 release. The schema id
- * `durable-workflow.v2.history-export` is the canonical version anchor,
- * and there is no schema_version ladder within v2: the bundle has a
- * single, frozen shape for the lifetime of v2. The accompanying
- * `schema_version` field is a structural marker that must remain `1`
- * for the lifetime of v2; a breaking shape change requires a parallel
- * primitive (a new schema id alongside the existing one) under the
- * `parallel_primitive_only` evolution rule, never a bump within v2.
+ * The schema id `durable-workflow.v2.history-export` identifies the v2
+ * prerelease export family. Its structural version advances when a
+ * prerelease bundle adds required reconstruction authority; consumers must
+ * match the exact version because compatibility with earlier prerelease
+ * shapes is not implied.
  */
 final class HistoryExport
 {
     public const SCHEMA = 'durable-workflow.v2.history-export';
 
-    /**
-     * Frozen structural marker for the v2 history-export bundle. Do not
-     * bump this within v2 — see the class docblock for why a breaking
-     * shape change must take the parallel-primitive route instead.
-     */
-    public const SCHEMA_VERSION = 1;
+    public const SCHEMA_VERSION = 2;
 
     private const INTEGRITY_CANONICALIZATION = 'json-recursive-ksort-v1';
 
@@ -85,6 +78,7 @@ final class HistoryExport
         $timelineSnapshot = $selectedRun['timeline'];
         $timerSnapshot = $selectedRun['timers'];
         $lineageSnapshot = $selectedRun['lineage'];
+        $typedMemos = $run->typedMemos();
 
         $bundle = [
             'schema' => self::SCHEMA,
@@ -105,7 +99,8 @@ final class HistoryExport
                 'source_process_class' => $sourceNode['process_class'],
                 'business_key' => $summary?->business_key ?? $run->business_key ?? $run->instance?->business_key,
                 'visibility_labels' => $summary?->visibility_labels ?? $run->visibility_labels ?? $run->instance?->visibility_labels ?? [],
-                'memo' => $run->typedMemos(),
+                'memo' => AvroValueJsonProjection::project($typedMemos),
+                'memo_payload' => MemoPayload::mapEnvelope($typedMemos),
                 'search_attributes' => self::resolveSearchAttributes($run, $summary),
                 'status' => $run->status->value,
                 'status_bucket' => $run->status->statusBucket()
@@ -237,6 +232,15 @@ final class HistoryExport
         $redactedPaths = self::redactionPaths($bundle);
         $runCodec = self::stringValue($bundle['payloads']['codec'] ?? null) ?? CodecRegistry::defaultCodec();
         $outputCodec = self::stringValue($bundle['payloads']['output']['codec'] ?? null) ?? $runCodec;
+
+        self::addPayloadManifestEntry(
+            $entries,
+            'workflow.memo_payload',
+            MemoPayload::CODEC,
+            $bundle['workflow']['memo_payload'] ?? null,
+            self::payloadAvailable($bundle['workflow']['memo_payload'] ?? null),
+            $redactedPaths,
+        );
 
         self::addPayloadManifestEntry(
             $entries,
@@ -642,6 +646,23 @@ final class HistoryExport
 
         $paths = [];
         $callback = $resolvedRedactor['callback'];
+
+        if (isset($bundle['workflow']) && is_array($bundle['workflow'])) {
+            self::redactField(
+                $bundle['workflow'],
+                'memo',
+                $callback,
+                self::redactionContext($run, 'workflow.memo', 'memo_projection'),
+                $paths,
+            );
+            self::redactField(
+                $bundle['workflow'],
+                'memo_payload',
+                $callback,
+                self::redactionContext($run, 'workflow.memo_payload', 'memo_payload'),
+                $paths,
+            );
+        }
 
         if (isset($bundle['payloads']['arguments']) && is_array($bundle['payloads']['arguments'])) {
             self::redactField(

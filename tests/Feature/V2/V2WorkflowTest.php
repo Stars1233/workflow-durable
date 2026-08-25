@@ -6,10 +6,12 @@ namespace Tests\Feature\V2;
 
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use LogicException;
 use ReflectionException;
+use Symfony\Component\Process\Process;
 use Tests\Fixtures\V2\TestAsyncGeneratorCallbackWorkflow;
 use Tests\Fixtures\V2\TestAsyncWorkflow;
 use Tests\Fixtures\V2\TestBroadFailureCatchWorkflow;
@@ -40,6 +42,8 @@ use Tests\Fixtures\V2\TestParentChildWorkflow;
 use Tests\Fixtures\V2\TestParentFailingChildWorkflow;
 use Tests\Fixtures\V2\TestParentWaitingOnChildWorkflow;
 use Tests\Fixtures\V2\TestParentWaitingOnContinuingChildWorkflow;
+use Tests\Fixtures\V2\TestPortableMemoContinueAsNewWorkflow;
+use Tests\Fixtures\V2\TestPortableMemoWorkflow;
 use Tests\Fixtures\V2\TestReclaimDuringExecutionActivity;
 use Tests\Fixtures\V2\TestRetryWorkflow;
 use Tests\Fixtures\V2\TestSignalOrderingWorkflow;
@@ -49,6 +53,8 @@ use Tests\Fixtures\V2\TestTimerWorkflow;
 use Tests\Fixtures\V2\TestUpdateWorkflow;
 use Tests\TestCase;
 use Workflow\Serializers\AvroBinaryValue;
+use Workflow\Serializers\AvroMapValue;
+use Workflow\Serializers\AvroValueJsonProjection;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\ActivityTaskBridge;
 use Workflow\V2\AsyncWorkflow;
@@ -81,14 +87,18 @@ use Workflow\V2\Support\ActivityCall;
 use Workflow\V2\Support\ActivityCancellation;
 use Workflow\V2\Support\ActivityLease;
 use Workflow\V2\Support\DefaultHistoryProjectionRole;
+use Workflow\V2\Support\EmbeddedV2HistoryImport;
 use Workflow\V2\Support\FailureSnapshots;
 use Workflow\V2\Support\HistoryExport;
+use Workflow\V2\Support\MemoPayload;
+use Workflow\V2\Support\MemoUpsertService;
 use Workflow\V2\Support\QueryStateReplayer;
 use Workflow\V2\Support\RunDetailView;
 use Workflow\V2\Support\RunSummaryProjector;
 use Workflow\V2\Support\RunSummarySortKey;
 use Workflow\V2\Support\RuntimeObjectFactory;
 use Workflow\V2\Support\SelectedRunLocator;
+use Workflow\V2\Support\UpsertMemosCall;
 use Workflow\V2\Support\WorkflowInstanceId;
 use Workflow\V2\TaskWatchdog;
 use Workflow\V2\WorkflowStub;
@@ -2429,6 +2439,76 @@ final class V2WorkflowTest extends TestCase
         );
     }
 
+    public function testExistingRunStartHistoryProjectsPortableMemoValues(): void
+    {
+        Queue::fake();
+
+        $workflow = WorkflowStub::make(TestSignalWorkflow::class, 'portable-memo-existing-run');
+        $accepted = $workflow->attemptStart();
+
+        $this->assertTrue($accepted->accepted());
+        $this->drainReadyTasks();
+        $this->waitFor(static fn (): bool => $workflow->refresh()->status() === 'waiting');
+
+        /** @var WorkflowRun $run */
+        $run = WorkflowRun::query()->findOrFail($accepted->runId());
+        $memos = [
+            'adapter_map' => AvroMapValue::fromPairs([
+                ['0', 'numeric-string-key'],
+                ['nested', AvroBinaryValue::fromBytes("nested\xFF")],
+            ]),
+            'binary_value' => AvroBinaryValue::fromBytes("\x00\xFF"),
+        ];
+        (new MemoUpsertService())->upsert($run, new UpsertMemosCall($memos), $run->last_history_sequence + 1);
+
+        $rejected = $workflow->attemptStart();
+        $returned = $workflow->attemptStart(StartOptions::returnExistingActive());
+        $signalWithStart = $workflow->signalWithStart('name-provided', ['Taylor']);
+
+        $events = WorkflowHistoryEvent::query()
+            ->whereIn('workflow_command_id', [
+                $rejected->commandId(),
+                $returned->commandId(),
+                $signalWithStart->startCommandId(),
+            ])
+            ->orderBy('sequence')
+            ->get();
+        $expectedProjection = [
+            'adapter_map' => [
+                '$type' => 'map',
+                'entries' => [
+                    [
+                        'key' => '0',
+                        'value' => 'numeric-string-key',
+                    ],
+                    [
+                        'key' => 'nested',
+                        'value' => [
+                            '$type' => 'bytes',
+                            'base64' => 'bmVzdGVk/w==',
+                        ],
+                    ],
+                ],
+            ],
+            'binary_value' => [
+                '$type' => 'bytes',
+                'base64' => 'AP8=',
+            ],
+        ];
+
+        $this->assertCount(3, $events);
+        $this->assertSame([
+            HistoryEventType::StartRejected,
+            HistoryEventType::StartAccepted,
+            HistoryEventType::StartAccepted,
+        ], $events->pluck('event_type')
+            ->all());
+        foreach ($events as $event) {
+            $this->assertSame($expectedProjection, $event->payload['memo']);
+            $this->assertJson(json_encode($event->payload, JSON_THROW_ON_ERROR));
+        }
+    }
+
     public function testStartOptionsPersistVisibilityFieldsOnRunSummaryAndStartHistory(): void
     {
         config()->set('queue.default', 'redis');
@@ -2838,6 +2918,106 @@ final class V2WorkflowTest extends TestCase
             ->pluck('event_type')
             ->map(static fn ($eventType) => $eventType->value)
             ->all());
+    }
+
+    public function testPortableMemosSurviveContinueAsNewColdExportAndImport(): void
+    {
+        config()->set('queue.default', 'redis');
+        Queue::fake();
+
+        $workflow = WorkflowStub::make(
+            TestPortableMemoContinueAsNewWorkflow::class,
+            'portable-memo-continue-instance',
+        );
+        $started = $workflow->start();
+
+        $this->assertNotNull($started->runId());
+
+        $this->drainReadyTasks();
+        $workflow->refresh();
+
+        $this->assertTrue($workflow->completed());
+
+        /** @var WorkflowRun $continuedRun */
+        $continuedRun = WorkflowRun::query()
+            ->where('workflow_instance_id', 'portable-memo-continue-instance')
+            ->where('run_number', 2)
+            ->sole();
+        $continuedRunId = $continuedRun->id;
+
+        DB::purge();
+        DB::reconnect();
+
+        /** @var WorkflowRun $continuedRun */
+        $continuedRun = WorkflowRun::query()->findOrFail($continuedRunId);
+        $expectedProjection = AvroValueJsonProjection::project($continuedRun->typedMemos());
+        $expectedHistoryProjection = json_decode(
+            json_encode($expectedProjection, JSON_THROW_ON_ERROR),
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $continuedStartEvents = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $continuedRunId)
+            ->whereIn('event_type', [
+                HistoryEventType::StartAccepted->value,
+                HistoryEventType::WorkflowStarted->value,
+            ])
+            ->orderBy('sequence')
+            ->get();
+
+        $this->assertCount(2, $continuedStartEvents);
+        foreach ($continuedStartEvents as $event) {
+            $this->assertSame($expectedHistoryProjection, $event->payload['memo']);
+            $this->assertSame([
+                '$type' => 'bytes',
+                'base64' => 'AP8=',
+            ], $event->payload['memo']['binary_value']);
+            $this->assertSame('map', $event->payload['memo']['adapter_map']['$type']);
+            $this->assertJson(json_encode($event->payload, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR));
+        }
+
+        $this->assertPortableMemoContinueColdReadback($continuedRunId);
+
+        $export = HistoryExport::forRun($continuedRun->fresh());
+        $this->assertSame($expectedProjection, $export['workflow']['memo']);
+        $this->assertSame(
+            MemoPayload::mapEnvelope(TestPortableMemoWorkflow::entries(reordered: true)),
+            $export['workflow']['memo_payload'],
+        );
+        $export = json_decode(
+            json_encode($export, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR),
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+
+        $this->clearWorkflowStateForPortableMemoImport();
+        $import = EmbeddedV2HistoryImport::import($export, [
+            'import_id' => 'continued-portable-memo-export-import',
+        ]);
+
+        $this->assertSame('imported', $import['status']);
+
+        DB::purge();
+        DB::reconnect();
+
+        /** @var WorkflowRun $importedRun */
+        $importedRun = WorkflowRun::query()->findOrFail($continuedRunId);
+        $importedMemos = $importedRun->typedMemos();
+        $this->assertInstanceOf(AvroBinaryValue::class, $importedMemos['binary_value']);
+        $this->assertSame("\x00\xFF", $importedMemos['binary_value']->bytes);
+        $this->assertInstanceOf(AvroMapValue::class, $importedMemos['adapter_map']);
+        $this->assertSame([
+            ['0', 'numeric-string-key'],
+            ['word', 'ordinary-key'],
+        ], $importedMemos['adapter_map']->pairs);
+        $this->assertSame($expectedProjection, RunDetailView::forRun($importedRun->fresh())['memo']);
+
+        $this->assertPortableMemoContinueColdReadback($continuedRunId);
+
+        $roundTripExport = HistoryExport::forRun($importedRun->fresh());
+        $this->assertSame($expectedProjection, $roundTripExport['workflow']['memo']);
+        $this->assertSame($export['workflow']['memo_payload'], $roundTripExport['workflow']['memo_payload']);
+        $this->assertJson(json_encode($roundTripExport, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR));
     }
 
     public function testWorkflowCanWaitForChildWorkflowAndCompleteWithChildOutput(): void
@@ -8242,6 +8422,59 @@ final class V2WorkflowTest extends TestCase
         };
 
         $this->app->call([$job, 'handle']);
+    }
+
+    private function assertPortableMemoContinueColdReadback(string $runId): void
+    {
+        $connection = (string) config('database.default');
+        $database = config("database.connections.{$connection}");
+        $this->assertIsArray($database);
+        $coldReadback = new Process([
+            PHP_BINARY,
+            __DIR__ . '/../../Fixtures/V2/portable_memo_continue_cold_readback.php',
+        ], env: [
+            'MEMO_DB_DRIVER' => (string) ($database['driver'] ?? ''),
+            'MEMO_DB_DATABASE' => (string) ($database['database'] ?? ''),
+            'MEMO_DB_HOST' => (string) ($database['host'] ?? ''),
+            'MEMO_DB_PORT' => (string) ($database['port'] ?? ''),
+            'MEMO_DB_USERNAME' => (string) ($database['username'] ?? ''),
+            'MEMO_DB_PASSWORD' => (string) ($database['password'] ?? ''),
+            'MEMO_RUN_ID' => $runId,
+        ]);
+        $coldReadback->mustRun();
+        $coldResult = json_decode($coldReadback->getOutput(), true, flags: JSON_THROW_ON_ERROR);
+
+        $this->assertSame([
+            'history_projection_preserved' => true,
+            'memo_readback_preserved' => true,
+        ], $coldResult);
+    }
+
+    private function clearWorkflowStateForPortableMemoImport(): void
+    {
+        foreach ([
+            'workflow_run_summaries',
+            'workflow_run_waits',
+            'workflow_run_timeline_entries',
+            'workflow_run_timer_entries',
+            'workflow_run_lineage_entries',
+            'workflow_search_attributes',
+            'workflow_memos',
+            'workflow_history_events',
+            'workflow_tasks',
+            'activity_attempts',
+            'activity_executions',
+            'workflow_run_timers',
+            'workflow_failures',
+            'workflow_links',
+            'workflow_signal_records',
+            'workflow_updates',
+            'workflow_commands',
+            'workflow_runs',
+            'workflow_instances',
+        ] as $table) {
+            DB::table($table)->delete();
+        }
     }
 
     private function runReadyTaskForRun(string $runId, TaskType $taskType): void

@@ -7,6 +7,7 @@ namespace Workflow\V2\Support;
 use Illuminate\Validation\ValidationException;
 use InvalidArgumentException;
 use LogicException;
+use Workflow\Serializers\CodecDecodeException;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\V2\Models\WorkflowSearchAttribute;
 
@@ -111,6 +112,10 @@ final class WorkflowCommandNormalizer
             ],
             'guidance' => 'payload_codec identifies the codec used for command payload bytes and only applies to commands that carry result, arguments, or request_payload bytes.',
         ],
+        'entries' => [
+            'allowed' => ['upsert_memo'],
+            'guidance' => 'entries contains the non-indexed memo patch and only applies to an upsert_memo command.',
+        ],
     ];
 
     /**
@@ -131,6 +136,7 @@ final class WorkflowCommandNormalizer
         'complete_update' => ['result'],
         'record_side_effect' => ['result'],
         'start_service_operation' => ['request_payload'],
+        'upsert_memo' => ['entries'],
     ];
 
     /**
@@ -615,6 +621,74 @@ final class WorkflowCommandNormalizer
                 ] + array_filter([
                     'attribute_types' => $attributeTypes,
                 ], static fn (mixed $value): bool => $value !== []);
+
+                continue;
+            }
+
+            if ($type === 'upsert_memo') {
+                if (! is_array($command['entries'] ?? null) || $command['entries'] === []) {
+                    $errors["commands.{$index}.entries"] = [
+                        'Upsert memo commands require an Avro entries payload envelope.',
+                    ];
+
+                    continue;
+                }
+
+                try {
+                    $resolved = PayloadEnvelopeResolver::resolveCommandPayloadWithCodec(
+                        $command['entries'],
+                        "commands.{$index}.entries",
+                    );
+
+                    if (($resolved['codec'] ?? null) !== MemoPayload::CODEC || ! is_string($resolved['payload'])) {
+                        throw new InvalidArgumentException(
+                            'Memo entries must use the standard Avro {codec, blob} payload envelope.',
+                        );
+                    }
+
+                    $entriesEnvelope = MemoPayload::canonicalMapEnvelope([
+                        'codec' => $resolved['codec'],
+                        'blob' => $resolved['payload'],
+                    ]);
+                    $call = new UpsertMemosCall(MemoPayload::decodeEntries($entriesEnvelope));
+                } catch (ValidationException $e) {
+                    foreach ($e->errors() as $field => $messages) {
+                        $errors[$field] = $messages;
+                    }
+
+                    continue;
+                } catch (CodecDecodeException|InvalidArgumentException|LogicException $e) {
+                    $errors["commands.{$index}.entries"] = [$e->getMessage()];
+
+                    continue;
+                }
+
+                $oversizedKey = null;
+                foreach ($call->memos as $key => $value) {
+                    if ($value === null) {
+                        continue;
+                    }
+
+                    if (MemoPayload::encodedSize($value) > \Workflow\V2\Models\WorkflowMemo::MAX_VALUE_SIZE_BYTES) {
+                        $oversizedKey = $key;
+
+                        break;
+                    }
+                }
+
+                if ($oversizedKey !== null) {
+                    $errors["commands.{$index}.entries.{$oversizedKey}"] = [sprintf(
+                        'Memo values may not exceed %d bytes.',
+                        \Workflow\V2\Models\WorkflowMemo::MAX_VALUE_SIZE_BYTES,
+                    )];
+
+                    continue;
+                }
+
+                $normalized[] = [
+                    'type' => $type,
+                    'entries' => $entriesEnvelope,
+                ];
 
                 continue;
             }

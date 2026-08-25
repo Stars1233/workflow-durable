@@ -6,7 +6,9 @@ namespace Workflow\V2\Support;
 
 use JsonException;
 use LogicException;
+use Throwable;
 use Workflow\Serializers\Avro;
+use Workflow\Serializers\AvroValueJsonProjection;
 
 /**
  * Offline integrity verifier for HistoryExport bundles.
@@ -314,6 +316,51 @@ final class BundleIntegrityVerifier
                 'Bundle workflow.workflow_type is required.',
                 'workflow.workflow_type',
             );
+        }
+
+        $redactionPaths = is_array($bundle['redaction']['paths'] ?? null)
+            ? $bundle['redaction']['paths']
+            : [];
+        $memoPayloadRedacted = in_array('workflow.memo_payload', $redactionPaths, true);
+        $memoProjectionRedacted = in_array('workflow.memo', $redactionPaths, true);
+        $memoPayload = $workflow['memo_payload'] ?? null;
+
+        if (! $memoPayloadRedacted && ! is_array($memoPayload)) {
+            self::addFinding(
+                $findings,
+                'workflow.memo_payload_missing',
+                self::SEVERITY_ERROR,
+                'Bundle workflow.memo_payload must contain the lossless portable Avro memo authority.',
+                'workflow.memo_payload',
+            );
+        } elseif (! $memoPayloadRedacted) {
+            try {
+                $memoEntries = MemoPayload::decodeEntries($memoPayload);
+            } catch (Throwable $throwable) {
+                self::addFinding(
+                    $findings,
+                    'workflow.memo_payload_invalid',
+                    self::SEVERITY_ERROR,
+                    'Bundle workflow.memo_payload is not a valid portable Avro memo map: '
+                        . $throwable->getMessage(),
+                    'workflow.memo_payload',
+                );
+                $memoEntries = null;
+            }
+
+            if ($memoEntries !== null && ! $memoProjectionRedacted) {
+                $projection = AvroValueJsonProjection::project($memoEntries);
+
+                if (($workflow['memo'] ?? null) !== $projection) {
+                    self::addFinding(
+                        $findings,
+                        'workflow.memo_projection_mismatch',
+                        self::SEVERITY_ERROR,
+                        'Bundle workflow.memo does not match the JSON-safe projection of workflow.memo_payload.',
+                        'workflow.memo',
+                    );
+                }
+            }
         }
 
         $lastSequence = self::intValue($workflow['last_history_sequence'] ?? null);

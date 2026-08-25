@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.42` makes non-indexed memo updates portable across
+  service-mode workers. PHP workflow authoring emits the language-neutral
+  Avro payload-envelope command and consumes only entry-matching memo history
+  during execution, cold replay, and query replay. Memo history and the
+  authoritative memo projection retain lossless Avro envelopes across database
+  reloads, preserving numeric branches, binary values, and map identity. Memo
+  patches are normalized independently of the current run state, while
+  structural key and encoded-size limits are enforced on the merged memo so
+  at-limit replacements remain valid. Integer-like top-level keys are rejected
+  before a host runtime can coerce their portable map identity.
+  History exports keep that envelope as the import authority while exposing a
+  separate JSON-safe memo projection, so export/import preserves exact memo
+  identity for operator readback and replay after a fresh database boundary.
+  Platform conformance suite 43 retains the version-one export schema bytes
+  while binding version two to the JSON-safe projection and lossless Avro memo
+  authority at the candidate's retained Workflow release source.
 - Workflow `2.0.0-rc.41` removes the unsupported root Composer Dependabot
   update path for this lockfile-free library. GitHub dependency alerts remain
   enabled, automated security-fix pull requests remain disabled, and the
@@ -25,6 +41,11 @@
 - Reserved runtime delivery now keeps durable message-stream input separate
   from user-authored one-shot signals. The Workflow package source advances to
   `2.0.0-rc.37` with worker protocol 1.15 for portable stream consumption.
+- Service-mode workflow tasks can now merge non-indexed memo metadata through
+  the language-neutral `upsert_memo` command. The runtime records canonical
+  replay identity and merged projection data, preserves memo across
+  continue-as-new, enforces structural limits, and fences duplicate task
+  completions.
 - Standalone child-workflow completion now applies the recorded parallel-group
   path before resuming the parent. Successful child-only and mixed groups wait
   for every member, serialize concurrent child closures on the parent run, and

@@ -158,7 +158,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $authority = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
 
         $this->assertSame($authority, PlatformConformanceSuite::manifest());
-        $this->assertSame(42, $authority['version']);
+        $this->assertSame(43, $authority['version']);
         $this->assertSame(PlatformConformanceSuite::VERSION, $authority['version']);
         $this->assertSame(PlatformConformanceSuite::SCHEMA, $authority['schema']);
         $this->assertSame(SurfaceStabilityContract::SCHEMA, $authority['surface_stability_authority']);
@@ -420,32 +420,104 @@ final class PlatformConformanceSuiteTest extends TestCase
             'cluster-info-envelope.schema.json' =>
                 '7f761da2eda221a6240d1250b6dd774a36c2077642405f0f036e8124121ea4bc',
             'history-export-bundle.schema.json' =>
-                'e8d6ef0af49a2570007062215d1332c96910743c1449cd8ca2c702bfac6c181c',
+                '29f9842ca426f231e79a454e95e23520e5b51b5d8f8453fb0c27f278d68bb21b',
             'local-activity-runtime.schema.json' =>
                 'de74d7175cda4f761a57263aae2b32046e617783acf0677d4c5aa6c5358619ef',
             'worker-sessions-runtime.schema.json' =>
                 '36b16340fe9524653baef7de0a32b2f744562bfc57e91853579a2c94dd512581',
         ];
-
         $this->assertSame(array_keys($expectedDigests), array_keys($dependencies));
 
         foreach ($expectedDigests as $filename => $expectedDigest) {
             $dependency = $dependencies[$filename];
-            $this->assertSame(
-                sprintf(
+            $expectedResolver = $filename === 'history-export-bundle.schema.json'
+                ? sprintf(
+                    'https://raw.githubusercontent.com/durable-workflow/workflow/%s/'
+                        . 'resources/conformance/suite-v43/platform-protocol-specs/'
+                        . 'history-export-bundle.schema.json',
+                    $dependency['source_release'],
+                )
+                : sprintf(
                     'https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/%s/'
                         . 'static/platform-protocol-specs/%s',
                     PlatformConformanceSuite::PROTOCOL_SOURCE_REVISION,
                     $filename,
-                ),
-                $dependency['resolver_url'],
-            );
+                );
+
+            $this->assertSame($expectedResolver, $dependency['resolver_url']);
+            if ($filename === 'history-export-bundle.schema.json') {
+                $this->assertSame('2.0.0-rc.42', $dependency['source_release']);
+            } else {
+                $this->assertArrayNotHasKey('source_release', $dependency);
+            }
             $this->assertSame('sha256:' . $expectedDigest, $dependency['sha256']);
             $this->assertSame(
                 $expectedDigest,
                 hash('sha256', file_get_contents(dirname(__DIR__, 3) . '/' . $dependency['source_path'])),
             );
         }
+    }
+
+    public function testHistoryExportSchemaHistoryRetainsVersionOneAndBindsVersionTwo(): void
+    {
+        $manifest = PlatformConformanceSuite::manifest();
+        $history = $manifest['artifact_version_history']['history_export_bundle'];
+        $historical = $history['bindings'][0];
+        $current = $history['bindings'][1];
+        $dependency = $manifest['source_dependencies']['history-export-bundle.schema.json'];
+        $root = dirname(__DIR__, 3);
+        $this->assertSame('immutable_prerelease_schema_bindings', $history['history_mode']);
+        $this->assertSame(42, $historical['suite_version']);
+        $this->assertSame('historical', $historical['status']);
+        $this->assertSame(1, $historical['schema_version']);
+        $this->assertSame(
+            $historical['sha256'],
+            'sha256:' . hash_file(
+                'sha256',
+                $root . '/resources/conformance/suite-v42/platform-protocol-specs/'
+                    . 'history-export-bundle.schema.json',
+            ),
+        );
+
+        $this->assertSame(43, $current['suite_version']);
+        $this->assertSame('current', $current['status']);
+        $this->assertSame(2, $current['schema_version']);
+        $this->assertSame('2.0.0-rc.42', $current['source_release']);
+        $this->assertSame(
+            sprintf('durable-workflow.v2.history-export-bundle@workflow-%s-schema-2', $current['source_release']),
+            $current['artifact_id'],
+        );
+        foreach (['artifact_id', 'resolver_url', 'source_release', 'sha256'] as $field) {
+            $this->assertSame($current[$field], $dependency[$field]);
+        }
+
+        $schema = json_decode(
+            file_get_contents($root . '/' . $dependency['source_path']),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        $workflow = $schema['$defs']['workflowSnapshot'];
+        $memoProjection = $schema['$defs']['memoJsonProjection'];
+        $memoEnvelope = $schema['$defs']['memoPayloadEnvelope'];
+
+        $this->assertSame(2, $schema['properties']['schema_version']['const']);
+        $this->assertContains('memo', $workflow['required']);
+        $this->assertContains('memo_payload', $workflow['required']);
+        $this->assertArrayHasKey('memo_payload', $workflow['properties']);
+        $this->assertSame(
+            '#/$defs/memoJsonProjection',
+            $schema['allOf'][0]['else']['properties']['workflow']['properties']['memo']['$ref'],
+        );
+        $this->assertSame(
+            '#/$defs/memoPayloadEnvelope',
+            $schema['allOf'][1]['else']['properties']['workflow']['properties']['memo_payload']['$ref'],
+        );
+        $this->assertSame(0, $memoProjection['oneOf'][1]['maxItems']);
+        $this->assertSame(['codec', 'blob'], $memoEnvelope['required']);
+        $this->assertFalse($memoEnvelope['additionalProperties']);
+        $this->assertSame('avro', $memoEnvelope['properties']['codec']['const']);
+        $this->assertSame('base64', $memoEnvelope['properties']['blob']['contentEncoding']);
     }
 
     public function testStableSourceReferenceClosureIsCompleteAndBound(): void
@@ -487,6 +559,25 @@ final class PlatformConformanceSuiteTest extends TestCase
             'incorrect digest' => static function (array &$manifest): void {
                 $manifest['source_dependencies']['cluster-info-envelope.schema.json']['sha256'] =
                     'sha256:' . str_repeat('0', 64);
+            },
+            'missing retained source release' => static function (array &$manifest): void {
+                unset($manifest['source_dependencies']['history-export-bundle.schema.json']['source_release']);
+            },
+            'resolver retained release drift' => static function (array &$manifest): void {
+                $manifest['source_dependencies']['history-export-bundle.schema.json']['resolver_url'] =
+                    str_replace(
+                        '2.0.0-rc.42',
+                        '2.0.0-rc.43',
+                        $manifest['source_dependencies']['history-export-bundle.schema.json']['resolver_url'],
+                    );
+            },
+            'artifact retained release drift' => static function (array &$manifest): void {
+                $manifest['source_dependencies']['history-export-bundle.schema.json']['artifact_id'] =
+                    str_replace(
+                        '2.0.0-rc.42',
+                        '2.0.0-rc.43',
+                        $manifest['source_dependencies']['history-export-bundle.schema.json']['artifact_id'],
+                    );
             },
         ] as $case => $mutate) {
             $manifest = PlatformConformanceSuite::manifest();

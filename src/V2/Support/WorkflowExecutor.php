@@ -10,6 +10,7 @@ use LogicException;
 use ReflectionMethod;
 use RuntimeException;
 use Throwable;
+use Workflow\Serializers\AvroValueJsonProjection;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\CommandContext;
@@ -638,6 +639,12 @@ final class WorkflowExecutor
                 try {
                     if ($memoEvent === null) {
                         $memoEvent = $this->recordMemoUpserted($run, $task, $sequence, $current);
+                    } else {
+                        MemoReplayIdentity::assertCompatible(
+                            $sequence,
+                            $memoEvent->payload['entries'] ?? null,
+                            $current->entries,
+                        );
                     }
 
                     $this->syncWorkflowCursor($workflow, $sequence + 1);
@@ -2862,7 +2869,7 @@ final class WorkflowExecutor
 
         $parentReference = ChildRunHistory::parentReferenceForRun($run);
 
-        $continuedMemo = $continuedRun->typedMemos();
+        $continuedMemo = AvroValueJsonProjection::project($continuedRun->typedMemos());
         $continuedSearchAttributes = $continuedRun->typedSearchAttributes();
 
         WorkflowHistoryEvent::record($continuedRun, HistoryEventType::StartAccepted, [
@@ -4338,7 +4345,7 @@ final class WorkflowExecutor
 
         ksort($merged);
 
-        $serializedMemo = json_encode($merged, JSON_THROW_ON_ERROR);
+        $serializedMemo = MemoPayload::encodedMapBytes($merged);
         $this->logApproachingLimit(
             StructuralLimits::warnApproachingMemoSize($serializedMemo),
             $run,
@@ -4357,8 +4364,8 @@ final class WorkflowExecutor
             HistoryEventType::MemoUpserted,
             [
                 'sequence' => $sequence,
-                'entries' => $call->entries,
-                'merged' => $merged,
+                'entries' => MemoPayload::mapEnvelope($call->entries),
+                'merged' => MemoPayload::mapEnvelope($merged),
             ],
             $task,
         );

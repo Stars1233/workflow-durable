@@ -9,6 +9,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
+use InvalidArgumentException;
 use Throwable;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\V2\Enums\ActivityAttemptStatus;
@@ -50,6 +51,7 @@ final class EmbeddedV2HistoryImport
     private const HISTORY_EVENT_PAYLOAD_FIELDS = [
         'ActivityCompleted' => ['result'],
         'ChildRunCompleted' => ['output', 'result'],
+        'MemoUpserted' => ['entries', 'merged'],
         'ServiceCallStarted' => ['request_payload', 'response_payload'],
         'ServiceCallCompleted' => ['request_payload', 'response_payload'],
         'ServiceCallFailed' => ['request_payload', 'response_payload'],
@@ -764,8 +766,15 @@ final class EmbeddedV2HistoryImport
     private static function writeMemos(array $workflow, string $runId, string $instanceId, int $sequence): int
     {
         $count = 0;
+        $memoPayload = self::arrayValue($workflow['memo_payload'] ?? null);
 
-        foreach (self::arrayValue($workflow['memo'] ?? null) ?? [] as $key => $value) {
+        if ($memoPayload === null) {
+            throw new InvalidArgumentException(
+                'workflow.memo_payload must contain the lossless portable memo payload envelope.',
+            );
+        }
+
+        foreach (MemoPayload::decodeEntries($memoPayload) as $key => $value) {
             if (! is_string($key) || $key === '') {
                 continue;
             }

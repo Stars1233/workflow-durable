@@ -9,8 +9,15 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use RuntimeException;
+use Symfony\Component\Process\Process;
 use Tests\Fixtures\V2\TestGreetingWorkflow;
+use Tests\Fixtures\V2\TestPortableMemoBinaryContentDriftWorkflow;
+use Tests\Fixtures\V2\TestPortableMemoDoubleDriftWorkflow;
+use Tests\Fixtures\V2\TestPortableMemoTextDriftWorkflow;
+use Tests\Fixtures\V2\TestPortableMemoWorkflow;
 use Tests\TestCase;
+use Workflow\Serializers\AvroBinaryValue;
+use Workflow\Serializers\AvroMapValue;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Attributes\Signal;
@@ -30,6 +37,7 @@ use Workflow\V2\Enums\TaskStatus;
 use Workflow\V2\Enums\TaskType;
 use Workflow\V2\Enums\TimerStatus;
 use Workflow\V2\Enums\UpdateStatus;
+use Workflow\V2\Exceptions\HistoryEventShapeMismatchException;
 use Workflow\V2\Exceptions\WorkflowOutputCodecUnavailableException;
 use Workflow\V2\Jobs\RunTimerTask;
 use Workflow\V2\Models\ActivityExecution;
@@ -40,6 +48,7 @@ use Workflow\V2\Models\WorkflowFailure;
 use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowInstance;
 use Workflow\V2\Models\WorkflowLink;
+use Workflow\V2\Models\WorkflowMemo;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowRunLineageEntry;
 use Workflow\V2\Models\WorkflowRunSummary;
@@ -54,6 +63,7 @@ use Workflow\V2\Support\ChildResolutionProjectionContext;
 use Workflow\V2\Support\ChildRunHistory;
 use Workflow\V2\Support\DefaultHistoryProjectionRole;
 use Workflow\V2\Support\DefaultWorkflowTaskBridge;
+use Workflow\V2\Support\EmbeddedV2HistoryImport;
 use Workflow\V2\Support\ExternalPayloadReference;
 use Workflow\V2\Support\ExternalPayloads;
 use Workflow\V2\Support\ExternalPayloadStorage;
@@ -62,6 +72,7 @@ use Workflow\V2\Support\HistoryBudget;
 use Workflow\V2\Support\HistoryExport;
 use Workflow\V2\Support\HistoryTimeline;
 use Workflow\V2\Support\LocalFilesystemExternalPayloadStorage;
+use Workflow\V2\Support\MemoPayload;
 use Workflow\V2\Support\PendingMessageTask;
 use Workflow\V2\Support\RunDetailView;
 use Workflow\V2\Support\RunUpdateView;
@@ -4610,6 +4621,20 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertSame('invalid_commands', $result['reason']);
     }
 
+    public function testCompleteRejectsMalformedMemoEnvelopeBeforeTaskLookup(): void
+    {
+        $result = $this->bridge->complete('any-task', [[
+            'type' => 'upsert_memo',
+            'entries' => [
+                'codec' => 'avro',
+                'blob' => base64_encode('not-an-avro-single-object'),
+            ],
+        ]]);
+
+        $this->assertFalse($result['completed']);
+        $this->assertSame('invalid_commands', $result['reason']);
+    }
+
     public function testCompleteRejectsInvalidOpenWaitTimeoutsBeforeTaskLookup(): void
     {
         $cases = [
@@ -4900,6 +4925,363 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             'remove_me' => null,
         ], $event->payload['attributes']);
         $this->assertSame($runAttrs, $event->payload['merged']);
+    }
+
+    public function testCompleteUpsertsMemoOnceAndRecordsTheMergedReplayIdentity(): void
+    {
+        $run = $this->createWaitingRun();
+        foreach ([
+            'remove_me' => 'legacy',
+            'tenant' => 'acme',
+        ] as $key => $value) {
+            $memo = new WorkflowMemo([
+                'workflow_run_id' => $run->id,
+                'workflow_instance_id' => $run->workflow_instance_id,
+                'key' => $key,
+                'upserted_at_sequence' => 0,
+                'inherited_from_parent' => false,
+            ]);
+            $memo->setValue($value);
+            $memo->save();
+        }
+
+        $task = $this->createLeasedTask($run);
+        $entries = [
+            'remove_me' => null,
+            'stage' => 'waiting',
+        ];
+        $commands = [[
+            'type' => 'upsert_memo',
+            'entries' => MemoPayload::envelope($entries),
+        ]];
+
+        $result = $this->bridge->complete($task->id, $commands);
+        $duplicate = $this->bridge->complete($task->id, $commands);
+
+        $this->assertTrue($result['completed']);
+        $this->assertSame('waiting', $result['run_status']);
+        $this->assertFalse($duplicate['completed']);
+        $this->assertSame('task_not_leased', $duplicate['reason']);
+
+        $run->refresh();
+        $this->assertSame([
+            'stage' => 'waiting',
+            'tenant' => 'acme',
+        ], $run->typedMemos());
+
+        $events = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::MemoUpserted->value)
+            ->get();
+
+        $this->assertCount(1, $events);
+        $this->assertSame(1, $events[0]->payload['sequence']);
+        $this->assertSame($entries, MemoPayload::decodeEntries($events[0]->payload['entries']));
+        $this->assertSame($run->typedMemos(), MemoPayload::decodeEntries($events[0]->payload['merged']));
+    }
+
+    public function testCompleteRejectsNumericLookingTopLevelMemoKeyAtWireBoundary(): void
+    {
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+        $wireCommands = json_decode(json_encode([[
+            'type' => 'upsert_memo',
+            'entries' => MemoPayload::envelope(AvroMapValue::fromPairs([['0', 'not-portable']])),
+        ]], JSON_THROW_ON_ERROR), true, flags: JSON_THROW_ON_ERROR);
+
+        $result = $this->bridge->complete($task->id, $wireCommands);
+
+        $this->assertFalse($result['completed']);
+        $this->assertSame('invalid_commands', $result['reason']);
+        $this->assertSame(TaskStatus::Leased, $task->fresh()->status);
+        $this->assertSame([], $run->fresh()->typedMemos());
+        $this->assertSame(0, WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::MemoUpserted->value)
+            ->count());
+    }
+
+    public function testCompleteReplacesAnAtLimitMemoWithOneLargerPatch(): void
+    {
+        $run = $this->createWaitingRun();
+        $entries = [];
+
+        for ($index = 0; $index < WorkflowMemo::MAX_MEMOS_PER_RUN; $index++) {
+            $key = sprintf('existing_%03d', $index);
+            $memo = new WorkflowMemo([
+                'workflow_run_id' => $run->id,
+                'workflow_instance_id' => $run->workflow_instance_id,
+                'key' => $key,
+                'upserted_at_sequence' => 0,
+                'inherited_from_parent' => false,
+            ]);
+            $memo->setValue('stale');
+            $memo->save();
+            $entries[$key] = null;
+        }
+        $entries['replacement'] = 'current';
+
+        $task = $this->createLeasedTask($run);
+        $result = $this->bridge->complete($task->id, [[
+            'type' => 'upsert_memo',
+            'entries' => MemoPayload::envelope($entries),
+        ]]);
+
+        $this->assertTrue($result['completed']);
+        $run->refresh();
+        $this->assertSame([
+            'replacement' => 'current',
+        ], $run->typedMemos());
+
+        $event = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::MemoUpserted->value)
+            ->sole();
+
+        $this->assertCount(
+            WorkflowMemo::MAX_MEMOS_PER_RUN + 1,
+            MemoPayload::decodeEntries($event->payload['entries']),
+        );
+        $this->assertSame([
+            'replacement' => 'current',
+        ], MemoPayload::decodeEntries($event->payload['merged']));
+    }
+
+    public function testCompleteDeletingTheLastMemoPersistsAnEmptyMapProjection(): void
+    {
+        $run = $this->createWaitingRun();
+        $memo = new WorkflowMemo([
+            'workflow_run_id' => $run->id,
+            'workflow_instance_id' => $run->workflow_instance_id,
+            'key' => 'only',
+            'upserted_at_sequence' => 0,
+            'inherited_from_parent' => false,
+        ]);
+        $memo->setValue('stale');
+        $memo->save();
+
+        $task = $this->createLeasedTask($run);
+        $result = $this->bridge->complete($task->id, [[
+            'type' => 'upsert_memo',
+            'entries' => MemoPayload::mapEnvelope([
+                'only' => null,
+            ]),
+        ]]);
+
+        $this->assertTrue($result['completed']);
+        $run->refresh();
+        $this->assertSame([], $run->typedMemos());
+
+        $event = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::MemoUpserted->value)
+            ->sole();
+
+        $this->assertSame([], MemoPayload::decodeEntries($event->payload['merged']));
+        $this->assertSame(MemoPayload::mapEnvelope([]), $event->payload['merged']);
+    }
+
+    public function testEncodedMemoCommandSurvivesColdReloadExportImportAndReplay(): void
+    {
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+        $wireCommands = json_decode(json_encode([[
+            'type' => 'upsert_memo',
+            'entries' => MemoPayload::envelope(TestPortableMemoWorkflow::entries()),
+        ]], JSON_THROW_ON_ERROR), true, flags: JSON_THROW_ON_ERROR);
+
+        $result = $this->bridge->complete($task->id, $wireCommands);
+
+        $this->assertTrue($result['completed']);
+
+        DB::purge();
+        DB::reconnect();
+
+        /** @var WorkflowRun $reloadedRun */
+        $reloadedRun = WorkflowRun::query()->findOrFail($run->id);
+        /** @var WorkflowHistoryEvent $reloadedEvent */
+        $reloadedEvent = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::MemoUpserted->value)
+            ->sole();
+
+        $this->assertSame(
+            MemoPayload::envelope(TestPortableMemoWorkflow::entries(reordered: true)),
+            $reloadedEvent->payload['entries'],
+        );
+        $this->assertIsString(json_encode($reloadedEvent->payload, JSON_THROW_ON_ERROR));
+
+        $memos = $reloadedRun->typedMemos();
+        $this->assertIsInt($memos['long_value']);
+        $this->assertIsFloat($memos['double_value']);
+        $this->assertSame(7, $memos['long_value']);
+        $this->assertSame(7.0, $memos['double_value']);
+        $this->assertInstanceOf(AvroBinaryValue::class, $memos['binary_value']);
+        $this->assertSame("\x00\xFF", $memos['binary_value']->bytes);
+        $this->assertInstanceOf(AvroBinaryValue::class, $memos['binary_text_value']);
+        $this->assertSame('same-bytes', $memos['binary_text_value']->bytes);
+        $this->assertSame('same-bytes', $memos['text_value']);
+        $this->assertInstanceOf(AvroMapValue::class, $memos['adapter_map']);
+
+        $detail = RunDetailView::forRun($reloadedRun->fresh());
+        $export = HistoryExport::forRun($reloadedRun->fresh());
+        $expectedMemoProjection = [
+            'adapter_map' => [
+                '$type' => 'map',
+                'entries' => [
+                    [
+                        'key' => '0',
+                        'value' => 'numeric-string-key',
+                    ],
+                    [
+                        'key' => 'word',
+                        'value' => 'ordinary-key',
+                    ],
+                ],
+            ],
+            'binary_text_value' => [
+                '$type' => 'bytes',
+                'base64' => 'c2FtZS1ieXRlcw==',
+            ],
+            'binary_value' => [
+                '$type' => 'bytes',
+                'base64' => 'AP8=',
+            ],
+            'double_value' => 7.0,
+            'long_value' => 7,
+            'nested' => [
+                'first' => true,
+                'second' => [
+                    'left' => 1,
+                    'right' => [
+                        '$type' => 'bytes',
+                        'base64' => 'bmVzdGVkLWJ5dGVz',
+                    ],
+                ],
+            ],
+            'text_value' => 'same-bytes',
+        ];
+
+        $this->assertSame($expectedMemoProjection, $detail['memo']);
+        $this->assertSame($expectedMemoProjection, $export['workflow']['memo']);
+        $this->assertSame(
+            MemoPayload::mapEnvelope(TestPortableMemoWorkflow::entries(reordered: true)),
+            $export['workflow']['memo_payload'],
+        );
+        $this->assertJson(json_encode($detail, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR));
+
+        $exportDocument = json_encode($export, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR);
+        $this->assertJson($exportDocument);
+        $export = json_decode($exportDocument, true, flags: JSON_THROW_ON_ERROR);
+        $runId = $reloadedRun->id;
+        $this->clearWorkflowStateForPortableMemoImport();
+
+        $import = EmbeddedV2HistoryImport::import($export, [
+            'import_id' => 'portable-memo-export-import',
+        ]);
+
+        $this->assertSame('imported', $import['status']);
+
+        DB::purge();
+        DB::reconnect();
+
+        /** @var WorkflowRun $reloadedRun */
+        $reloadedRun = WorkflowRun::query()->findOrFail($runId);
+        /** @var WorkflowHistoryEvent $reloadedEvent */
+        $reloadedEvent = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $runId)
+            ->where('event_type', HistoryEventType::MemoUpserted->value)
+            ->sole();
+
+        $importedMemos = $reloadedRun->typedMemos();
+        $this->assertIsInt($importedMemos['long_value']);
+        $this->assertIsFloat($importedMemos['double_value']);
+        $this->assertSame(7, $importedMemos['long_value']);
+        $this->assertSame(7.0, $importedMemos['double_value']);
+        $this->assertInstanceOf(AvroBinaryValue::class, $importedMemos['binary_value']);
+        $this->assertSame("\x00\xFF", $importedMemos['binary_value']->bytes);
+        $this->assertInstanceOf(AvroBinaryValue::class, $importedMemos['binary_text_value']);
+        $this->assertSame('same-bytes', $importedMemos['binary_text_value']->bytes);
+        $this->assertSame('same-bytes', $importedMemos['text_value']);
+        $this->assertInstanceOf(AvroMapValue::class, $importedMemos['adapter_map']);
+        $this->assertSame([
+            ['0', 'numeric-string-key'],
+            ['word', 'ordinary-key'],
+        ], $importedMemos['adapter_map']->pairs);
+
+        $importedDetail = RunDetailView::forRun($reloadedRun->fresh());
+        $roundTripExport = HistoryExport::forRun($reloadedRun->fresh());
+        $this->assertSame($expectedMemoProjection, $importedDetail['memo']);
+        $this->assertSame($expectedMemoProjection, $roundTripExport['workflow']['memo']);
+        $this->assertSame($export['workflow']['memo_payload'], $roundTripExport['workflow']['memo_payload']);
+        $this->assertJson(json_encode($importedDetail, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR));
+        $this->assertJson(json_encode($roundTripExport, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR));
+
+        $connection = (string) config('database.default');
+        $database = config("database.connections.{$connection}");
+        $this->assertIsArray($database);
+        $coldReplay = new Process([
+            PHP_BINARY,
+            __DIR__ . '/../../Fixtures/V2/portable_memo_cold_replay.php',
+        ], env: [
+            'MEMO_DB_DRIVER' => (string) ($database['driver'] ?? ''),
+            'MEMO_DB_DATABASE' => (string) ($database['database'] ?? ''),
+            'MEMO_DB_HOST' => (string) ($database['host'] ?? ''),
+            'MEMO_DB_PORT' => (string) ($database['port'] ?? ''),
+            'MEMO_DB_USERNAME' => (string) ($database['username'] ?? ''),
+            'MEMO_DB_PASSWORD' => (string) ($database['password'] ?? ''),
+            'MEMO_EVENT_ID' => $reloadedEvent->id,
+            'MEMO_RUN_ID' => $reloadedRun->id,
+        ]);
+        $coldReplay->mustRun();
+        $coldResult = json_decode($coldReplay->getOutput(), true, flags: JSON_THROW_ON_ERROR);
+
+        $this->assertSame([
+            'matching_replay_completed' => true,
+            'memo_readback_preserved' => true,
+            'rejected_drift_count' => 3,
+        ], $coldResult);
+
+        $history = [[
+            'sequence' => $reloadedEvent->sequence,
+            'event_type' => $reloadedEvent->event_type->value,
+            'payload' => $reloadedEvent->payload,
+            'recorded_at' => $reloadedEvent->recorded_at?->toJSON(),
+        ]];
+        $replayed = WorkflowFiberRunner::forClass(
+            TestPortableMemoWorkflow::class,
+            'portable-memo-workflow',
+            $reloadedRun->id,
+            [],
+            'avro',
+            $history,
+        )->step();
+
+        $this->assertTrue($replayed->completed);
+        $this->assertSame('complete_workflow', $replayed->command['type']);
+
+        $unexpectedMatches = [];
+        foreach ([
+            TestPortableMemoDoubleDriftWorkflow::class,
+            TestPortableMemoBinaryContentDriftWorkflow::class,
+            TestPortableMemoTextDriftWorkflow::class,
+        ] as $workflowClass) {
+            try {
+                WorkflowFiberRunner::forClass(
+                    $workflowClass,
+                    'portable-memo-workflow',
+                    $reloadedRun->id,
+                    [],
+                    'avro',
+                    $history,
+                )->step();
+                $unexpectedMatches[] = $workflowClass;
+            } catch (HistoryEventShapeMismatchException) {
+                // Expected: the persisted union branch or binary content drifted.
+            }
+        }
+
+        $this->assertSame([], $unexpectedMatches);
     }
 
     public function testCompleteRejectsIncompatibleDeclaredSearchAttributeType(): void
@@ -8330,6 +8712,20 @@ final class V2WorkflowTaskBridgeTest extends TestCase
     public function testCompleteContinuesAsNew(): void
     {
         $run = $this->createWaitingRun();
+        foreach ([
+            'remove_me' => 'legacy',
+            'tenant' => 'acme',
+        ] as $key => $value) {
+            $memo = new WorkflowMemo([
+                'workflow_run_id' => $run->id,
+                'workflow_instance_id' => $run->workflow_instance_id,
+                'key' => $key,
+                'upserted_at_sequence' => 0,
+                'inherited_from_parent' => false,
+            ]);
+            $memo->setValue($value);
+            $memo->save();
+        }
         $now = now();
         $executionDeadline = $now->copy()
             ->addMinutes(10);
@@ -8344,6 +8740,13 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $task = $this->createLeasedTask($run);
 
         $result = $this->bridge->complete($task->id, [
+            [
+                'type' => 'upsert_memo',
+                'entries' => MemoPayload::envelope([
+                    'remove_me' => null,
+                    'stage' => 'continued',
+                ]),
+            ],
             [
                 'type' => 'continue_as_new',
                 'arguments' => Serializer::serialize(['new-args']),
@@ -8379,6 +8782,10 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertSame(90, $continuedRun->run_timeout_seconds);
         $this->assertTrue($continuedRun->execution_deadline_at->equalTo($executionDeadline));
         $this->assertTrue($continuedRun->run_deadline_at->greaterThan($run->run_deadline_at));
+        $this->assertSame([
+            'stage' => 'continued',
+            'tenant' => 'acme',
+        ], $continuedRun->typedMemos());
 
         $continuedTask = WorkflowTask::query()
             ->where('workflow_run_id', $continuedRun->id)
@@ -8395,6 +8802,17 @@ final class V2WorkflowTaskBridgeTest extends TestCase
 
         $this->assertNotNull($continuedEvent);
         $this->assertSame($continuedRun->id, $continuedEvent->payload['continued_to_run_id']);
+
+        $memoEvent = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::MemoUpserted->value)
+            ->sole();
+
+        $this->assertSame(1, $memoEvent->payload['sequence']);
+        $this->assertSame([
+            'remove_me' => null,
+            'stage' => 'continued',
+        ], MemoPayload::decodeEntries($memoEvent->payload['entries']));
     }
 
     public function testContinueAsNewTransfersInstanceUpdatesAndFailsOnlyRunUpdates(): void
@@ -9505,6 +9923,33 @@ SQL);
         ]);
 
         return $task;
+    }
+
+    private function clearWorkflowStateForPortableMemoImport(): void
+    {
+        foreach ([
+            'workflow_run_summaries',
+            'workflow_run_waits',
+            'workflow_run_timeline_entries',
+            'workflow_run_timer_entries',
+            'workflow_run_lineage_entries',
+            'workflow_search_attributes',
+            'workflow_memos',
+            'workflow_history_events',
+            'workflow_tasks',
+            'activity_attempts',
+            'activity_executions',
+            'workflow_run_timers',
+            'workflow_failures',
+            'workflow_links',
+            'workflow_signal_records',
+            'workflow_updates',
+            'workflow_commands',
+            'workflow_runs',
+            'workflow_instances',
+        ] as $table) {
+            DB::table($table)->delete();
+        }
     }
 
     private function readyWorkflowTaskCount(WorkflowRun $run): int

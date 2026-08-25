@@ -23,7 +23,7 @@ use Workflow\V2\Workflow;
  * Internal cold-replay executor for the embedded engine task bridge.
  *
  * Pass bridge `history_events` when constructing a cold runner; recorded
- * activity, timer, child-workflow, side-effect, version marker, and
+ * activity, timer, child-workflow, side-effect, version marker, memo, and
  * search-attribute outcomes are replayed into the Fiber before new commands
  * are emitted.
  *
@@ -115,6 +115,11 @@ final class WorkflowFiberRunner
      * @var array<int, WorkflowHistoryEvent>
      */
     private array $recordedVersionMarkers = [];
+
+    /**
+     * @var array<int, array{entries: mixed, recorded_at: CarbonInterface|null}>
+     */
+    private array $recordedMemoUpserts = [];
 
     /**
      * @var array<int, array{recorded_at: CarbonInterface|null}>
@@ -325,6 +330,34 @@ final class WorkflowFiberRunner
                     $current->resolveValue($resolution->version),
                     $versionMarkerEvent?->recorded_at,
                 );
+
+                continue;
+            }
+
+            if ($current instanceof UpsertMemoCall) {
+                $historySequence = $this->historySequenceForCurrentPosition();
+                $recorded = $historySequence === null
+                    ? null
+                    : ($this->recordedMemoUpserts[$historySequence] ?? null);
+
+                if ($recorded !== null) {
+                    MemoReplayIdentity::assertCompatible(
+                        $historySequence,
+                        $recorded['entries'],
+                        $current->entries,
+                    );
+
+                    ++$this->sequence;
+                    $this->execution->send(null, $recorded['recorded_at']);
+
+                    continue;
+                }
+
+                $step = WorkflowStep::yielded($current, $this->payloadCodec);
+                $immediateCommands[] = self::singleCommand($step);
+
+                ++$this->sequence;
+                $this->execution->send(null);
 
                 continue;
             }
@@ -796,6 +829,7 @@ final class WorkflowFiberRunner
             $this->namespace,
         );
         $this->recordedVersionMarkers = self::indexRecordedVersionMarkers($this->historyEvents);
+        $this->recordedMemoUpserts = self::indexRecordedMemoUpserts($this->historyEvents);
         $this->recordedSearchAttributeUpserts = self::indexRecordedSearchAttributeUpserts($this->historyEvents);
     }
 
@@ -1018,6 +1052,7 @@ final class WorkflowFiberRunner
             'ServiceCallCancelled',
             'SideEffectRecorded',
             'VersionMarkerRecorded',
+            'MemoUpserted',
             'SearchAttributesUpserted',
         ], true);
     }
@@ -1678,6 +1713,35 @@ final class WorkflowFiberRunner
             }
 
             $upserts[$sequence] = [
+                'recorded_at' => self::eventRecordedAt($event, $payload),
+            ];
+        }
+
+        return $upserts;
+    }
+
+    /**
+     * @param list<array<string, mixed>> $historyEvents
+     * @return array<int, array{entries: mixed, recorded_at: CarbonInterface|null}>
+     */
+    private static function indexRecordedMemoUpserts(array $historyEvents): array
+    {
+        $upserts = [];
+
+        foreach ($historyEvents as $event) {
+            if (self::eventType($event) !== 'MemoUpserted') {
+                continue;
+            }
+
+            $payload = is_array($event['payload'] ?? null) ? $event['payload'] : [];
+            $sequence = self::eventSequence($event, $payload);
+
+            if ($sequence === null) {
+                continue;
+            }
+
+            $upserts[$sequence] = [
+                'entries' => $payload['entries'] ?? null,
                 'recorded_at' => self::eventRecordedAt($event, $payload),
             ];
         }

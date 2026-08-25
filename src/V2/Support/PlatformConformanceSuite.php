@@ -25,9 +25,9 @@ final class PlatformConformanceSuite
 {
     public const SCHEMA = 'durable-workflow.v2.platform-conformance.suite';
 
-    public const VERSION = 42;
+    public const VERSION = 43;
 
-    public const MIRROR_SHA256 = 'b472d0fe5f4aa6d412f338d2784feaf09d86c9d9b40b175a36f7de1669a49652';
+    public const MIRROR_SHA256 = 'b8cffa99ce15d972a6782652593d5853a92f4e239679ff59b65b947fb0e15bee';
 
     public const RUNTIME_SOURCE_REVISION = '75dfd5c869823409ef3d6c4b009a7882159ae9a2';
 
@@ -64,7 +64,7 @@ final class PlatformConformanceSuite
 
     private const SUITE_SOURCE_DIRECTORY = 'resources/conformance/suite-v38/';
 
-    private const CURRENT_PROTOCOL_SPEC_DIRECTORY = 'resources/conformance/suite-v42/platform-protocol-specs/';
+    private const CURRENT_PROTOCOL_SPEC_DIRECTORY = 'resources/conformance/suite-v43/platform-protocol-specs/';
 
     private const RUNTIME_SOURCE_DIRECTORY = self::SUITE_SOURCE_DIRECTORY . 'platform-conformance/';
 
@@ -126,6 +126,30 @@ final class PlatformConformanceSuite
         self::$manifest = $decoded;
 
         return self::$manifest;
+    }
+
+    public static function workflowSourceRelease(): string
+    {
+        $path = dirname(__DIR__, 3) . '/composer.json';
+        $json = file_get_contents($path);
+
+        if ($json === false) {
+            throw new RuntimeException("Workflow package metadata is missing at {$path}.");
+        }
+
+        try {
+            /** @var mixed $composer */
+            $composer = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            throw new RuntimeException('Workflow package metadata is not valid JSON.', 0, $exception);
+        }
+
+        $release = is_array($composer) ? ($composer['extra']['durable-workflow']['product-train'] ?? null) : null;
+        if (! is_string($release) || preg_match('/\A2\.0\.0-rc\.[1-9][0-9]*\z/D', $release) !== 1) {
+            throw new RuntimeException('Workflow package metadata must declare one exact 2.0 release candidate.');
+        }
+
+        return $release;
     }
 
     /**
@@ -599,6 +623,32 @@ final class PlatformConformanceSuite
                 );
             }
 
+            $sourceRelease = is_string($dependency['source_release'] ?? null)
+                ? $dependency['source_release']
+                : null;
+            if (
+                $filename === 'history-export-bundle.schema.json'
+                && (
+                    $sourceRelease === null
+                    || preg_match('/\A2\.0\.0-rc\.[1-9][0-9]*\z/D', $sourceRelease) !== 1
+                )
+            ) {
+                throw new RuntimeException(
+                    'The history-export schema must declare its retained Workflow source release.'
+                );
+            }
+            if (
+                $filename === 'history-export-bundle.schema.json'
+                && $artifactId !== sprintf(
+                    'durable-workflow.v2.history-export-bundle@workflow-%s-schema-2',
+                    $sourceRelease,
+                )
+            ) {
+                throw new RuntimeException(
+                    'The history-export schema artifact identity must derive from its retained source release.'
+                );
+            }
+
             $sourcePath = $dependency['source_path'] ?? null;
             $expectedSourcePath = self::CURRENT_PROTOCOL_SPEC_DIRECTORY . $filename;
             if (! is_string($sourcePath) || $sourcePath !== $expectedSourcePath) {
@@ -614,7 +664,7 @@ final class PlatformConformanceSuite
                 );
             }
 
-            self::assertImmutableDependencyResolver($artifactId, $filename, $resolverUrl);
+            self::assertImmutableDependencyResolver($artifactId, $filename, $resolverUrl, $sourceRelease);
 
             $absolutePath = dirname(__DIR__, 3) . '/' . $sourcePath;
             if (! is_file($absolutePath)) {
@@ -649,10 +699,27 @@ final class PlatformConformanceSuite
         string $artifactId,
         string $filename,
         string $resolverUrl,
+        ?string $sourceRelease,
     ): void {
         $url = parse_url($resolverUrl);
         $expectedPath = '/durable-workflow/durable-workflow.github.io/' . self::PROTOCOL_SOURCE_REVISION
             . '/static/platform-protocol-specs/' . $filename;
+        $retainedHistoryExportPath = '/durable-workflow/workflow/' . $sourceRelease
+            . '/resources/conformance/suite-v43/platform-protocol-specs/history-export-bundle.schema.json';
+        $isRetainedHistoryExport = $filename === 'history-export-bundle.schema.json'
+            && is_array($url)
+            && ($url['scheme'] ?? null) === 'https'
+            && ($url['host'] ?? null) === 'raw.githubusercontent.com'
+            && ($url['path'] ?? null) === $retainedHistoryExportPath
+            && ! isset($url['user'])
+            && ! isset($url['pass'])
+            && ! isset($url['port'])
+            && ! isset($url['query'])
+            && ! isset($url['fragment']);
+
+        if ($isRetainedHistoryExport) {
+            return;
+        }
 
         if (
             ! is_array($url)
@@ -1046,7 +1113,7 @@ final class PlatformConformanceSuite
         if (
             preg_match('/\A[a-z0-9.-]+\.(?:json|ya?ml)\z/D', $filename) !== 1
             || preg_match(
-                '/\Aresources\/conformance\/suite-v(?:38|42)\/platform-(?:conformance|protocol-specs)\/'
+                '/\Aresources\/conformance\/suite-v(?:38|43)\/platform-(?:conformance|protocol-specs)\/'
                     . '[a-z0-9.-]+\.(?:json|ya?ml)\z/D',
                 $relativePath,
             ) !== 1

@@ -18,7 +18,7 @@ final class EmbeddedV2ImportContract
 {
     public const SCHEMA = 'durable-workflow.v2.embedded-v2-import.contract';
 
-    public const VERSION = 1;
+    public const VERSION = 2;
 
     public const IMPORT_SOURCE = 'embedded_v2';
 
@@ -74,6 +74,7 @@ final class EmbeddedV2ImportContract
             'source_of_truth' => [
                 'history_events' => 'authoritative replay and audit log copied exactly from the embedded v2 bundle',
                 'workflow_and_payload_rows' => 'copied from the bundle envelope and payload sections',
+                'memo' => 'workflow.memo is the JSON-safe operator projection; workflow.memo_payload is the lossless Avro authority used to reconstruct memo rows',
                 'tasks_activities_timers_commands_signals_updates' => 'reconstruction hints for currently open server work and operator visibility',
                 'projections' => 'rebuilt on the server from imported durable rows after the transaction writes',
                 'bundle_integrity' => 'BundleIntegrityVerifier decides whether the decoded bundle is structurally importable',

@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use InvalidArgumentException;
 use Workflow\Traits\ResolvesStorageConnection;
 use Workflow\V2\Support\ConfiguredV2Models;
+use Workflow\V2\Support\MemoPayload;
 
 class WorkflowMemo extends Model
 {
@@ -43,22 +44,26 @@ class WorkflowMemo extends Model
     /**
      * Get the memo value.
      *
-     * @return mixed JSON-decodable value
+     * @return mixed decoded portable Avro value
      */
     public function getValue(): mixed
     {
-        return $this->value;
+        if (! is_array($this->value)) {
+            throw new InvalidArgumentException('invalid_memo_payload: stored memo value must be a payload envelope.');
+        }
+
+        return MemoPayload::decode($this->value);
     }
 
     /**
      * Set the memo value with size validation.
      *
-     * @param mixed $value JSON-encodable value
+     * @param mixed $value portable Avro value
      */
     public function setValue(mixed $value): void
     {
-        $encoded = json_encode($value, JSON_THROW_ON_ERROR);
-        $sizeBytes = strlen($encoded);
+        $envelope = MemoPayload::envelope($value);
+        $sizeBytes = MemoPayload::encodedEnvelopeSize($envelope);
 
         if ($sizeBytes > self::MAX_VALUE_SIZE_BYTES) {
             throw new InvalidArgumentException(sprintf(
@@ -69,7 +74,7 @@ class WorkflowMemo extends Model
             ));
         }
 
-        $this->value = $value;
+        $this->value = $envelope;
     }
 
     /**
@@ -82,7 +87,13 @@ class WorkflowMemo extends Model
         $memos = static::where('workflow_run_id', $runId)->get();
 
         $totalSize = $memos->sum(static function (self $memo): int {
-            return strlen(json_encode($memo->value, JSON_THROW_ON_ERROR));
+            if (! is_array($memo->value)) {
+                throw new InvalidArgumentException(
+                    'invalid_memo_payload: stored memo value must be a payload envelope.',
+                );
+            }
+
+            return MemoPayload::encodedEnvelopeSize($memo->value);
         });
 
         if ($totalSize > self::MAX_TOTAL_SIZE_BYTES) {

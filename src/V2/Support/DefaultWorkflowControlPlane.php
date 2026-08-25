@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
 use LogicException;
 use Throwable;
+use Workflow\Serializers\AvroValueJsonProjection;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\CommandContext;
@@ -143,7 +144,7 @@ final class DefaultWorkflowControlPlane implements WorkflowControlPlane
                         'workflow_type' => $currentRun->workflow_type,
                         'business_key' => $currentRun->business_key,
                         'visibility_labels' => $currentRun->visibility_labels,
-                        'memo' => $currentRun->typedMemos(),
+                        'memo' => AvroValueJsonProjection::project($currentRun->typedMemos()),
                         'search_attributes' => $currentRun->typedSearchAttributes(),
                         'outcome' => $command->outcome?->value,
                         'rejection_reason' => $command->rejection_reason,

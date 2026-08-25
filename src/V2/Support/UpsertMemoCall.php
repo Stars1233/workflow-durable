@@ -26,53 +26,30 @@ final class UpsertMemoCall implements YieldedCommand
         $normalized = [];
 
         foreach ($entries as $key => $value) {
-            if (! is_string($key) || $key === '' || strlen($key) > 64) {
-                throw new LogicException('Workflow v2 memo keys must be non-empty strings up to 64 characters.');
+            if (! is_string($key) || ! MemoPayload::isValidKey($key)) {
+                throw new LogicException(sprintf(
+                    'Workflow v2 memo keys must match %s.',
+                    MemoPayload::KEY_PATTERN,
+                ));
             }
 
-            $normalized[$key] = self::normalizeValue($value, sprintf('memo.%s', $key));
+            if ($value !== null) {
+                try {
+                    MemoPayload::envelope($value);
+                } catch (\InvalidArgumentException $exception) {
+                    throw new LogicException(sprintf(
+                        'Workflow v2 memo [%s] must be a portable Avro value. Error: %s',
+                        $key,
+                        $exception->getMessage(),
+                    ));
+                }
+            }
+
+            $normalized[$key] = $value;
         }
 
         ksort($normalized);
 
         $this->entries = $normalized;
-    }
-
-    private static function normalizeValue(mixed $value, string $path): mixed
-    {
-        if ($value === null || is_scalar($value)) {
-            return $value;
-        }
-
-        if (! is_array($value)) {
-            throw new LogicException(sprintf(
-                'Workflow v2 %s values must be JSON-like scalars, null, arrays, or objects.',
-                $path,
-            ));
-        }
-
-        if (array_is_list($value)) {
-            return array_map(
-                static fn (mixed $entry): mixed => self::normalizeValue($entry, $path . '[]'),
-                $value,
-            );
-        }
-
-        $normalized = [];
-
-        foreach ($value as $key => $entry) {
-            if (! is_string($key) || $key === '' || strlen($key) > 64) {
-                throw new LogicException(sprintf(
-                    'Workflow v2 %s keys must be non-empty strings up to 64 characters.',
-                    $path,
-                ));
-            }
-
-            $normalized[$key] = self::normalizeValue($entry, sprintf('%s.%s', $path, $key));
-        }
-
-        ksort($normalized);
-
-        return $normalized;
     }
 }

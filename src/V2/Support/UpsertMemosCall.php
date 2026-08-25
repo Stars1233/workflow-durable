@@ -15,7 +15,7 @@ final class UpsertMemosCall implements YieldedCommand
     public readonly array $memos;
 
     /**
-     * @param array<string, mixed> $memos Key-value pairs where values must be JSON-encodable
+     * @param array<string, mixed> $memos Key-value pairs containing portable Avro values
      */
     public function __construct(array $memos)
     {
@@ -26,11 +26,11 @@ final class UpsertMemosCall implements YieldedCommand
         $normalized = [];
 
         foreach ($memos as $key => $value) {
-            // Same key validation as search attributes
-            if (! is_string($key) || preg_match('/^[A-Za-z0-9_.:-]{1,64}$/', $key) !== 1) {
-                throw new LogicException(
-                    'Workflow v2 memo keys must be 1-64 URL-safe characters using letters, numbers, ".", "_", "-", and ":".'
-                );
+            if (! is_string($key) || ! MemoPayload::isValidKey($key)) {
+                throw new LogicException(sprintf(
+                    'Workflow v2 memo keys must match %s.',
+                    MemoPayload::KEY_PATTERN,
+                ));
             }
 
             // Null means delete
@@ -40,12 +40,11 @@ final class UpsertMemosCall implements YieldedCommand
                 continue;
             }
 
-            // Validate JSON-encodability
             try {
-                json_encode($value, JSON_THROW_ON_ERROR);
-            } catch (\JsonException $e) {
+                MemoPayload::envelope($value);
+            } catch (\InvalidArgumentException $e) {
                 throw new LogicException(sprintf(
-                    'Workflow v2 memo [%s] must be JSON-encodable. Error: %s',
+                    'Workflow v2 memo [%s] must be a portable Avro value. Error: %s',
                     $key,
                     $e->getMessage(),
                 ));

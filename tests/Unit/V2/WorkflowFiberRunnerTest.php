@@ -15,12 +15,14 @@ use Workflow\Exceptions\VersionNotSupportedException;
 use Workflow\Serializers\CodecDecodeException;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Enums\ParentClosePolicy;
+use Workflow\V2\Exceptions\HistoryEventShapeMismatchException;
 use Workflow\V2\Exceptions\RestoredWorkflowException;
 use Workflow\V2\Exceptions\StraightLineWorkflowRequiredException;
 use Workflow\V2\Exceptions\UnsupportedWorkflowYieldException;
 use Workflow\V2\Support\ActivityCall;
 use Workflow\V2\Support\ActivityOptions;
 use Workflow\V2\Support\ChildWorkflowOptions;
+use Workflow\V2\Support\MemoPayload;
 use Workflow\V2\Support\ServiceOperationCall;
 use Workflow\V2\Support\ServiceOperationOptions;
 use Workflow\V2\Support\ServiceOperationResult;
@@ -1346,6 +1348,101 @@ final class WorkflowFiberRunnerTest extends TestCase
         )->step();
     }
 
+    public function testRunnerAggregatesMemoCommandBeforeCompletionCommand(): void
+    {
+        $scheduled = $this->runnerFor(WorkerProtocolRunnerMemoWorkflow::class)->step();
+
+        $this->assertTrue($scheduled->completed);
+        $this->assertSame('complete_workflow', $scheduled->command['type']);
+        $this->assertSame([
+            'type' => 'upsert_memo',
+            'entries' => MemoPayload::envelope([
+                'obsolete' => null,
+                'phase' => 'worker-protocol',
+                'priority' => 3,
+            ]),
+        ], $scheduled->commands[0]);
+        $this->assertNull(Serializer::unserializeWithCodec('avro', $scheduled->commands[1]['result']));
+    }
+
+    public function testRunnerAggregatesMemoCommandBeforeActivityCommand(): void
+    {
+        $scheduled = $this->runnerFor(WorkerProtocolRunnerMemoThenActivityWorkflow::class)->step();
+
+        $this->assertFalse($scheduled->completed);
+        $this->assertSame('schedule_activity', $scheduled->command['type']);
+        $this->assertSame([
+            'type' => 'upsert_memo',
+            'entries' => MemoPayload::envelope([
+                'phase' => 'before-activity',
+            ]),
+        ], $scheduled->commands[0]);
+        $this->assertSame('schedule_activity', $scheduled->commands[1]['type']);
+        $this->assertSame(['ready'], Serializer::unserializeWithCodec('avro', $scheduled->commands[1]['arguments']));
+    }
+
+    public function testRunnerReplaysRecordedMemoUpsertBeforeEmittingNextCommand(): void
+    {
+        $scheduled = WorkflowFiberRunner::forClass(
+            WorkerProtocolRunnerMemoThenActivityWorkflow::class,
+            'workflow-1',
+            'run-1',
+            [],
+            'avro',
+            [[
+                'sequence' => 1,
+                'event_type' => 'MemoUpserted',
+                'payload' => [
+                    'sequence' => 1,
+                    'entries' => MemoPayload::envelope([
+                        'phase' => 'before-activity',
+                    ]),
+                    'merged' => MemoPayload::envelope([
+                        'phase' => 'before-activity',
+                    ]),
+                ],
+                'recorded_at' => '2026-08-24T20:00:00+00:00',
+            ]],
+        )->step();
+
+        $this->assertFalse($scheduled->completed);
+        $this->assertSame([[
+            'type' => 'schedule_activity',
+            'activity_type' => 'demo.after-memo',
+            'arguments' => $scheduled->commands[0]['arguments'],
+            'payload_codec' => 'avro',
+        ]], $scheduled->commands);
+        $this->assertSame(['ready'], Serializer::unserializeWithCodec('avro', $scheduled->commands[0]['arguments']));
+    }
+
+    public function testRunnerRejectsRecordedMemoUpsertWithDifferentEntries(): void
+    {
+        $this->expectException(HistoryEventShapeMismatchException::class);
+        $this->expectExceptionMessage('Recorded memo entries do not match the current yielded entries.');
+
+        WorkflowFiberRunner::forClass(
+            WorkerProtocolRunnerMemoThenActivityWorkflow::class,
+            'workflow-1',
+            'run-1',
+            [],
+            'avro',
+            [[
+                'sequence' => 1,
+                'event_type' => 'MemoUpserted',
+                'payload' => [
+                    'sequence' => 1,
+                    'entries' => MemoPayload::envelope([
+                        'phase' => 'changed-after-deployment',
+                    ]),
+                    'merged' => MemoPayload::envelope([
+                        'phase' => 'changed-after-deployment',
+                    ]),
+                ],
+                'recorded_at' => '2026-08-24T20:00:00+00:00',
+            ]],
+        )->step();
+    }
+
     public function testRunnerAggregatesSearchAttributeCommandBeforeCompletionCommand(): void
     {
         $scheduled = $this->runnerFor(WorkerProtocolRunnerSearchAttributesWorkflow::class)->step();
@@ -2111,6 +2208,30 @@ final class WorkerProtocolRunnerLegacyVersionThenActivityWorkflow extends Workfl
             $version === WorkflowStub::DEFAULT_VERSION ? 'demo.legacy-version' : 'demo.new-version',
             $version,
         );
+    }
+}
+
+final class WorkerProtocolRunnerMemoWorkflow extends Workflow
+{
+    public function handle(): void
+    {
+        Workflow::upsertMemo([
+            'obsolete' => null,
+            'phase' => 'worker-protocol',
+            'priority' => 3,
+        ]);
+    }
+}
+
+final class WorkerProtocolRunnerMemoThenActivityWorkflow extends Workflow
+{
+    public function handle(): mixed
+    {
+        Workflow::upsertMemo([
+            'phase' => 'before-activity',
+        ]);
+
+        return Workflow::activity('demo.after-memo', 'ready');
     }
 }
 

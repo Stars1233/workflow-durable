@@ -70,11 +70,17 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
 
     public function testWorkerCapabilitiesRespectTheirProtocolFloors(): void
     {
-        $this->assertSame(['query_tasks', 'message_streams'], WorkerProtocolVersion::workerCapabilities());
-        $this->assertSame([], WorkerProtocolVersion::workerCapabilitiesForVersion('1.7'));
-        $this->assertSame(['query_tasks'], WorkerProtocolVersion::workerCapabilitiesForVersion('1.14'));
         $this->assertSame(
-            ['query_tasks', 'message_streams'],
+            ['query_tasks', 'memo_upserts', 'message_streams'],
+            WorkerProtocolVersion::workerCapabilities(),
+        );
+        $this->assertSame([], WorkerProtocolVersion::workerCapabilitiesForVersion('1.7'));
+        $this->assertSame(
+            ['query_tasks', 'memo_upserts'],
+            WorkerProtocolVersion::workerCapabilitiesForVersion('1.14'),
+        );
+        $this->assertSame(
+            ['query_tasks', 'memo_upserts', 'message_streams'],
             WorkerProtocolVersion::workerCapabilitiesForVersion('1.15'),
         );
     }
@@ -90,6 +96,7 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
             'fail_update',
             'record_side_effect',
             'record_version_marker',
+            'upsert_memo',
             'upsert_search_attributes',
             'open_condition_wait',
             'open_signal_wait',
@@ -114,6 +121,10 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
         $this->assertSame(WorkerProtocolVersion::activityTaskVerbs(), $summary['activity_task_verbs']);
         $this->assertSame(WorkerProtocolVersion::queryTaskVerbs(), $summary['query_task_verbs']);
         $this->assertSame(WorkerProtocolVersion::workerCapabilities(), $summary['worker_capabilities']);
+        $this->assertSame(
+            \Workflow\V2\Support\WorkflowCommandNormalizer::payloadEnvelopeFields(),
+            $summary['workflow_task_command_payload_envelope_fields'],
+        );
         $this->assertSame(WorkerProtocolVersion::nonTerminalCommandTypes(), $summary['non_terminal_command_types']);
         $this->assertSame(WorkerProtocolVersion::terminalCommandTypes(), $summary['terminal_command_types']);
         $this->assertSame(WorkerHistoryPayloadContract::manifest(), $summary['workflow_history_budget']);
@@ -162,6 +173,39 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
         $this->assertFalse($shape['attribute_types']['required']);
         $this->assertSame(WorkflowSearchAttribute::VALID_TYPES, $shape['attribute_types']['valid_values']);
         $this->assertSame('infer_from_attribute_value', $shape['attribute_types']['omitted_values']);
+    }
+
+    public function testDescribeIncludesPortableMemoCommandAndHistorySemantics(): void
+    {
+        $shape = WorkerProtocolVersion::describe()['upsert_memo_command'];
+
+        $this->assertSame('upsert_memo', $shape['type']);
+        $this->assertSame('1.14', $shape['minimum_protocol_version']);
+        $this->assertSame('memo_upserts', $shape['worker_capability']);
+        $this->assertSame(['type', 'entries'], $shape['required_fields']);
+        $this->assertSame('payload-envelope<avro-map<string, Value|null>>', $shape['entries']['shape']);
+        $this->assertTrue($shape['entries']['payload_envelope_field']);
+        $this->assertSame('avro', $shape['entries']['codec']);
+        $this->assertSame(\Workflow\V2\Support\MemoPayload::KEY_PATTERN, $shape['entries']['key_pattern']);
+        $this->assertSame(0, preg_match('/' . $shape['entries']['key_pattern'] . '/D', '0'));
+        $this->assertSame(0, preg_match('/' . $shape['entries']['key_pattern'] . '/D', '-12'));
+        $this->assertSame(1, preg_match('/' . $shape['entries']['key_pattern'] . '/D', '0stage'));
+        $this->assertSame('delete_key', $shape['entries']['null_value']);
+        $this->assertSame('MemoUpserted', $shape['history']['event_type']);
+        $this->assertSame(['sequence', 'entries'], $shape['history']['replay_identity']);
+        $this->assertSame('payload-envelope<avro-map<string, Value>>', $shape['history']['merged_shape']);
+        $this->assertSame('does_not_append_or_apply', $shape['idempotency']['duplicate_completion']);
+        $this->assertSame(
+            'merged memo is inherited before commands on the continued run',
+            $shape['continue_as_new'],
+        );
+        $this->assertSame('runtime', $shape['external_payloads']['resolution_owner']);
+        $this->assertFalse($shape['external_payloads']['sdk_storage_drivers']);
+        $this->assertSame(['php', 'python', 'rust'], $shape['published_artifact_conformance']['worker_languages']);
+        $this->assertSame(
+            ['standalone_server', 'managed_cloud'],
+            $shape['published_artifact_conformance']['runtime_targets'],
+        );
     }
 
     public function testDescribeIncludesFailWorkflowCommandShape(): void

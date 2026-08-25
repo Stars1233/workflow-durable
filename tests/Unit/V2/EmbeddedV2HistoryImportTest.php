@@ -33,6 +33,7 @@ use Workflow\V2\Support\EmbeddedV2ImportContract;
 use Workflow\V2\Support\ExternalPayloadReference;
 use Workflow\V2\Support\ExternalPayloads;
 use Workflow\V2\Support\HistoryExport;
+use Workflow\V2\Support\MemoPayload;
 use Workflow\V2\Support\RunDetailView;
 use Workflow\V2\Support\RunSignalView;
 use Workflow\V2\Support\RunUpdateView;
@@ -44,7 +45,9 @@ final class EmbeddedV2HistoryImportTest extends TestCase
         $manifest = EmbeddedV2ImportContract::manifest();
 
         $this->assertSame('durable-workflow.v2.embedded-v2-import.contract', $manifest['schema']);
+        $this->assertSame(2, $manifest['version']);
         $this->assertSame(HistoryExport::SCHEMA, $manifest['history_export']['schema']);
+        $this->assertSame(2, $manifest['history_export']['schema_version']);
         $this->assertSame('workflow:v2:history-import {bundle}', $manifest['import']['command']);
         $this->assertSame(['embedded'], $manifest['eligibility']['supported_source_runtimes']);
         $this->assertSame('out_of_scope', $manifest['eligibility']['v1_history']);
@@ -207,14 +210,14 @@ final class EmbeddedV2HistoryImportTest extends TestCase
 
         WorkflowHistoryEvent::record($sourceRun, HistoryEventType::MemoUpserted, [
             'sequence' => 2,
-            'entries' => [
+            'entries' => MemoPayload::envelope([
                 'codec_metadata' => $memoValue,
                 'payload_codec' => 'json',
-            ],
-            'merged' => [
+            ]),
+            'merged' => MemoPayload::envelope([
                 'codec_metadata' => $memoValue,
                 'payload_codec' => 'json',
-            ],
+            ]),
         ]);
         WorkflowHistoryEvent::record($sourceRun, HistoryEventType::SearchAttributesUpserted, [
             'sequence' => 3,
@@ -246,8 +249,9 @@ final class EmbeddedV2HistoryImportTest extends TestCase
 
         $this->assertIsArray($memoEvent);
         $this->assertIsArray($searchEvent);
-        $this->assertSame($memoValue, $memoEvent['payload']['entries']['codec_metadata']);
-        $this->assertSame('json', $memoEvent['payload']['entries']['payload_codec']);
+        $memoEntries = MemoPayload::decodeEntries($memoEvent['payload']['entries']);
+        $this->assertEquals($memoValue, $memoEntries['codec_metadata']);
+        $this->assertSame('json', $memoEntries['payload_codec']);
         $this->assertSame('json', $searchEvent['payload']['attributes']['payload_codec']);
     }
 

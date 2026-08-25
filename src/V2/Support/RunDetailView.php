@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Workflow\V2\Support;
 
 use Throwable;
+use Workflow\Serializers\AvroValueJsonProjection;
 use Workflow\V2\Enums\RunStatus;
 use Workflow\V2\Models\WorkflowCommand;
 use Workflow\V2\Models\WorkflowRun;
@@ -155,7 +156,7 @@ final class RunDetailView
             'workflow_type' => $run->workflow_type,
             'business_key' => $summary?->business_key ?? $run->business_key ?? $run->instance?->business_key,
             'visibility_labels' => $summary?->visibility_labels ?? $run->visibility_labels ?? $run->instance?->visibility_labels ?? [],
-            'memo' => $run->typedMemos(),
+            'memo' => AvroValueJsonProjection::project($run->typedMemos()),
             'search_attributes' => self::resolveSearchAttributes($run, $summary),
             'workflow_definition_fingerprint' => $recordedDefinitionFingerprint,
             'workflow_definition_current_fingerprint' => $currentDefinitionFingerprint,

@@ -13,6 +13,7 @@ use Illuminate\Support\Str;
 use Illuminate\Support\Testing\Fakes\QueueFake;
 use LogicException;
 use Throwable;
+use Workflow\Serializers\AvroValueJsonProjection;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Contracts\HistoryExportRedactor;
@@ -975,7 +976,7 @@ final class WorkflowStub
                         'workflow_type' => $run->workflow_type,
                         'business_key' => $run->business_key,
                         'visibility_labels' => $run->visibility_labels,
-                        'memo' => $run->typedMemos(),
+                        'memo' => AvroValueJsonProjection::project($run->typedMemos()),
                         'search_attributes' => $run->typedSearchAttributes(),
                         'outcome' => $command->outcome?->value,
                         'rejection_reason' => $command->rejection_reason,
@@ -2639,7 +2640,7 @@ final class WorkflowStub
                     'workflow_type' => $run->workflow_type,
                     'business_key' => $run->business_key,
                     'visibility_labels' => $run->visibility_labels,
-                    'memo' => $run->typedMemos(),
+                    'memo' => AvroValueJsonProjection::project($run->typedMemos()),
                     'outcome' => $startCommand->outcome?->value,
                 ], null, $startCommand);
 

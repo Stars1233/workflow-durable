@@ -329,6 +329,33 @@ final class QueryStateReplayer
                 continue;
             }
 
+            if ($current instanceof UpsertMemoCall) {
+                $historySequence = $this->historySequenceForReplayPosition($historySequencesByPosition, $sequence);
+
+                $this->applyRecordedUpdates($run, $workflow, $historySequence);
+                WorkflowStepHistory::assertCompatible($run, $historySequence, WorkflowStepHistory::MEMO_UPSERT);
+
+                $upsertEvent = $this->memoUpsertedEvent($run, $historySequence);
+
+                if ($upsertEvent === null) {
+                    $this->syncWorkflowCursor($workflow, $sequence + 1);
+                    return new ReplayState($workflow, $sequence, $current);
+                }
+
+                MemoReplayIdentity::assertCompatible(
+                    $historySequence,
+                    $upsertEvent->payload['entries'] ?? null,
+                    $current->entries,
+                );
+
+                $this->syncWorkflowCursor($workflow, $sequence + 1);
+                $current = $workflowExecution->send(null, $upsertEvent->recorded_at);
+
+                ++$sequence;
+
+                continue;
+            }
+
             if ($current instanceof SignalCall) {
                 $historySequence = $this->historySequenceForReplayPosition($historySequencesByPosition, $sequence);
 
@@ -1269,6 +1296,17 @@ final class QueryStateReplayer
         return $event;
     }
 
+    private function memoUpsertedEvent(WorkflowRun $run, int $sequence): ?WorkflowHistoryEvent
+    {
+        /** @var WorkflowHistoryEvent|null $event */
+        $event = $run->historyEvents->first(
+            static fn (WorkflowHistoryEvent $event): bool => $event->event_type === HistoryEventType::MemoUpserted
+                && ($event->payload['sequence'] ?? null) === $sequence
+        );
+
+        return $event;
+    }
+
     private function serviceOperationEvent(WorkflowRun $run, int $sequence): ?WorkflowHistoryEvent
     {
         $events = $run->historyEvents->filter(
@@ -1538,6 +1576,7 @@ final class QueryStateReplayer
             HistoryEventType::ChildRunTerminated->value,
             HistoryEventType::SideEffectRecorded->value,
             HistoryEventType::VersionMarkerRecorded->value,
+            HistoryEventType::MemoUpserted->value,
             HistoryEventType::SearchAttributesUpserted->value,
         ], true);
     }

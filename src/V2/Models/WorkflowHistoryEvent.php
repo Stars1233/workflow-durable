@@ -13,6 +13,7 @@ use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Support\ConfiguredV2Models;
 use Workflow\V2\Support\ExternalPayloads;
 use Workflow\V2\Support\HistoryEventPayloadContract;
+use Workflow\V2\Support\MemoPayload;
 
 class WorkflowHistoryEvent extends Model
 {
@@ -59,6 +60,21 @@ class WorkflowHistoryEvent extends Model
         WorkflowTask|string|null $task = null,
         WorkflowCommand|string|null $command = null,
     ): self {
+        if ($eventType === HistoryEventType::MemoUpserted) {
+            foreach (['entries', 'merged'] as $field) {
+                if (! is_array($payload[$field] ?? null)) {
+                    throw new \InvalidArgumentException(sprintf(
+                        'MemoUpserted history field [%s] must be an Avro payload envelope.',
+                        $field,
+                    ));
+                }
+
+                $payload[$field] = MemoPayload::isInlineEnvelope($payload[$field])
+                    ? MemoPayload::canonicalMapEnvelope($payload[$field])
+                    : MemoPayload::mapEnvelope($payload[$field]);
+            }
+        }
+
         $taskModel = $task instanceof WorkflowTask ? $task : null;
         $commandModel = $command instanceof WorkflowCommand ? $command : null;
         $taskId = $taskModel?->id ?? (is_string($task) ? $task : null);

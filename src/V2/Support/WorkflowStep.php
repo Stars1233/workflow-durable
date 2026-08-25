@@ -153,6 +153,10 @@ final class WorkflowStep
                 'min_supported' => $yielded->minSupported,
                 'max_supported' => $yielded->maxSupported,
             ],
+            $yielded instanceof UpsertMemoCall => [
+                'type' => 'upsert_memo',
+                'entries' => MemoPayload::mapEnvelope($yielded->entries),
+            ],
             $yielded instanceof UpsertSearchAttributesCall => [
                 'type' => 'upsert_search_attributes',
                 'attributes' => $yielded->attributes,

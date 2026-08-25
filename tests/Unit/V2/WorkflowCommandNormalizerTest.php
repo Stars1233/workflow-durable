@@ -7,7 +7,9 @@ namespace Tests\Unit\V2;
 use Illuminate\Validation\ValidationException;
 use Tests\NonDatabaseTestCase;
 use Workflow\Serializers\Serializer;
+use Workflow\V2\Models\WorkflowMemo;
 use Workflow\V2\Models\WorkflowSearchAttribute;
+use Workflow\V2\Support\MemoPayload;
 use Workflow\V2\Support\WorkflowCommandNormalizer;
 
 final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
@@ -22,6 +24,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
             'complete_update' => ['result'],
             'record_side_effect' => ['result'],
             'start_service_operation' => ['request_payload'],
+            'upsert_memo' => ['entries'],
         ], WorkflowCommandNormalizer::payloadEnvelopeFields());
 
         $this->assertTrue(WorkflowCommandNormalizer::acceptsPayloadEnvelope('complete_update', 'result'));
@@ -29,6 +32,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
         $this->assertTrue(
             WorkflowCommandNormalizer::acceptsPayloadEnvelope('start_service_operation', 'request_payload')
         );
+        $this->assertTrue(WorkflowCommandNormalizer::acceptsPayloadEnvelope('upsert_memo', 'entries'));
         $this->assertFalse(WorkflowCommandNormalizer::acceptsPayloadEnvelope('complete_update', 'arguments'));
         $this->assertFalse(WorkflowCommandNormalizer::acceptsPayloadEnvelope('fail_update', 'result'));
     }
@@ -690,6 +694,108 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
                 'attributes' => [],
             ],
         ]);
+    }
+
+    public function testUpsertMemoCanonicalizesLanguageNeutralEntries(): void
+    {
+        $entries = [
+            'status' => 'waiting',
+            'attempt' => 2,
+            'remove_me' => null,
+            'payload_reference' => [
+                'external_storage' => [
+                    'key' => 'opaque-runtime-reference',
+                    'codec' => 'avro',
+                ],
+                'codec' => 'avro',
+            ],
+        ];
+        $out = WorkflowCommandNormalizer::normalize([[
+            'type' => 'upsert_memo',
+            'entries' => MemoPayload::envelope($entries),
+        ]]);
+
+        $this->assertSame('upsert_memo', $out[0]['type']);
+        $this->assertSame(MemoPayload::envelope($entries), $out[0]['entries']);
+        $this->assertEquals([
+            'attempt' => 2,
+            'payload_reference' => $entries['payload_reference'],
+            'remove_me' => null,
+            'status' => 'waiting',
+        ], MemoPayload::decodeEntries($out[0]['entries']));
+    }
+
+    public function testUpsertMemoRejectsEmptyAndOversizedEntries(): void
+    {
+        $emptyErrors = $this->normalizeAndCaptureErrors([[
+            'type' => 'upsert_memo',
+            'entries' => MemoPayload::envelope([]),
+        ]]);
+
+        $this->assertArrayHasKey('commands.0.entries', $emptyErrors);
+
+        $oversizedErrors = $this->normalizeAndCaptureErrors([[
+            'type' => 'upsert_memo',
+            'entries' => MemoPayload::envelope([
+                'too_large' => str_repeat('x', WorkflowMemo::MAX_VALUE_SIZE_BYTES + 1),
+            ]),
+        ]]);
+
+        $this->assertArrayHasKey('commands.0.entries.too_large', $oversizedErrors);
+    }
+
+    public function testUpsertMemoAllowsAnAtLimitMemoToBeReplacedInOnePatch(): void
+    {
+        $entries = [];
+        for ($index = 0; $index < WorkflowMemo::MAX_MEMOS_PER_RUN; $index++) {
+            $entries[sprintf('existing_%03d', $index)] = null;
+        }
+        $entries['replacement'] = 'current';
+
+        $out = WorkflowCommandNormalizer::normalize([[
+            'type' => 'upsert_memo',
+            'entries' => MemoPayload::envelope($entries),
+        ]]);
+
+        $decoded = MemoPayload::decodeEntries($out[0]['entries']);
+        $this->assertCount(WorkflowMemo::MAX_MEMOS_PER_RUN + 1, $decoded);
+        $this->assertSame('current', $decoded['replacement']);
+    }
+
+    public function testUpsertMemoRejectsRawJsonEntriesAndJsonEnvelope(): void
+    {
+        $rawErrors = $this->normalizeAndCaptureErrors([[
+            'type' => 'upsert_memo',
+            'entries' => [
+                'status' => 'waiting',
+            ],
+        ]]);
+        $jsonErrors = $this->normalizeAndCaptureErrors([[
+            'type' => 'upsert_memo',
+            'entries' => [
+                'codec' => 'json',
+                'blob' => '{"status":"waiting"}',
+            ],
+        ]]);
+
+        $this->assertArrayHasKey('commands.0.entries', $rawErrors);
+        $this->assertStringContainsString('standard Avro', $rawErrors['commands.0.entries'][0]);
+        $this->assertArrayHasKey('commands.0.entries.codec', $jsonErrors);
+        $this->assertStringContainsString('unsupported_payload_codec', $jsonErrors['commands.0.entries.codec'][0]);
+    }
+
+    public function testUpsertMemoRejectsMalformedAvroEnvelope(): void
+    {
+        $errors = $this->normalizeAndCaptureErrors([[
+            'type' => 'upsert_memo',
+            'entries' => [
+                'codec' => 'avro',
+                'blob' => base64_encode('not-an-avro-single-object'),
+            ],
+        ]]);
+
+        $this->assertArrayHasKey('commands.0.entries', $errors);
+        $this->assertStringContainsString('invalid_payload_framing', $errors['commands.0.entries'][0]);
     }
 
     public function testUpsertSearchAttributesPreservesCompatibleDeclaredTypes(): void

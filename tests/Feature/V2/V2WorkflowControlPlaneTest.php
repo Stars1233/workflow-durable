@@ -14,6 +14,8 @@ use Tests\Fixtures\V2\TestQueryWorkflow;
 use Tests\Fixtures\V2\TestSignalWorkflow;
 use Tests\Fixtures\V2\TestUpdateWorkflow;
 use Tests\TestCase;
+use Workflow\Serializers\AvroBinaryValue;
+use Workflow\Serializers\AvroMapValue;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\CommandContext;
@@ -34,7 +36,9 @@ use Workflow\V2\Models\WorkflowRunSummary;
 use Workflow\V2\Models\WorkflowTask;
 use Workflow\V2\Support\DefaultHistoryProjectionRole;
 use Workflow\V2\Support\DefaultWorkflowControlPlane;
+use Workflow\V2\Support\MemoUpsertService;
 use Workflow\V2\Support\RunSummaryProjector;
+use Workflow\V2\Support\UpsertMemosCall;
 use Workflow\V2\Support\WorkerCompatibilityFleet;
 use Workflow\V2\WorkflowStub;
 
@@ -440,6 +444,83 @@ final class V2WorkflowControlPlaneTest extends TestCase
         $this->assertTrue($result['started']);
         $this->assertSame('ctrl-plane-existing-1', $result['workflow_instance_id']);
         $this->assertSame('returned_existing_active', $result['outcome']);
+    }
+
+    public function testExistingRunControlPlaneStartHistoryProjectsPortableMemoValues(): void
+    {
+        $first = $this->controlPlane->start(
+            'remote-workflow-type',
+            'ctrl-plane-portable-memo-existing',
+            [
+                'connection' => 'redis',
+                'queue' => 'default',
+            ],
+        );
+
+        /** @var WorkflowRun $run */
+        $run = WorkflowRun::query()->findOrFail($first['workflow_run_id']);
+        (new MemoUpsertService())->upsert($run, new UpsertMemosCall([
+            'adapter_map' => AvroMapValue::fromPairs([
+                ['0', 'numeric-string-key'],
+                ['nested', AvroBinaryValue::fromBytes("nested\xFF")],
+            ]),
+            'binary_value' => AvroBinaryValue::fromBytes("\x00\xFF"),
+        ]), $run->last_history_sequence + 1);
+
+        $rejected = $this->controlPlane->start('remote-workflow-type', 'ctrl-plane-portable-memo-existing');
+        $returned = $this->controlPlane->start(
+            'remote-workflow-type',
+            'ctrl-plane-portable-memo-existing',
+            [
+                'duplicate_start_policy' => 'return_existing_active',
+            ],
+        );
+
+        $events = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->whereIn('event_type', [
+                HistoryEventType::StartAccepted->value,
+                HistoryEventType::StartRejected->value,
+            ])
+            ->orderBy('sequence')
+            ->get()
+            ->slice(1)
+            ->values();
+        $expectedProjection = [
+            'adapter_map' => [
+                '$type' => 'map',
+                'entries' => [
+                    [
+                        'key' => '0',
+                        'value' => 'numeric-string-key',
+                    ],
+                    [
+                        'key' => 'nested',
+                        'value' => [
+                            '$type' => 'bytes',
+                            'base64' => 'bmVzdGVk/w==',
+                        ],
+                    ],
+                ],
+            ],
+            'binary_value' => [
+                '$type' => 'bytes',
+                'base64' => 'AP8=',
+            ],
+        ];
+
+        $this->assertFalse($rejected['started']);
+        $this->assertTrue($returned['started']);
+        $this->assertCount(2, $events);
+        $this->assertSame([
+            HistoryEventType::StartRejected,
+            HistoryEventType::StartAccepted,
+        ], $events->pluck('event_type')
+            ->all());
+        foreach ($events as $event) {
+            $this->assertSame($expectedProjection, $event->payload['memo']);
+            $this->assertJson(json_encode($event->payload, JSON_THROW_ON_ERROR));
+        }
     }
 
     public function testStartUsesHistoryProjectionRoleBindingForExistingRunProjection(): void

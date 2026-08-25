@@ -17,8 +17,8 @@ return new class() extends WorkflowMigration {
             // Memo identity
             $table->string('key', 191);
 
-            // Memo value - JSON-friendly, no codec protection
-            // Memos are operator-visible metadata, not secret-bearing payloads
+            // JSON-safe Avro payload envelope. The opaque blob preserves the
+            // portable Value branch and binary bytes across database reloads.
             $table->json('value');
 
             // Metadata
