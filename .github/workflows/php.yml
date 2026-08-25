@@ -129,6 +129,7 @@ jobs:
         php -l scripts/ci/compare-platform-conformance-mirrors.php
         php -l scripts/ci/check-laravel-dependency-security.php
         php -l scripts/ci/laravel-embedded-upgrade-matrix.php
+        php -l scripts/ci/verify-history-export-source-identity.php
         python - <<'PY'
         import ast
         from pathlib import Path

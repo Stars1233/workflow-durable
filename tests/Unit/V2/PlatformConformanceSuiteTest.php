@@ -7,6 +7,8 @@ namespace Tests\Unit\V2;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 use RuntimeException;
+use Symfony\Component\Process\Process;
+use Workflow\V2\Conformance\PlatformArtifactSourceIdentity;
 use Workflow\V2\Support\PlatformConformanceSuite;
 use Workflow\V2\Support\SurfaceStabilityContract;
 
@@ -538,6 +540,66 @@ final class PlatformConformanceSuiteTest extends TestCase
         $this->assertSame('base64', $memoEnvelope['properties']['blob']['contentEncoding']);
     }
 
+    public function testHistoryExportSourceIdentitySeparatesCurrentCarrierFromRetainedOrigin(): void
+    {
+        $root = dirname(__DIR__, 3);
+        $identity = PlatformArtifactSourceIdentity::fromManifest(PlatformConformanceSuite::manifest());
+
+        $this->assertSame(
+            'resources/conformance/suite-v44/platform-protocol-specs/history-export-bundle.schema.json',
+            $identity['carrier_path'],
+        );
+        $this->assertSame(
+            'resources/conformance/suite-v43/platform-protocol-specs/history-export-bundle.schema.json',
+            $identity['origin_path'],
+        );
+        $this->assertSame('2.0.0-rc.42', $identity['source_release']);
+        $this->assertNotSame($identity['carrier_path'], $identity['origin_path']);
+
+        $process = new Process([
+            PHP_BINARY,
+            $root . '/scripts/ci/verify-history-export-source-identity.php',
+            'verify',
+            $root . '/resources/platform-conformance-contract.json',
+            $root,
+            $root . '/' . $identity['origin_path'],
+        ]);
+        $process->mustRun();
+
+        $this->assertStringContainsString('Verified history-export carrier', $process->getOutput());
+    }
+
+    public function testHistoryExportSourceVerificationRejectsChangedResolverBytes(): void
+    {
+        $root = dirname(__DIR__, 3);
+        $identity = PlatformArtifactSourceIdentity::fromManifest(PlatformConformanceSuite::manifest());
+        $resolver = tempnam(sys_get_temp_dir(), 'workflow-history-origin-');
+        if ($resolver === false) {
+            $this->fail('Unable to create a temporary retained-origin fixture.');
+        }
+
+        try {
+            $originBytes = file_get_contents($root . '/' . $identity['origin_path']);
+            $this->assertIsString($originBytes);
+            file_put_contents($resolver, $originBytes . "\n");
+
+            $process = new Process([
+                PHP_BINARY,
+                $root . '/scripts/ci/verify-history-export-source-identity.php',
+                'verify',
+                $root . '/resources/platform-conformance-contract.json',
+                $root,
+                $resolver,
+            ]);
+            $process->run();
+
+            $this->assertFalse($process->isSuccessful());
+            $this->assertStringContainsString('resolver bytes do not match', $process->getErrorOutput());
+        } finally {
+            @unlink($resolver);
+        }
+    }
+
     public function testStableSourceReferenceClosureIsCompleteAndBound(): void
     {
         $validator = new ReflectionMethod(PlatformConformanceSuite::class, 'assertStableSourceReferenceClosure');
@@ -580,6 +642,53 @@ final class PlatformConformanceSuiteTest extends TestCase
             },
             'missing retained source release' => static function (array &$manifest): void {
                 unset($manifest['source_dependencies']['history-export-bundle.schema.json']['source_release']);
+            },
+            'packaged carrier path drift' => static function (array &$manifest): void {
+                $manifest['source_dependencies']['history-export-bundle.schema.json']['source_path'] =
+                    str_replace(
+                        'suite-v44',
+                        'suite-v43',
+                        $manifest['source_dependencies']['history-export-bundle.schema.json']['source_path'],
+                    );
+            },
+            'retained origin path drift with matching release and digest' => static function (array &$manifest): void {
+                $resolver = str_replace(
+                    'suite-v43',
+                    'suite-v44',
+                    $manifest['source_dependencies']['history-export-bundle.schema.json']['resolver_url'],
+                );
+                $manifest['source_dependencies']['history-export-bundle.schema.json']['resolver_url'] = $resolver;
+                $manifest['artifact_version_history']['history_export_bundle']['bindings'][1]['resolver_url'] =
+                    $resolver;
+            },
+            'retained origin resolver drift with matching release and digest' => static function (
+                array &$manifest
+            ): void {
+                $resolver = $manifest['source_dependencies']['history-export-bundle.schema.json']['resolver_url']
+                    . '?mutable=1';
+                $manifest['source_dependencies']['history-export-bundle.schema.json']['resolver_url'] = $resolver;
+                $manifest['artifact_version_history']['history_export_bundle']['bindings'][1]['resolver_url'] =
+                    $resolver;
+            },
+            'retained origin release drift with matching digest' => static function (array &$manifest): void {
+                $dependency = &$manifest['source_dependencies']['history-export-bundle.schema.json'];
+                $current = &$manifest['artifact_version_history']['history_export_bundle']['bindings'][1];
+                $dependency['source_release'] = '2.0.0-rc.43';
+                $dependency['artifact_id'] = str_replace('2.0.0-rc.42', '2.0.0-rc.43', $dependency['artifact_id']);
+                $dependency['resolver_url'] = str_replace(
+                    '2.0.0-rc.42',
+                    '2.0.0-rc.43',
+                    $dependency['resolver_url'],
+                );
+                $current['source_release'] = $dependency['source_release'];
+                $current['artifact_id'] = $dependency['artifact_id'];
+                $current['resolver_url'] = $dependency['resolver_url'];
+                unset($dependency, $current);
+            },
+            'retained origin digest declaration drift' => static function (array &$manifest): void {
+                $digest = 'sha256:' . str_repeat('0', 64);
+                $manifest['source_dependencies']['history-export-bundle.schema.json']['sha256'] = $digest;
+                $manifest['artifact_version_history']['history_export_bundle']['bindings'][1]['sha256'] = $digest;
             },
             'resolver retained release drift' => static function (array &$manifest): void {
                 $manifest['source_dependencies']['history-export-bundle.schema.json']['resolver_url'] =

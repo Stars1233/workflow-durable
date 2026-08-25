@@ -8,6 +8,7 @@ use JsonException;
 use RuntimeException;
 use Symfony\Component\Yaml\Exception\ParseException;
 use Symfony\Component\Yaml\Yaml;
+use Workflow\V2\Conformance\PlatformArtifactSourceIdentity;
 use Workflow\V2\Conformance\WorkerProtocolArtifactBindings;
 
 /**
@@ -118,6 +119,7 @@ final class PlatformConformanceSuite
             throw new RuntimeException('Platform conformance suite mirror identity does not match the class contract.');
         }
 
+        PlatformArtifactSourceIdentity::fromManifest($decoded);
         self::assertStableFixtureSources($decoded);
         self::assertCliJsonEnvelopeClosure($decoded);
         self::assertStableSourceReferenceClosure($decoded);
@@ -600,6 +602,8 @@ final class PlatformConformanceSuite
      */
     private static function sourceDependencies(array $manifest): array
     {
+        PlatformArtifactSourceIdentity::fromManifest($manifest);
+
         $declaredDependencies = $manifest['source_dependencies'] ?? null;
         if (! is_array($declaredDependencies) || $declaredDependencies === []) {
             throw new RuntimeException('Platform conformance suite source dependencies are missing.');

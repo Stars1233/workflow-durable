@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.44` separates the packaged history-export schema carrier
+  path from its retained immutable origin. Runtime manifest validation and the
+  published-package audit now enforce the same release, origin path, resolver,
+  artifact, and digest tuple while continuing to verify resolver bytes against
+  the current package carrier.
 - Workflow `2.0.0-rc.43` preserves canonical search-attribute type identity
   through worker completion, full and paginated history, database restart, and
   replay. Worker protocol 1.16 gates declared type metadata so older Server
