@@ -43,6 +43,9 @@ final class TimerCancellation
             'fire_at' => self::stringValue($scheduledPayload['fire_at'] ?? null) ?? $timer->fire_at?->toJSON(),
             'timer_kind' => self::stringValue($scheduledPayload['timer_kind'] ?? null),
             'condition_wait_id' => self::stringValue($scheduledPayload['condition_wait_id'] ?? null),
+            'condition_wait_occurrence_id' => self::stringValue(
+                $scheduledPayload['condition_wait_occurrence_id'] ?? null
+            ),
             'condition_key' => self::stringValue($scheduledPayload['condition_key'] ?? null),
             'condition_definition_fingerprint' => self::stringValue(
                 $scheduledPayload['condition_definition_fingerprint'] ?? null

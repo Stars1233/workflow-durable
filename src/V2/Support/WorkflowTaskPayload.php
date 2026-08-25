@@ -108,6 +108,7 @@ final class WorkflowTaskPayload
         $timerId = self::nonEmptyString($payload['timer_id'] ?? null);
         $timerKind = self::nonEmptyString($payload['timer_kind'] ?? null);
         $conditionWaitId = self::nonEmptyString($payload['condition_wait_id'] ?? null);
+        $conditionWaitOccurrenceId = self::nonEmptyString($payload['condition_wait_occurrence_id'] ?? null);
         $signalWaitId = self::nonEmptyString($payload['signal_wait_id'] ?? null);
         $workflowWaitKind = match ($timerKind) {
             'condition_timeout' => 'condition',
@@ -130,6 +131,7 @@ final class WorkflowTaskPayload
             'timer_id' => $timerId,
             'timer_kind' => $timerKind,
             'condition_wait_id' => $conditionWaitId,
+            'condition_wait_occurrence_id' => $conditionWaitOccurrenceId,
             'condition_key' => self::nonEmptyString($payload['condition_key'] ?? null),
             'condition_definition_fingerprint' => self::nonEmptyString(
                 $payload['condition_definition_fingerprint'] ?? null

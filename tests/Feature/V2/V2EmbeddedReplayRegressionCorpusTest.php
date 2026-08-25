@@ -26,6 +26,7 @@ use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowRunSummary;
 use Workflow\V2\Models\WorkflowSearchAttribute;
 use Workflow\V2\Models\WorkflowTask;
+use Workflow\V2\Support\ConditionWaits;
 use Workflow\V2\Support\EmbeddedV2HistoryImport;
 use Workflow\V2\Support\HistoryExport;
 use Workflow\V2\Support\QueryStateReplayer;
@@ -54,6 +55,10 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
 
         foreach ($this->fixtures() as $fixture) {
             $this->executeColdReplayFixture($fixture);
+
+            if (($fixture['id'] ?? null) === 'adjacent-condition-wait-occurrence-identity') {
+                $this->assertAdjacentConditionWaitOccurrencesRemainDistinct($fixture);
+            }
 
             if (($fixture['id'] ?? null) === 'parallel-child-group-final-sibling-release') {
                 $this->assertStandaloneParallelChildBarrierFixture($fixture);
@@ -121,6 +126,19 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
 
             $this->assertSame([], $mismatches, implode(' ', $mismatches));
         }
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     */
+    private function assertAdjacentConditionWaitOccurrencesRemainDistinct(array $fixture): void
+    {
+        $run = $this->createRunFromFixture($fixture);
+
+        $this->assertSame(
+            $fixture['expected_condition_wait_occurrence_ids'],
+            array_column(ConditionWaits::forRun($run->fresh(['historyEvents'])), 'condition_wait_occurrence_id'),
+        );
     }
 
     /**

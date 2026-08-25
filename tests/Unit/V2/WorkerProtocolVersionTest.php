@@ -19,7 +19,7 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
 
     public function testVersionTracksServiceOperationCommandShape(): void
     {
-        $this->assertSame('1.16', WorkerProtocolVersion::VERSION);
+        $this->assertSame('1.17', WorkerProtocolVersion::VERSION);
         $this->assertContains('start_service_operation', WorkerProtocolVersion::nonTerminalCommandTypes());
         $this->assertSame(0, WorkerProtocolVersion::longPollSemantics()['min_timeout_seconds']);
     }
@@ -71,7 +71,13 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
     public function testWorkerCapabilitiesRespectTheirProtocolFloors(): void
     {
         $this->assertSame(
-            ['query_tasks', 'memo_upserts', 'message_streams', 'typed_search_attributes'],
+            [
+                'query_tasks',
+                'memo_upserts',
+                'message_streams',
+                'typed_search_attributes',
+                'condition_wait_occurrence_identity',
+            ],
             WorkerProtocolVersion::workerCapabilities(),
         );
         $this->assertSame([], WorkerProtocolVersion::workerCapabilitiesForVersion('1.7'));
@@ -86,6 +92,16 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
         $this->assertSame(
             ['query_tasks', 'memo_upserts', 'message_streams', 'typed_search_attributes'],
             WorkerProtocolVersion::workerCapabilitiesForVersion('1.16'),
+        );
+        $this->assertSame(
+            [
+                'query_tasks',
+                'memo_upserts',
+                'message_streams',
+                'typed_search_attributes',
+                'condition_wait_occurrence_identity',
+            ],
+            WorkerProtocolVersion::workerCapabilitiesForVersion('1.17'),
         );
     }
 
@@ -212,6 +228,36 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
             ['standalone_server', 'managed_cloud'],
             $shape['published_artifact_conformance']['runtime_targets'],
         );
+    }
+
+    public function testDescribeVersionGatesConditionWaitOccurrenceIdentity(): void
+    {
+        $shape = WorkerProtocolVersion::describe()['condition_wait_command'];
+
+        $this->assertSame('open_condition_wait', $shape['type']);
+        $this->assertSame('1.9', $shape['minimum_protocol_version']);
+        $this->assertSame('1.17', $shape['condition_wait_occurrence_id']['minimum_protocol_version']);
+        $this->assertSame(
+            WorkerProtocolVersion::CAPABILITY_CONDITION_WAIT_OCCURRENCE_IDENTITY,
+            $shape['condition_wait_occurrence_id']['worker_capability'],
+        );
+        $this->assertSame('condition_wait_occurrence_id', $shape['history']['occurrence_field']);
+        $this->assertSame(
+            [
+                'sequence',
+                'condition_wait_occurrence_id',
+                'condition_key',
+                'condition_definition_fingerprint',
+                'timeout_seconds',
+            ],
+            $shape['history']['replay_identity'],
+        );
+        $this->assertTrue($shape['version_gate']['capable_workers_must_submit_occurrence_id']);
+        $this->assertTrue($shape['version_gate']['servers_below_minimum_must_reject_before_execution']);
+        $this->assertSame(400, $shape['version_gate']['rejection_status']);
+        $this->assertSame('unsupported_protocol_version', $shape['version_gate']['rejection_reason']);
+        $this->assertFalse(WorkerProtocolVersion::supportsConditionWaitOccurrenceIdentity('1.16'));
+        $this->assertTrue(WorkerProtocolVersion::supportsConditionWaitOccurrenceIdentity('1.17'));
     }
 
     public function testDescribeIncludesFailWorkflowCommandShape(): void

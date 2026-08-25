@@ -928,6 +928,40 @@ exit(0);
                     / "tests/Fixtures/V2/ReplayRegression/ignored-metadata.json"
                 ).unlink()
 
+    def test_condition_wait_occurrences_have_distinct_replay_identity(self) -> None:
+        base = self.replay_fixture("condition-wait-occurrence-base")
+        base["history"].append(
+            {
+                "event_type": "ConditionWaitOpened",
+                "payload": {
+                    "sequence": 1,
+                    "condition_wait_id": "condition:1",
+                    "condition_wait_occurrence_id": "rust:condition-wait:0",
+                    "condition_key": "approval.ready",
+                    "condition_definition_fingerprint": "condition-fp",
+                },
+            }
+        )
+        self.write_json("tests/Fixtures/V2/ReplayRegression/base.json", base)
+        self.commit_current_as_base()
+
+        adjacent = json.loads(json.dumps(base))
+        adjacent["id"] = "condition-wait-occurrence-adjacent"
+        adjacent["history"][1]["payload"]["condition_wait_occurrence_id"] = (
+            "rust:condition-wait:1"
+        )
+        self.write_json(
+            "tests/Fixtures/V2/ReplayRegression/adjacent.json",
+            adjacent,
+        )
+
+        result = self.validate()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        counts = json.loads(result.stdout)["counts"]["replay"]
+        self.assertEqual(1, counts["base"])
+        self.assertEqual(2, counts["current"])
+
     def test_shadowed_event_namespace_cannot_manufacture_growth(self) -> None:
         base = self.official_history_replay_fixture()
         base["history"][0]["payload"]["namespace"] = "effective-namespace"

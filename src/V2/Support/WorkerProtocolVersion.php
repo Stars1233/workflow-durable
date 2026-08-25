@@ -30,7 +30,7 @@ final class WorkerProtocolVersion
      * pagination semantics). Bump the minor for additive changes (new
      * optional fields, new non-terminal command types).
      */
-    public const VERSION = '1.16';
+    public const VERSION = '1.17';
 
     /**
      * Worker registration capability for server-routed workflow query
@@ -58,6 +58,12 @@ final class WorkerProtocolVersion
      * command identity and replay metadata.
      */
     public const CAPABILITY_TYPED_SEARCH_ATTRIBUTES = 'typed_search_attributes';
+
+    /**
+     * Worker registration capability for explicit authored condition-wait
+     * occurrence identity across commands, history, and replay.
+     */
+    public const CAPABILITY_CONDITION_WAIT_OCCURRENCE_IDENTITY = 'condition_wait_occurrence_identity';
 
     /**
      * Stable fail-closed reason a worker or server must return when it
@@ -134,6 +140,10 @@ final class WorkerProtocolVersion
     private const UPSERT_SEARCH_ATTRIBUTES_MINIMUM_PROTOCOL_VERSION = '1.8';
 
     private const TYPED_SEARCH_ATTRIBUTES_MINIMUM_PROTOCOL_VERSION = '1.16';
+
+    private const CONDITION_WAIT_MINIMUM_PROTOCOL_VERSION = '1.9';
+
+    private const CONDITION_WAIT_OCCURRENCE_IDENTITY_MINIMUM_PROTOCOL_VERSION = '1.17';
 
     private const UPSERT_MEMO_MINIMUM_PROTOCOL_VERSION = '1.14';
 
@@ -229,6 +239,10 @@ final class WorkerProtocolVersion
             $capabilities[] = self::CAPABILITY_TYPED_SEARCH_ATTRIBUTES;
         }
 
+        if (self::supportsConditionWaitOccurrenceIdentity($protocolVersion)) {
+            $capabilities[] = self::CAPABILITY_CONDITION_WAIT_OCCURRENCE_IDENTITY;
+        }
+
         return $capabilities;
     }
 
@@ -240,6 +254,14 @@ final class WorkerProtocolVersion
     public static function supportsTypedSearchAttributes(string $protocolVersion): bool
     {
         return self::supportsFeatureVersion($protocolVersion, self::TYPED_SEARCH_ATTRIBUTES_MINIMUM_PROTOCOL_VERSION);
+    }
+
+    public static function supportsConditionWaitOccurrenceIdentity(string $protocolVersion): bool
+    {
+        return self::supportsFeatureVersion(
+            $protocolVersion,
+            self::CONDITION_WAIT_OCCURRENCE_IDENTITY_MINIMUM_PROTOCOL_VERSION,
+        );
     }
 
     /**
@@ -384,6 +406,7 @@ final class WorkerProtocolVersion
      *     query_tasks: array<string, mixed>,
      *     upsert_memo_command: array<string, mixed>,
      *     upsert_search_attributes_command: array<string, mixed>,
+     *     condition_wait_command: array<string, mixed>,
      *     service_operation_command: array<string, mixed>,
      *     message_streams: array<string, mixed>,
      *     fail_workflow_command: array<string, mixed>,
@@ -419,6 +442,7 @@ final class WorkerProtocolVersion
             'query_tasks' => self::queryTaskSemantics(),
             'upsert_memo_command' => self::upsertMemoCommandShape(),
             'upsert_search_attributes_command' => self::upsertSearchAttributesCommandShape(),
+            'condition_wait_command' => self::conditionWaitCommandShape(),
             'service_operation_command' => self::serviceOperationCommandShape(),
             'message_streams' => self::messageStreamSemantics(),
             'fail_workflow_command' => self::failWorkflowCommandShape(),
@@ -531,6 +555,65 @@ final class WorkerProtocolVersion
                 'event_type' => 'SearchAttributesUpserted',
                 'replay_identity' => ['sequence', 'attributes', 'attribute_types'],
                 'legacy_missing_attribute_types' => 'compare values only and preserve unknown typed identity',
+            ],
+        ];
+    }
+
+    /**
+     * Published workflow-task command and history contract for condition waits.
+     *
+     * @return array<string, mixed>
+     */
+    public static function conditionWaitCommandShape(): array
+    {
+        return [
+            'type' => 'open_condition_wait',
+            'category' => 'non_terminal_command',
+            'minimum_protocol_version' => self::CONDITION_WAIT_MINIMUM_PROTOCOL_VERSION,
+            'required_fields' => ['type'],
+            'optional_fields' => [
+                'condition_key',
+                'condition_definition_fingerprint',
+                'condition_wait_occurrence_id',
+                'timeout_seconds',
+            ],
+            'condition_wait_occurrence_id' => [
+                'shape' => 'non-empty string',
+                'required' => false,
+                'minimum_protocol_version' => self::CONDITION_WAIT_OCCURRENCE_IDENTITY_MINIMUM_PROTOCOL_VERSION,
+                'worker_capability' => self::CAPABILITY_CONDITION_WAIT_OCCURRENCE_IDENTITY,
+                'meaning' => 'explicit deterministic identity of one authored wait occurrence',
+            ],
+            'history' => [
+                'lifecycle_event_types' => [
+                    'ConditionWaitOpened',
+                    'ConditionWaitSatisfied',
+                    'ConditionWaitTimedOut',
+                ],
+                'timeout_event_types' => ['TimerScheduled', 'TimerCancelled', 'TimerFired'],
+                'timeout_event_selector' => [
+                    'timer_kind' => 'condition_timeout',
+                ],
+                'occurrence_field' => 'condition_wait_occurrence_id',
+                'propagation' => 'exact_value_on_every_event_for_one_wait_lifecycle',
+                'replay_identity' => [
+                    'sequence',
+                    'condition_wait_occurrence_id',
+                    'condition_key',
+                    'condition_definition_fingerprint',
+                    'timeout_seconds',
+                ],
+                'physical_reevaluations' => 'reuse_open_occurrence_identity',
+                'adjacent_authored_waits' => 'distinct_occurrence_identity',
+                'legacy_missing_occurrence_id' => 'legacy_condition_wait_without_occurrence_identity',
+            ],
+            'version_gate' => [
+                'workers_below_minimum_must_not_advertise_capability' => true,
+                'workers_below_minimum_must_not_submit_occurrence_id' => true,
+                'capable_workers_must_submit_occurrence_id' => true,
+                'servers_below_minimum_must_reject_before_execution' => true,
+                'rejection_status' => 400,
+                'rejection_reason' => 'unsupported_protocol_version',
             ],
         ];
     }

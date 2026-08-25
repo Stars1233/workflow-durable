@@ -208,11 +208,11 @@ final class PlatformProtocolSpecsTest extends TestCase
     {
         $root = dirname(__DIR__, 3);
         $workerSpecPath = $root
-            . '/resources/conformance/suite-v44/platform-protocol-specs/worker-protocol-api.openapi.yaml';
+            . '/resources/conformance/suite-v45/platform-protocol-specs/worker-protocol-api.openapi.yaml';
         $workerSpec = Yaml::parseFile($workerSpecPath);
 
         $this->assertIsArray($workerSpec);
-        $this->assertSame('12', $workerSpec['info']['version']);
+        $this->assertSame('13', $workerSpec['info']['version']);
         $this->assertSame(16, $workerSpec['x-durable-workflow-catalog-version']);
 
         $route = $workerSpec['paths']['/worker/registrations/{workerId}'];
@@ -285,7 +285,7 @@ final class PlatformProtocolSpecsTest extends TestCase
         $this->assertCount(1, $workerApiSources);
         $this->assertSame('durable-workflow.v2.worker-protocol-api@catalog-16', $workerApiSources[0]['artifact_id']);
         $this->assertSame(
-            'https://durable-workflow.github.io/platform-protocol-specs/v1.16/'
+            'https://durable-workflow.github.io/platform-protocol-specs/v1.17/'
                 . 'worker-protocol-api.openapi.yaml',
             $workerApiSources[0]['resolver_url'],
         );
@@ -299,7 +299,7 @@ final class PlatformProtocolSpecsTest extends TestCase
         $this->assertArrayNotHasKey('/workers/{workerId}', $workerSpec['paths']);
     }
 
-    public function testCurrentWorkerProtocolAddsTypedSearchAttributesWithoutChangingHistoricalBundles(): void
+    public function testCurrentWorkerProtocolAddsConditionWaitOccurrenceIdentityWithoutChangingHistoricalBundles(): void
     {
         $root = dirname(__DIR__, 3) . '/resources/conformance';
         $beta = Yaml::parseFile($root . '/suite-v38/platform-protocol-specs/worker-protocol-api.openapi.yaml');
@@ -309,11 +309,15 @@ final class PlatformProtocolSpecsTest extends TestCase
         $protocol115 = Yaml::parseFile(
             $root . '/suite-v43/platform-protocol-specs/worker-protocol-api.openapi.yaml',
         );
-        $current = Yaml::parseFile($root . '/suite-v44/platform-protocol-specs/worker-protocol-api.openapi.yaml');
+        $protocol116 = Yaml::parseFile(
+            $root . '/suite-v44/platform-protocol-specs/worker-protocol-api.openapi.yaml',
+        );
+        $current = Yaml::parseFile($root . '/suite-v45/platform-protocol-specs/worker-protocol-api.openapi.yaml');
 
         $this->assertIsArray($beta);
         $this->assertIsArray($protocol113);
         $this->assertIsArray($protocol115);
+        $this->assertIsArray($protocol116);
         $this->assertIsArray($current);
         $this->assertSame('1.13', $protocol113['components']['schemas']['AdvertisedWorkerProtocolVersion']['const']);
         $this->assertSame(
@@ -326,7 +330,8 @@ final class PlatformProtocolSpecsTest extends TestCase
             hash_file('sha256', $root . '/suite-v41/platform-protocol-specs/worker-protocol-api.openapi.yaml'),
         );
         $this->assertSame('1.15', $protocol115['components']['schemas']['AdvertisedWorkerProtocolVersion']['const']);
-        $this->assertSame('1.16', $current['components']['schemas']['AdvertisedWorkerProtocolVersion']['const']);
+        $this->assertSame('1.16', $protocol116['components']['schemas']['AdvertisedWorkerProtocolVersion']['const']);
+        $this->assertSame('1.17', $current['components']['schemas']['AdvertisedWorkerProtocolVersion']['const']);
         $this->assertArrayHasKey(
             'message_stream_cursors',
             $current['components']['schemas']['WorkflowTaskCompleteRequest']['properties'],
@@ -348,11 +353,23 @@ final class PlatformProtocolSpecsTest extends TestCase
         $typedCommand = $current['components']['schemas']['WorkflowCommand']['allOf'][0]['then']['properties'];
         $this->assertArrayHasKey('attribute_types', $typedCommand);
         $this->assertSame('1.16', $typedCommand['attribute_types']['x-durable-workflow-minimum-protocol-version']);
+        $this->assertArrayNotHasKey(
+            'x-durable-workflow-condition-wait-occurrence-identity-contract',
+            $protocol116,
+        );
+        $this->assertArrayHasKey('x-durable-workflow-condition-wait-occurrence-identity-contract', $current);
+        $conditionCommand = $current['components']['schemas']['WorkflowCommand']['allOf'][1]['then']['properties'];
+        $this->assertSame(
+            '1.17',
+            $conditionCommand['condition_wait_occurrence_id']['x-durable-workflow-minimum-protocol-version'],
+        );
+        $this->assertArrayNotHasKey('ConditionWaitHistoryPayload', $protocol116['components']['schemas']);
+        $this->assertArrayHasKey('ConditionWaitHistoryPayload', $current['components']['schemas']);
     }
 
     public function testRuntimeAndCurrentWorkerSpecsCannotDriftOnMessageStreamContract(): void
     {
-        $root = dirname(__DIR__, 3) . '/resources/conformance/suite-v44/platform-protocol-specs';
+        $root = dirname(__DIR__, 3) . '/resources/conformance/suite-v45/platform-protocol-specs';
         $openApi = Yaml::parseFile($root . '/worker-protocol-api.openapi.yaml');
         $asyncApi = Yaml::parseFile($root . '/worker-protocol-stream.asyncapi.yaml');
 
@@ -361,7 +378,7 @@ final class PlatformProtocolSpecsTest extends TestCase
 
         $runtime = WorkerProtocolVersion::describe();
         $negotiation = SurfaceStabilityContract::manifest()['surface_families']['worker_protocol']['negotiation'];
-        $expectedVersions = array_map(static fn (int $minor): string => "1.{$minor}", range(0, 16));
+        $expectedVersions = array_map(static fn (int $minor): string => "1.{$minor}", range(0, 17));
 
         foreach ([$openApi, $asyncApi] as $spec) {
             $this->assertSame(
@@ -399,6 +416,26 @@ final class PlatformProtocolSpecsTest extends TestCase
             $this->assertSame(
                 $runtime['upsert_search_attributes_command']['history']['replay_identity'],
                 $spec['x-durable-workflow-typed-search-attributes-contract']['history']['replay_identity'],
+            );
+            $this->assertSame(
+                $runtime['condition_wait_command']['condition_wait_occurrence_id']['minimum_protocol_version'],
+                $spec['x-durable-workflow-condition-wait-occurrence-identity-contract']['minimum_protocol_version'],
+            );
+            $this->assertSame(
+                $runtime['condition_wait_command']['condition_wait_occurrence_id']['worker_capability'],
+                $spec['x-durable-workflow-condition-wait-occurrence-identity-contract']['worker_capability'],
+            );
+            $this->assertSame(
+                $runtime['condition_wait_command']['history']['replay_identity'],
+                $spec['x-durable-workflow-condition-wait-occurrence-identity-contract']['history']['replay_identity'],
+            );
+            $this->assertSame(
+                $runtime['condition_wait_command']['version_gate']['rejection_reason'],
+                $spec['x-durable-workflow-condition-wait-occurrence-identity-contract']['version_gate']['rejection_reason'],
+            );
+            $this->assertSame(
+                $runtime['condition_wait_command']['version_gate']['rejection_status'],
+                $spec['x-durable-workflow-condition-wait-occurrence-identity-contract']['version_gate']['rejection_status'],
             );
         }
 
@@ -448,8 +485,12 @@ final class PlatformProtocolSpecsTest extends TestCase
             $openApi['components']['schemas']['WorkerRegistrationRequest']['properties']['capabilities']['x-durable-workflow-version-gated-values'][WorkerProtocolVersion::CAPABILITY_MESSAGE_STREAMS],
         );
         $this->assertSame(
-            WorkerProtocolVersion::VERSION,
+            $runtime['upsert_search_attributes_command']['attribute_types']['minimum_protocol_version'],
             $openApi['components']['schemas']['WorkerRegistrationRequest']['properties']['capabilities']['x-durable-workflow-version-gated-values'][WorkerProtocolVersion::CAPABILITY_TYPED_SEARCH_ATTRIBUTES],
+        );
+        $this->assertSame(
+            $runtime['condition_wait_command']['condition_wait_occurrence_id']['minimum_protocol_version'],
+            $openApi['components']['schemas']['WorkerRegistrationRequest']['properties']['capabilities']['x-durable-workflow-version-gated-values'][WorkerProtocolVersion::CAPABILITY_CONDITION_WAIT_OCCURRENCE_IDENTITY],
         );
     }
 

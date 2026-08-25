@@ -26,9 +26,9 @@ final class PlatformConformanceSuite
 {
     public const SCHEMA = 'durable-workflow.v2.platform-conformance.suite';
 
-    public const VERSION = 44;
+    public const VERSION = 45;
 
-    public const MIRROR_SHA256 = '399ace969f25ce38a1ad89b59f82479cf7c5be457e0a8534987e43c57cecb3ff';
+    public const MIRROR_SHA256 = 'd5464b75cc8b7403bff3b1c1270e314a9340d30fb0dd8e25c3cc53269f404b07';
 
     public const RUNTIME_SOURCE_REVISION = '75dfd5c869823409ef3d6c4b009a7882159ae9a2';
 
@@ -65,7 +65,7 @@ final class PlatformConformanceSuite
 
     private const SUITE_SOURCE_DIRECTORY = 'resources/conformance/suite-v38/';
 
-    private const CURRENT_PROTOCOL_SPEC_DIRECTORY = 'resources/conformance/suite-v44/platform-protocol-specs/';
+    private const CURRENT_PROTOCOL_SPEC_DIRECTORY = 'resources/conformance/suite-v45/platform-protocol-specs/';
 
     private const RUNTIME_SOURCE_DIRECTORY = self::SUITE_SOURCE_DIRECTORY . 'platform-conformance/';
 
@@ -1055,7 +1055,7 @@ final class PlatformConformanceSuite
             . '/' . self::RUNTIME_SOURCE_DIRECTORY;
         $protocolPrefix = '/durable-workflow/durable-workflow.github.io/' . self::PROTOCOL_SOURCE_REVISION
             . '/static/platform-protocol-specs/';
-        $currentWorkerProtocolPrefix = '/platform-protocol-specs/v1.16/';
+        $currentWorkerProtocolPrefix = '/platform-protocol-specs/v1.17/';
 
         if (
             ! is_array($url)
@@ -1117,7 +1117,7 @@ final class PlatformConformanceSuite
         if (
             preg_match('/\A[a-z0-9.-]+\.(?:json|ya?ml)\z/D', $filename) !== 1
             || preg_match(
-                '/\Aresources\/conformance\/suite-v(?:38|44)\/platform-(?:conformance|protocol-specs)\/'
+                '/\Aresources\/conformance\/suite-v(?:38|45)\/platform-(?:conformance|protocol-specs)\/'
                     . '[a-z0-9.-]+\.(?:json|ya?ml)\z/D',
                 $relativePath,
             ) !== 1

@@ -303,6 +303,11 @@ final class V2RunTimerTaskHistoryRoleTest extends TestCase
                 ->subSecond(),
             'payload' => [
                 'timer_id' => $timer->id,
+                'timer_kind' => 'condition_timeout',
+                'condition_wait_id' => 'condition:1',
+                'condition_wait_occurrence_id' => 'rust:condition-wait:0',
+                'condition_key' => 'approval.ready',
+                'condition_definition_fingerprint' => 'condition-fp-1',
             ],
             'connection' => 'redis',
             'queue' => 'default',
@@ -327,6 +332,7 @@ final class V2RunTimerTaskHistoryRoleTest extends TestCase
 
         $this->assertNotNull($firedEvent);
         $this->assertSame($timer->id, $firedEvent->payload['timer_id'] ?? null);
+        $this->assertSame('rust:condition-wait:0', $firedEvent->payload['condition_wait_occurrence_id'] ?? null);
 
         // The successful claim leases the task and projects (1), then the
         // handler fires the timer + creates the resume task and projects (2).

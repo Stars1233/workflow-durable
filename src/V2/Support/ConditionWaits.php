@@ -16,6 +16,7 @@ final class ConditionWaits
      * @return list<array{
      *     id: string,
      *     condition_wait_id: string,
+     *     condition_wait_occurrence_id: string|null,
      *     condition_key: string|null,
      *     condition_definition_fingerprint: string|null,
      *     sequence: int|null,
@@ -80,6 +81,9 @@ final class ConditionWaits
                 $waits[$waitId]['condition_definition_fingerprint'] = self::stringValue(
                     $waits[$waitId]['condition_definition_fingerprint'] ?? null
                 ) ?? self::stringValue($event->payload['condition_definition_fingerprint'] ?? null);
+                $waits[$waitId]['condition_wait_occurrence_id'] = self::stringValue(
+                    $waits[$waitId]['condition_wait_occurrence_id'] ?? null
+                ) ?? self::stringValue($event->payload['condition_wait_occurrence_id'] ?? null);
                 $waits[$waitId]['timeout_seconds'] = self::intValue($waits[$waitId]['timeout_seconds'] ?? null)
                     ?? self::intValue($event->payload['delay_seconds'] ?? null);
                 $waits[$waitId]['timer_id'] = $timerId ?? $waits[$waitId]['timer_id'];
@@ -119,6 +123,9 @@ final class ConditionWaits
                 $waits[$waitId]['condition_definition_fingerprint'] = self::stringValue(
                     $waits[$waitId]['condition_definition_fingerprint'] ?? null
                 ) ?? self::stringValue($event->payload['condition_definition_fingerprint'] ?? null);
+                $waits[$waitId]['condition_wait_occurrence_id'] = self::stringValue(
+                    $waits[$waitId]['condition_wait_occurrence_id'] ?? null
+                ) ?? self::stringValue($event->payload['condition_wait_occurrence_id'] ?? null);
                 $waits[$waitId]['timeout_seconds'] = self::intValue($waits[$waitId]['timeout_seconds'] ?? null)
                     ?? self::intValue($event->payload['delay_seconds'] ?? null);
                 $waits[$waitId]['timer_id'] = $timerId ?? $waits[$waitId]['timer_id'];
@@ -175,6 +182,9 @@ final class ConditionWaits
             $waits[$waitId]['condition_definition_fingerprint'] = self::stringValue(
                 $waits[$waitId]['condition_definition_fingerprint'] ?? null
             ) ?? self::stringValue($event->payload['condition_definition_fingerprint'] ?? null);
+            $waits[$waitId]['condition_wait_occurrence_id'] = self::stringValue(
+                $waits[$waitId]['condition_wait_occurrence_id'] ?? null
+            ) ?? self::stringValue($event->payload['condition_wait_occurrence_id'] ?? null);
             $waits[$waitId]['timeout_seconds'] = self::intValue($event->payload['timeout_seconds'] ?? null)
                 ?? $waits[$waitId]['timeout_seconds'];
             $waits[$waitId]['timer_id'] = self::stringValue($event->payload['timer_id'] ?? null)
@@ -255,6 +265,7 @@ final class ConditionWaits
      * @return array{
      *     id: string,
      *     condition_wait_id: string,
+     *     condition_wait_occurrence_id: string|null,
      *     condition_key: string|null,
      *     condition_definition_fingerprint: string|null,
      *     sequence: int|null,
@@ -287,6 +298,7 @@ final class ConditionWaits
      * @return array{
      *     id: string,
      *     condition_wait_id: string,
+     *     condition_wait_occurrence_id: string|null,
      *     condition_key: string|null,
      *     condition_definition_fingerprint: string|null,
      *     sequence: int|null,
@@ -309,6 +321,9 @@ final class ConditionWaits
         return [
             'id' => $waitId,
             'condition_wait_id' => $waitId,
+            'condition_wait_occurrence_id' => self::stringValue(
+                $event->payload['condition_wait_occurrence_id'] ?? null
+            ),
             'condition_key' => self::stringValue($event->payload['condition_key'] ?? null),
             'condition_definition_fingerprint' => self::stringValue(
                 $event->payload['condition_definition_fingerprint'] ?? null

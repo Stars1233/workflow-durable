@@ -150,6 +150,9 @@ final class RunTimerTask implements ShouldQueue
             $conditionWaitId = is_string($task->payload['condition_wait_id'] ?? null)
                 ? $task->payload['condition_wait_id']
                 : null;
+            $conditionWaitOccurrenceId = is_string($task->payload['condition_wait_occurrence_id'] ?? null)
+                ? $task->payload['condition_wait_occurrence_id']
+                : null;
             $conditionKey = is_string($task->payload['condition_key'] ?? null)
                 ? $task->payload['condition_key']
                 : null;
@@ -178,6 +181,7 @@ final class RunTimerTask implements ShouldQueue
                 'fired_at' => $timer->fired_at?->toJSON(),
                 'timer_kind' => $timerKind,
                 'condition_wait_id' => $conditionWaitId,
+                'condition_wait_occurrence_id' => $conditionWaitOccurrenceId,
                 'condition_key' => $conditionKey,
                 'condition_definition_fingerprint' => $conditionDefinitionFingerprint,
                 'signal_wait_id' => $signalWaitId,

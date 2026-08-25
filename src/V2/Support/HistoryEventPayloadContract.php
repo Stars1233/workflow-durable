@@ -272,6 +272,7 @@ final class HistoryEventPayloadContract
             'parallel_group_path',
             'timer_kind',
             'condition_wait_id',
+            'condition_wait_occurrence_id',
             'condition_key',
             'condition_definition_fingerprint',
             'signal_wait_id',
@@ -291,6 +292,7 @@ final class HistoryEventPayloadContract
             'parallel_group_path',
             'timer_kind',
             'condition_wait_id',
+            'condition_wait_occurrence_id',
             'condition_key',
             'condition_definition_fingerprint',
             'signal_wait_id',
@@ -303,6 +305,7 @@ final class HistoryEventPayloadContract
             'fire_at',
             'timer_kind',
             'condition_wait_id',
+            'condition_wait_occurrence_id',
             'condition_key',
             'condition_definition_fingerprint',
             'signal_wait_id',
@@ -377,6 +380,7 @@ final class HistoryEventPayloadContract
         ],
         'ConditionWaitOpened' => [
             'condition_wait_id',
+            'condition_wait_occurrence_id',
             'condition_key',
             'condition_definition_fingerprint',
             'sequence',
@@ -384,6 +388,7 @@ final class HistoryEventPayloadContract
         ],
         'ConditionWaitSatisfied' => [
             'condition_wait_id',
+            'condition_wait_occurrence_id',
             'condition_key',
             'condition_definition_fingerprint',
             'sequence',
@@ -395,6 +400,7 @@ final class HistoryEventPayloadContract
         ],
         'ConditionWaitTimedOut' => [
             'condition_wait_id',
+            'condition_wait_occurrence_id',
             'condition_key',
             'condition_definition_fingerprint',
             'sequence',

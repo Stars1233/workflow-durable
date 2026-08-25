@@ -6793,6 +6793,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
                 'type' => 'open_condition_wait',
                 'condition_key' => 'payment-cleared',
                 'condition_definition_fingerprint' => 'fp-1',
+                'condition_wait_occurrence_id' => 'rust:condition-wait:0',
                 'timeout_seconds' => 45,
             ],
         ]);
@@ -6808,6 +6809,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
 
         $this->assertSame('payment-cleared', $opened->payload['condition_key'] ?? null);
         $this->assertSame('fp-1', $opened->payload['condition_definition_fingerprint'] ?? null);
+        $this->assertSame('rust:condition-wait:0', $opened->payload['condition_wait_occurrence_id'] ?? null);
         $this->assertSame(45, $opened->payload['timeout_seconds'] ?? null);
 
         $waitId = $opened->payload['condition_wait_id'] ?? null;
@@ -6828,6 +6830,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
 
         $this->assertSame('condition_timeout', $scheduled->payload['timer_kind'] ?? null);
         $this->assertSame($waitId, $scheduled->payload['condition_wait_id'] ?? null);
+        $this->assertSame('rust:condition-wait:0', $scheduled->payload['condition_wait_occurrence_id'] ?? null);
         $this->assertSame('payment-cleared', $scheduled->payload['condition_key'] ?? null);
         $this->assertSame('fp-1', $scheduled->payload['condition_definition_fingerprint'] ?? null);
 
@@ -6838,6 +6841,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
 
         $this->assertSame($timer->id, $timerTask->payload['timer_id'] ?? null);
         $this->assertSame($waitId, $timerTask->payload['condition_wait_id'] ?? null);
+        $this->assertSame('rust:condition-wait:0', $timerTask->payload['condition_wait_occurrence_id'] ?? null);
         $this->assertSame('payment-cleared', $timerTask->payload['condition_key'] ?? null);
     }
 
@@ -7443,6 +7447,8 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             [
                 'type' => 'open_condition_wait',
                 'condition_key' => 'approval.ready',
+                'condition_definition_fingerprint' => 'condition-fp-1',
+                'condition_wait_occurrence_id' => 'rust:condition-wait:0',
             ],
         ]);
 
@@ -7489,6 +7495,8 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             [
                 'type' => 'open_condition_wait',
                 'condition_key' => 'approval.ready',
+                'condition_definition_fingerprint' => 'condition-fp-1',
+                'condition_wait_occurrence_id' => 'rust:condition-wait:0',
             ],
         ]);
 
@@ -7523,6 +7531,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
 
         $this->assertNotNull($firstSatisfied);
         $this->assertSame(1, $firstSatisfied->payload['sequence'] ?? null);
+        $this->assertSame('rust:condition-wait:0', $firstSatisfied->payload['condition_wait_occurrence_id'] ?? null);
         $this->assertNotNull(WorkflowCommand::query() ->whereKey($first->workflow_command_id) ->value('applied_at'));
 
         $signalTask->forceFill([
@@ -7536,6 +7545,8 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             [
                 'type' => 'open_condition_wait',
                 'condition_key' => 'approval.ready',
+                'condition_definition_fingerprint' => 'condition-fp-1',
+                'condition_wait_occurrence_id' => 'rust:condition-wait:0',
             ],
         ]);
 
@@ -7564,6 +7575,19 @@ final class V2WorkflowTaskBridgeTest extends TestCase
 
         $this->assertNotNull($secondSatisfied);
         $this->assertSame($second->workflow_sequence, $secondSatisfied->payload['sequence'] ?? null);
+        $this->assertSame('rust:condition-wait:0', $secondSatisfied->payload['condition_wait_occurrence_id'] ?? null);
+        $this->assertSame(
+            ['rust:condition-wait:0', 'rust:condition-wait:0', 'rust:condition-wait:0'],
+            WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('event_type', HistoryEventType::ConditionWaitOpened->value)
+                ->orderBy('sequence')
+                ->get()
+                ->map(
+                    static fn (WorkflowHistoryEvent $event): mixed => $event->payload['condition_wait_occurrence_id'] ?? null
+                )
+                ->all(),
+        );
         $this->assertSame(['applied', 'applied', 'received'], WorkflowSignal::query()
             ->whereIn('id', [$first->id, $second->id, $third->id])
             ->orderBy('command_sequence')
@@ -7583,6 +7607,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
                 'type' => 'open_condition_wait',
                 'condition_key' => 'approval.ready',
                 'condition_definition_fingerprint' => 'condition-fp-1',
+                'condition_wait_occurrence_id' => 'rust:condition-wait:0',
                 'timeout_seconds' => 60,
             ],
         ]);
@@ -7638,6 +7663,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             ->firstOrFail();
 
         $this->assertSame($conditionWaitId, $satisfied->payload['condition_wait_id'] ?? null);
+        $this->assertSame('rust:condition-wait:0', $satisfied->payload['condition_wait_occurrence_id'] ?? null);
         $this->assertSame('approval.ready', $satisfied->payload['condition_key'] ?? null);
         $this->assertSame('condition-fp-1', $satisfied->payload['condition_definition_fingerprint'] ?? null);
         $this->assertSame(1, $satisfied->payload['sequence'] ?? null);
@@ -7660,6 +7686,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
 
         $this->assertSame($timer->id, $cancelled->payload['timer_id'] ?? null);
         $this->assertSame($conditionWaitId, $cancelled->payload['condition_wait_id'] ?? null);
+        $this->assertSame('rust:condition-wait:0', $cancelled->payload['condition_wait_occurrence_id'] ?? null);
     }
 
     public function testCompleteStartsChildWorkflow(): void

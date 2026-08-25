@@ -868,6 +868,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
                 'type' => 'open_condition_wait',
                 'condition_key' => '  order-ready ',
                 'condition_definition_fingerprint' => ' fp-1 ',
+                'condition_wait_occurrence_id' => ' rust:condition-wait:0 ',
                 'timeout_seconds' => 30,
             ],
         ]);
@@ -876,6 +877,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
             'type' => 'open_condition_wait',
             'condition_key' => 'order-ready',
             'condition_definition_fingerprint' => 'fp-1',
+            'condition_wait_occurrence_id' => 'rust:condition-wait:0',
             'timeout_seconds' => 30,
         ]], $out);
     }

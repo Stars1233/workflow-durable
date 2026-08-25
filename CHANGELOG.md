@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.45` preserves an SDK-authored condition-wait occurrence
+  identity across open, satisfied, timed-out, and timeout-timer history.
+  Signal- and update-driven physical re-evaluations retain that identity, so
+  adjacent authored waits remain independent without inferring identity from
+  condition keys or predicate fingerprints. Worker protocol 1.17 gates the
+  occurrence field and registration capability so older Server nodes reject
+  the command before execution instead of silently dropping its replay
+  identity. Platform conformance suite 45 publishes the versioned 1.17
+  OpenAPI and AsyncAPI authorities and retains the prior 1.16 bytes.
 - Workflow `2.0.0-rc.44` separates the packaged history-export schema carrier
   path from its retained immutable origin. Runtime manifest validation and the
   published-package audit now enforce the same release, origin path, resolver,

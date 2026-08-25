@@ -1617,6 +1617,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
 
         WorkflowHistoryEvent::record($run, HistoryEventType::ConditionWaitSatisfied, array_filter([
             'condition_wait_id' => $wait['condition_wait_id'],
+            'condition_wait_occurrence_id' => $wait['condition_wait_occurrence_id'],
             'condition_key' => $wait['condition_key'],
             'condition_definition_fingerprint' => $wait['condition_definition_fingerprint'],
             'sequence' => $wait['sequence'],
@@ -1689,6 +1690,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
     /**
      * @return array{
      *     condition_wait_id: string,
+     *     condition_wait_occurrence_id: string|null,
      *     condition_key: string|null,
      *     condition_definition_fingerprint: string|null,
      *     sequence: int|null,
@@ -1719,6 +1721,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
 
         /** @var array{
          *     condition_wait_id: string,
+         *     condition_wait_occurrence_id: string|null,
          *     condition_key: string|null,
          *     condition_definition_fingerprint: string|null,
          *     sequence: int|null,
@@ -2569,6 +2572,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
      *     type: string,
      *     condition_key?: string|null,
      *     condition_definition_fingerprint?: string|null,
+     *     condition_wait_occurrence_id?: string|null,
      *     timeout_seconds?: int|null
      * } $command
      * @param list<string> $createdTaskIds
@@ -2584,6 +2588,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         $conditionDefinitionFingerprint = self::nonEmptyString(
             $command['condition_definition_fingerprint'] ?? null,
         );
+        $conditionWaitOccurrenceId = self::nonEmptyString($command['condition_wait_occurrence_id'] ?? null);
         $timeoutSeconds = is_int($command['timeout_seconds'] ?? null) && $command['timeout_seconds'] >= 0
             ? (int) $command['timeout_seconds']
             : null;
@@ -2592,6 +2597,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
 
         WorkflowHistoryEvent::record($run, HistoryEventType::ConditionWaitOpened, array_filter([
             'condition_wait_id' => $waitId,
+            'condition_wait_occurrence_id' => $conditionWaitOccurrenceId,
             'condition_key' => $conditionKey,
             'condition_definition_fingerprint' => $conditionDefinitionFingerprint,
             'sequence' => $sequence,
@@ -2618,6 +2624,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 'fire_at' => $timer->fire_at?->toJSON(),
                 'timer_kind' => 'condition_timeout',
                 'condition_wait_id' => $waitId,
+                'condition_wait_occurrence_id' => $conditionWaitOccurrenceId,
                 'condition_key' => $conditionKey,
                 'condition_definition_fingerprint' => $conditionDefinitionFingerprint,
             ], static fn (mixed $value): bool => $value !== null), $task);
@@ -2632,6 +2639,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 'payload' => array_filter([
                     'timer_id' => $timer->id,
                     'condition_wait_id' => $waitId,
+                    'condition_wait_occurrence_id' => $conditionWaitOccurrenceId,
                     'condition_key' => $conditionKey,
                     'condition_definition_fingerprint' => $conditionDefinitionFingerprint,
                 ], static fn (mixed $value): bool => $value !== null),
@@ -4007,6 +4015,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
      *     type: string,
      *     condition_key?: string,
      *     condition_definition_fingerprint?: string,
+     *     condition_wait_occurrence_id?: string,
      *     timeout_seconds?: int
      * }|null
      */
@@ -4021,6 +4030,9 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'condition_key' => self::normalizeOptionalString($command['condition_key'] ?? null),
             'condition_definition_fingerprint' => self::normalizeOptionalString(
                 $command['condition_definition_fingerprint'] ?? null,
+            ),
+            'condition_wait_occurrence_id' => self::normalizeOptionalString(
+                $command['condition_wait_occurrence_id'] ?? null,
             ),
             'timeout_seconds' => self::normalizeWaitTimeoutSeconds($command),
         ], static fn (mixed $value): bool => $value !== null);

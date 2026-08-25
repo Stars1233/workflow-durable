@@ -46,6 +46,7 @@ final class TestGoldenReplayWorkflow extends Workflow
             'single-activity' => $this->singleActivity(),
             'signal-activity' => $this->signalActivity(),
             'wait-condition' => $this->waitCondition(),
+            'adjacent-condition-waits' => $this->adjacentConditionWaits(),
             'version-marker' => $this->versionMarker(),
             'saga-compensation' => $this->sagaCompensation(),
             default => throw new \InvalidArgumentException("Unknown golden replay scenario [{$scenario}]."),
@@ -104,6 +105,20 @@ final class TestGoldenReplayWorkflow extends Workflow
         await(fn (): bool => $this->approved);
         $this->stage = 'approved';
         $this->events[] = 'condition-satisfied';
+
+        return $this->currentState();
+    }
+
+    private function adjacentConditionWaits(): array
+    {
+        foreach ([1, 2] as $occurrence) {
+            $this->stage = "waiting-for-approval:{$occurrence}";
+            await(fn (): bool => $this->approved, conditionKey: 'approval.ready');
+            $this->events[] = "condition-satisfied:{$occurrence}";
+            $this->approved = false;
+        }
+
+        $this->stage = 'completed';
 
         return $this->currentState();
     }

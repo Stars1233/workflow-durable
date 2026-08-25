@@ -701,6 +701,12 @@ final class WorkflowCommandNormalizer
                     $index,
                     $errors,
                 );
+                $conditionWaitOccurrenceId = self::optionalCommandString(
+                    $command,
+                    'condition_wait_occurrence_id',
+                    $index,
+                    $errors,
+                );
                 $timeoutSeconds = null;
 
                 if (array_key_exists('timeout_seconds', $command) && $command['timeout_seconds'] !== null) {
@@ -719,6 +725,7 @@ final class WorkflowCommandNormalizer
                     'type' => $type,
                     'condition_key' => $conditionKey,
                     'condition_definition_fingerprint' => $conditionDefinitionFingerprint,
+                    'condition_wait_occurrence_id' => $conditionWaitOccurrenceId,
                     'timeout_seconds' => $timeoutSeconds,
                 ], static fn (mixed $value): bool => $value !== null);
 

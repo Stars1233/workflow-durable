@@ -174,9 +174,24 @@ REPLAY_EVENT_PAYLOAD_FIELDS = {
     "TimerScheduled": {"timer_kind"},
     "TimerCancelled": {"timer_kind"},
     "TimerFired": {"signal_name", "signal_wait_id", "timer_kind"},
-    "ConditionWaitOpened": set(),
-    "ConditionWaitSatisfied": set(),
-    "ConditionWaitTimedOut": set(),
+    "ConditionWaitOpened": {
+        "condition_definition_fingerprint",
+        "condition_key",
+        "condition_wait_id",
+        "condition_wait_occurrence_id",
+    },
+    "ConditionWaitSatisfied": {
+        "condition_definition_fingerprint",
+        "condition_key",
+        "condition_wait_id",
+        "condition_wait_occurrence_id",
+    },
+    "ConditionWaitTimedOut": {
+        "condition_definition_fingerprint",
+        "condition_key",
+        "condition_wait_id",
+        "condition_wait_occurrence_id",
+    },
     "SignalWaitOpened": {"signal_name", "signal_wait_id"},
     "SignalReceived": {
         "arguments",
