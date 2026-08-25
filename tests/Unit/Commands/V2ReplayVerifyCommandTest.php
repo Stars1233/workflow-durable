@@ -8,6 +8,7 @@ use Illuminate\Support\Str;
 use Tests\TestCase;
 use Workflow\V2\Support\BundleIntegrityVerifier;
 use Workflow\V2\Support\HistoryExport;
+use Workflow\V2\Support\MemoPayload;
 
 final class V2ReplayVerifyCommandTest extends TestCase
 {
@@ -186,6 +187,8 @@ final class V2ReplayVerifyCommandTest extends TestCase
                 'run_number' => 1,
                 'workflow_type' => 'verifier.cli.test',
                 'workflow_class' => 'Tests\\Fixtures\\Cli',
+                'memo' => [],
+                'memo_payload' => MemoPayload::mapEnvelope([]),
                 'status' => 'completed',
                 'last_history_sequence' => 2,
             ],

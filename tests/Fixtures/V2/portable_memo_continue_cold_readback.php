@@ -52,9 +52,7 @@ $pdo = new PDO(
 );
 $runId = $required('MEMO_RUN_ID');
 
-$memoStatement = $pdo->prepare(
-    'SELECT key, value FROM workflow_memos WHERE workflow_run_id = :run_id ORDER BY key',
-);
+$memoStatement = $pdo->prepare('SELECT * FROM workflow_memos WHERE workflow_run_id = :run_id ORDER BY id');
 $memoStatement->execute([
     'run_id' => $runId,
 ]);

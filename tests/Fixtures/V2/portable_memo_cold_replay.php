@@ -74,7 +74,7 @@ if (! is_array($payload)) {
     throw new RuntimeException('The persisted memo history payload did not decode to an object.');
 }
 
-$memoStatement = $pdo->prepare('SELECT key, value FROM workflow_memos WHERE workflow_run_id = :run_id');
+$memoStatement = $pdo->prepare('SELECT * FROM workflow_memos WHERE workflow_run_id = :run_id ORDER BY id');
 $memoStatement->execute([
     'run_id' => $runId,
 ]);

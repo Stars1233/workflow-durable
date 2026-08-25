@@ -5078,7 +5078,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             ->sole();
 
         $this->assertSame([], MemoPayload::decodeEntries($event->payload['merged']));
-        $this->assertSame(MemoPayload::mapEnvelope([]), $event->payload['merged']);
+        $this->assertSameJsonObject(MemoPayload::mapEnvelope([]), $event->payload['merged']);
     }
 
     public function testEncodedMemoCommandSurvivesColdReloadExportImportAndReplay(): void

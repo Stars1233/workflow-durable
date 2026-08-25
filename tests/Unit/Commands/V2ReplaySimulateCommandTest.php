@@ -7,6 +7,7 @@ namespace Tests\Unit\Commands;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 use Workflow\V2\Support\HistoryExport;
+use Workflow\V2\Support\MemoPayload;
 use Workflow\V2\Support\ReplayVerification;
 
 final class V2ReplaySimulateCommandTest extends TestCase
@@ -175,6 +176,8 @@ final class V2ReplaySimulateCommandTest extends TestCase
                 'run_number' => 1,
                 'workflow_type' => 'verifier.cli.test',
                 'workflow_class' => 'Tests\\Fixtures\\Cli',
+                'memo' => [],
+                'memo_payload' => MemoPayload::mapEnvelope([]),
                 'status' => 'completed',
                 'last_history_sequence' => 2,
             ],
