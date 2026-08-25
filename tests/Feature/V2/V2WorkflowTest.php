@@ -2967,7 +2967,7 @@ final class V2WorkflowTest extends TestCase
 
         $this->assertCount(2, $continuedStartEvents);
         foreach ($continuedStartEvents as $event) {
-            $this->assertSame($expectedHistoryProjection, $event->payload['memo']);
+            $this->assertSameJsonObject($expectedHistoryProjection, $event->payload['memo']);
             $this->assertSame([
                 '$type' => 'bytes',
                 'base64' => 'AP8=',
@@ -2979,10 +2979,10 @@ final class V2WorkflowTest extends TestCase
         $this->assertPortableMemoContinueColdReadback($continuedRunId);
 
         $export = HistoryExport::forRun($continuedRun->fresh());
-        $this->assertSame($expectedProjection, $export['workflow']['memo']);
+        $this->assertSameJsonObject($expectedProjection, $export['workflow']['memo']);
         $this->assertSame(
             MemoPayload::mapEnvelope(TestPortableMemoWorkflow::entries(reordered: true)),
-            $export['workflow']['memo_payload'],
+            MemoPayload::canonicalMapEnvelope($export['workflow']['memo_payload']),
         );
         $export = json_decode(
             json_encode($export, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR),
@@ -3010,13 +3010,16 @@ final class V2WorkflowTest extends TestCase
             ['0', 'numeric-string-key'],
             ['word', 'ordinary-key'],
         ], $importedMemos['adapter_map']->pairs);
-        $this->assertSame($expectedProjection, RunDetailView::forRun($importedRun->fresh())['memo']);
+        $this->assertSameJsonObject($expectedProjection, RunDetailView::forRun($importedRun->fresh())['memo']);
 
         $this->assertPortableMemoContinueColdReadback($continuedRunId);
 
         $roundTripExport = HistoryExport::forRun($importedRun->fresh());
-        $this->assertSame($expectedProjection, $roundTripExport['workflow']['memo']);
-        $this->assertSame($export['workflow']['memo_payload'], $roundTripExport['workflow']['memo_payload']);
+        $this->assertSameJsonObject($expectedProjection, $roundTripExport['workflow']['memo']);
+        $this->assertSame(
+            MemoPayload::canonicalMapEnvelope($export['workflow']['memo_payload']),
+            MemoPayload::canonicalMapEnvelope($roundTripExport['workflow']['memo_payload']),
+        );
         $this->assertJson(json_encode($roundTripExport, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR));
     }
 

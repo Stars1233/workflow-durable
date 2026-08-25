@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+if (realpath((string) ($_SERVER['SCRIPT_FILENAME'] ?? '')) !== __FILE__) {
+    return;
+}
+
 use Workflow\Serializers\AvroBinaryValue;
 use Workflow\Serializers\AvroMapValue;
 use Workflow\Serializers\AvroValueJsonProjection;
@@ -48,7 +52,9 @@ $pdo = new PDO(
 );
 $runId = $required('MEMO_RUN_ID');
 
-$memoStatement = $pdo->prepare('SELECT key, value FROM workflow_memos WHERE workflow_run_id = :run_id');
+$memoStatement = $pdo->prepare(
+    'SELECT key, value FROM workflow_memos WHERE workflow_run_id = :run_id ORDER BY key',
+);
 $memoStatement->execute([
     'run_id' => $runId,
 ]);
@@ -62,13 +68,32 @@ foreach ($memoStatement->fetchAll(PDO::FETCH_ASSOC) as $row) {
     $memos[(string) $row['key']] = MemoPayload::decode($envelope);
 }
 
+if (! is_int($memos['long_value'] ?? null) || ! is_float($memos['double_value'] ?? null)) {
+    throw new RuntimeException('The continued long and double memo branches did not survive cold readback.');
+}
 if (
     ! ($memos['binary_value'] ?? null) instanceof AvroBinaryValue
     || $memos['binary_value']->bytes !== "\x00\xFF"
+    || ! ($memos['binary_text_value'] ?? null) instanceof AvroBinaryValue
+    || $memos['binary_text_value']->bytes !== 'same-bytes'
+    || ($memos['text_value'] ?? null) !== 'same-bytes'
     || ! ($memos['adapter_map'] ?? null) instanceof AvroMapValue
     || $memos['adapter_map']->pairs !== [['0', 'numeric-string-key'], ['word', 'ordinary-key']]
 ) {
-    throw new RuntimeException('The continued binary or adapted-map memo did not survive cold readback.');
+    throw new RuntimeException('The continued binary, text, or adapted-map memo did not survive cold readback.');
+}
+
+$nested = $memos['nested'] ?? null;
+$nestedSecond = is_array($nested) ? ($nested['second'] ?? null) : null;
+if (
+    ! is_array($nested)
+    || ($nested['first'] ?? null) !== true
+    || ! is_array($nestedSecond)
+    || ($nestedSecond['left'] ?? null) !== 1
+    || ! ($nestedSecond['right'] ?? null) instanceof AvroBinaryValue
+    || $nestedSecond['right']->bytes !== 'nested-bytes'
+) {
+    throw new RuntimeException('The continued nested adapted-map memo did not survive cold readback.');
 }
 
 $expectedProjection = json_decode(
@@ -76,6 +101,7 @@ $expectedProjection = json_decode(
     true,
     flags: JSON_THROW_ON_ERROR,
 );
+$expectedProjectionIdentity = MemoPayload::mapEnvelope($expectedProjection);
 $eventStatement = $pdo->prepare(
     "SELECT event_type, payload FROM workflow_history_events
      WHERE workflow_run_id = :run_id AND event_type IN ('StartAccepted', 'WorkflowStarted')
@@ -91,7 +117,8 @@ if (count($events) !== 2) {
 
 foreach ($events as $event) {
     $payload = json_decode((string) $event['payload'], true, flags: JSON_THROW_ON_ERROR);
-    if (! is_array($payload) || ($payload['memo'] ?? null) !== $expectedProjection) {
+    $memo = is_array($payload) ? ($payload['memo'] ?? null) : null;
+    if (! is_array($payload) || ! is_array($memo) || MemoPayload::mapEnvelope($memo) !== $expectedProjectionIdentity) {
         throw new RuntimeException(sprintf(
             'The persisted %s memo history field is not the JSON-safe portable projection.',
             (string) $event['event_type'],

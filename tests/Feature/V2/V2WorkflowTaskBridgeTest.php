@@ -5107,7 +5107,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
 
         $this->assertSame(
             MemoPayload::envelope(TestPortableMemoWorkflow::entries(reordered: true)),
-            $reloadedEvent->payload['entries'],
+            MemoPayload::canonicalMapEnvelope($reloadedEvent->payload['entries']),
         );
         $this->assertIsString(json_encode($reloadedEvent->payload, JSON_THROW_ON_ERROR));
 
@@ -5166,7 +5166,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertSame($expectedMemoProjection, $export['workflow']['memo']);
         $this->assertSame(
             MemoPayload::mapEnvelope(TestPortableMemoWorkflow::entries(reordered: true)),
-            $export['workflow']['memo_payload'],
+            MemoPayload::canonicalMapEnvelope($export['workflow']['memo_payload']),
         );
         $this->assertJson(json_encode($detail, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR));
 
@@ -5213,7 +5213,10 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $roundTripExport = HistoryExport::forRun($reloadedRun->fresh());
         $this->assertSame($expectedMemoProjection, $importedDetail['memo']);
         $this->assertSame($expectedMemoProjection, $roundTripExport['workflow']['memo']);
-        $this->assertSame($export['workflow']['memo_payload'], $roundTripExport['workflow']['memo_payload']);
+        $this->assertSame(
+            MemoPayload::canonicalMapEnvelope($export['workflow']['memo_payload']),
+            MemoPayload::canonicalMapEnvelope($roundTripExport['workflow']['memo_payload']),
+        );
         $this->assertJson(json_encode($importedDetail, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR));
         $this->assertJson(json_encode($roundTripExport, JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR));
 

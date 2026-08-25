@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+if (realpath((string) ($_SERVER['SCRIPT_FILENAME'] ?? '')) !== __FILE__) {
+    return;
+}
+
 use Tests\Fixtures\V2\TestPortableMemoBinaryContentDriftWorkflow;
 use Tests\Fixtures\V2\TestPortableMemoDoubleDriftWorkflow;
 use Tests\Fixtures\V2\TestPortableMemoTextDriftWorkflow;
