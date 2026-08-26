@@ -20,6 +20,7 @@ use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\CommandContext;
 use Workflow\V2\Contracts\HistoryProjectionRole;
+use Workflow\V2\Contracts\RuntimeSignalControlPlane;
 use Workflow\V2\Contracts\WorkflowControlPlane;
 use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Enums\RunStatus;
@@ -46,6 +47,8 @@ final class V2WorkflowControlPlaneTest extends TestCase
 {
     private WorkflowControlPlane $controlPlane;
 
+    private RuntimeSignalControlPlane $runtimeControlPlane;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -56,6 +59,7 @@ final class V2WorkflowControlPlaneTest extends TestCase
             ->set('workflows.v2.compatibility.supported', ['build-a']);
 
         $this->controlPlane = $this->app->make(WorkflowControlPlane::class);
+        $this->runtimeControlPlane = $this->app->make(RuntimeSignalControlPlane::class);
     }
 
     public function testControlPlaneIsResolvableFromContainer(): void
@@ -63,6 +67,7 @@ final class V2WorkflowControlPlaneTest extends TestCase
         $controlPlane = $this->app->make(WorkflowControlPlane::class);
 
         $this->assertInstanceOf(DefaultWorkflowControlPlane::class, $controlPlane);
+        $this->assertSame($controlPlane, $this->app->make(RuntimeSignalControlPlane::class));
     }
 
     public function testStartWithLocallyResolvableClass(): void
@@ -1057,7 +1062,7 @@ final class V2WorkflowControlPlaneTest extends TestCase
         $this->assertFalse($forgedOption['accepted']);
         $this->assertSame('unknown_signal', $forgedOption['reason']);
 
-        $runtime = $this->controlPlane->runtimeSignal(
+        $runtime = $this->runtimeControlPlane->runtimeSignal(
             'ctrl-plane-runtime-signal',
             WorkflowStub::MESSAGE_STREAM_RUNTIME_SIGNAL,
             [

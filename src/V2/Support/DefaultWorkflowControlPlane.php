@@ -13,6 +13,7 @@ use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\CommandContext;
 use Workflow\V2\Contracts\HistoryProjectionRole;
+use Workflow\V2\Contracts\RuntimeSignalControlPlane;
 use Workflow\V2\Contracts\WorkflowControlPlane;
 use Workflow\V2\Enums\CommandOutcome;
 use Workflow\V2\Enums\CommandStatus;
@@ -33,7 +34,7 @@ use Workflow\V2\Models\WorkflowTask;
 use Workflow\V2\UpdateResult;
 use Workflow\V2\WorkflowStub;
 
-final class DefaultWorkflowControlPlane implements WorkflowControlPlane
+final class DefaultWorkflowControlPlane implements RuntimeSignalControlPlane, WorkflowControlPlane
 {
     public function start(string $workflowType, ?string $instanceId = null, array $options = []): array
     {

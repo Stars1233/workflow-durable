@@ -29,6 +29,7 @@ use Workflow\V2\Contracts\HistoryProjectionRole;
 use Workflow\V2\Contracts\LongPollWakeStore;
 use Workflow\V2\Contracts\MatchingRole;
 use Workflow\V2\Contracts\OperatorObservabilityRepository;
+use Workflow\V2\Contracts\RuntimeSignalControlPlane;
 use Workflow\V2\Contracts\SchedulerRole;
 use Workflow\V2\Contracts\ScheduleWorkflowStarter;
 use Workflow\V2\Contracts\ServiceBoundaryPolicy;
@@ -97,7 +98,17 @@ final class WorkflowServiceProvider extends ServiceProvider
 
         $this->app->singleton(ActivityTaskBridge::class, DefaultActivityTaskBridge::class);
 
-        $this->app->singleton(WorkflowControlPlane::class, DefaultWorkflowControlPlane::class);
+        $this->app->singleton(DefaultWorkflowControlPlane::class);
+
+        $this->app->singleton(
+            WorkflowControlPlane::class,
+            static fn ($app): DefaultWorkflowControlPlane => $app->make(DefaultWorkflowControlPlane::class),
+        );
+
+        $this->app->singleton(
+            RuntimeSignalControlPlane::class,
+            static fn ($app): DefaultWorkflowControlPlane => $app->make(DefaultWorkflowControlPlane::class),
+        );
 
         $this->app->singletonIf(ServiceControlPlane::class, DefaultServiceControlPlane::class);
 

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.46` defines the host-facing workflow control plane around
+  ordinary workflow operations. Reserved message-stream delivery uses a
+  separate runtime-only interface implemented by the default control plane,
+  while public signals remain unable to inject the reserved transport name.
+  The release audit also dereferences every advertised current and retained
+  worker-protocol resolver and verifies its SHA-256 digest before accepting
+  the public conformance mirror.
 - Workflow `2.0.0-rc.45` preserves an SDK-authored condition-wait occurrence
   identity across open, satisfied, timed-out, and timeout-timer history.
   Signal- and update-driven physical re-evaluations retain that identity, so

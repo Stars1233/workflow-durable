@@ -13,6 +13,7 @@ authority_file="$tmp_dir/public-authority.json"
 workflow_file="$tmp_dir/workflow-mirror.json"
 workflow_install_path_file="$tmp_dir/workflow-install-path.txt"
 history_resolver_file="$tmp_dir/history-export-resolver.json"
+worker_protocol_resolvers_file="$tmp_dir/worker-protocol-resolvers.tsv"
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 
 version="${version#v}"
@@ -101,3 +102,23 @@ else
 fi
 
 php "$repo_root/scripts/ci/compare-platform-conformance-mirrors.php" "$workflow_file" "$authority_file"
+
+php "$repo_root/scripts/ci/list-worker-protocol-resolvers.php" \
+    "$workflow_file" > "$worker_protocol_resolvers_file"
+
+tab="$(printf '\t')"
+resolver_number=0
+while IFS="$tab" read -r artifact_id resolver_url expected_digest; do
+    resolver_number=$((resolver_number + 1))
+    resolver_file="$tmp_dir/worker-protocol-resolver-$resolver_number"
+
+    download_with_retry "$resolver_url" "$resolver_file" "$artifact_id resolver"
+
+    actual_digest="sha256:$(php -r 'echo hash_file("sha256", $argv[1]);' "$resolver_file")"
+    if [ "$actual_digest" != "$expected_digest" ]; then
+        echo "Worker protocol resolver digest mismatch for $artifact_id: expected $expected_digest, got $actual_digest from $resolver_url." >&2
+        exit 1
+    fi
+
+    printf 'Verified %s at %s (%s).\n' "$artifact_id" "$resolver_url" "$actual_digest"
+done < "$worker_protocol_resolvers_file"
