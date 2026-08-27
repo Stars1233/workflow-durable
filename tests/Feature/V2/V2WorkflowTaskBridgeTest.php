@@ -2583,8 +2583,8 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertFalse($waiting->completed);
         $this->assertSame([], $waiting->commands);
         $this->assertSame(
-            array_column($authored->commands, 'parallel_group_path'),
-            WorkflowHistoryEvent::query()
+            self::canonicalizeAssociativeMaps(array_column($authored->commands, 'parallel_group_path')),
+            self::canonicalizeAssociativeMaps(WorkflowHistoryEvent::query()
                 ->where('workflow_run_id', $run->id)
                 ->whereIn('event_type', [
                     HistoryEventType::ActivityScheduled->value,
@@ -2593,7 +2593,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
                 ->orderBy('sequence')
                 ->get()
                 ->map(static fn (WorkflowHistoryEvent $event): array => $event->payload['parallel_group_path'])
-                ->all(),
+                ->all()),
         );
     }
 
@@ -7060,7 +7060,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertSame('payment-cleared', $timerTask->payload['condition_key'] ?? null);
     }
 
-    public function testCompleteOpenConditionWaitWithZeroTimeoutDoesNotScheduleTimer(): void
+    public function testCompleteOpenConditionWaitWithZeroTimeoutFiresWithoutSchedulingTimerTask(): void
     {
         $run = $this->createWaitingRun();
 
@@ -7075,15 +7075,70 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         ]);
 
         $this->assertTrue($result['completed']);
-        $this->assertSame([], $result['created_task_ids']);
+        $this->assertSame('waiting', $result['run_status']);
+        $this->assertCount(1, $result['created_task_ids']);
+        $this->assertSame(0, WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Timer->value)
+            ->count());
 
         $opened = WorkflowHistoryEvent::query()
             ->where('workflow_run_id', $run->id)
             ->where('event_type', HistoryEventType::ConditionWaitOpened->value)
             ->firstOrFail();
 
+        $waitId = $opened->payload['condition_wait_id'] ?? null;
+
+        $this->assertIsString($waitId);
         $this->assertSame(0, $opened->payload['timeout_seconds'] ?? null);
-        $this->assertSame(0, WorkflowTimer::query()->where('workflow_run_id', $run->id)->count());
+
+        $timer = WorkflowTimer::query()
+            ->where('workflow_run_id', $run->id)
+            ->firstOrFail();
+
+        $this->assertSame(TimerStatus::Fired, $timer->status);
+        $this->assertSame(0, $timer->delay_seconds);
+        $this->assertSame(0, WorkflowTimer::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('status', TimerStatus::Pending->value)
+            ->count());
+
+        $fired = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::TimerFired->value)
+            ->firstOrFail();
+
+        $this->assertSame($timer->id, $fired->payload['timer_id'] ?? null);
+        $this->assertSame($waitId, $fired->payload['condition_wait_id'] ?? null);
+        $this->assertSame('condition_timeout', $fired->payload['timer_kind'] ?? null);
+
+        /** @var WorkflowTask $resumeTask */
+        $resumeTask = WorkflowTask::query()
+            ->whereKey($result['created_task_ids'][0])
+            ->firstOrFail();
+
+        $this->assertSame(TaskType::Workflow, $resumeTask->task_type);
+        $this->assertSame(TaskStatus::Ready, $resumeTask->status);
+        $this->assertSame('condition', $resumeTask->payload['workflow_wait_kind'] ?? null);
+        $this->assertSame('timer', $resumeTask->payload['resume_source_kind'] ?? null);
+        $this->assertSame($timer->id, $resumeTask->payload['timer_id'] ?? null);
+        $this->assertSame(HistoryEventType::TimerFired->value, $resumeTask->payload['workflow_event_type'] ?? null);
+
+        $resumeClaim = $this->bridge->claim($resumeTask->id, 'condition-timeout-worker');
+
+        $this->assertNotNull($resumeClaim);
+        $resumeHistory = $this->bridge->historyPayload($resumeTask->id);
+        $this->assertNotNull($resumeHistory);
+        $this->assertSame($fired->id, collect($resumeHistory['history_events'])
+            ->firstWhere('event_type', HistoryEventType::TimerFired->value)['id'] ?? null);
+
+        $resumed = $this->bridge->complete($resumeTask->id, [[
+            'type' => 'complete_workflow',
+            'result' => Serializer::serialize(false),
+        ]]);
+
+        $this->assertTrue($resumed['completed']);
+        $this->assertSame(RunStatus::Completed, $run->fresh()->status);
     }
 
     public function testCompleteOpenSignalWaitRecordsEventAndOptionalTimeout(): void
@@ -9629,7 +9684,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
                     'payload' => $event->payload,
                 ])
                 ->all();
-            $fixture = [
+            $fixture = self::canonicalSelectionFixtureProjection([
                 'fixture_schema' => 'durable-workflow.selection-runtime-history/v1',
                 'source' => [
                     'runtime' => 'workflow-php',
@@ -9643,7 +9698,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
                     'winner_value' => 'winner-value',
                     'slow' => 'loser-value',
                 ],
-            ];
+            ]);
             $canonicalJson = json_encode(
                 $fixture,
                 JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
@@ -11072,6 +11127,45 @@ SQL);
         DB::unprepared('DROP TRIGGER IF EXISTS fail_workflow_child_call_projection_insert ON workflow_child_calls;');
         DB::unprepared('DROP TRIGGER IF EXISTS fail_workflow_child_call_projection_update ON workflow_child_calls;');
         DB::unprepared('DROP FUNCTION IF EXISTS fail_workflow_child_call_projection_write();');
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     * @return array<string, mixed>
+     */
+    private static function canonicalSelectionFixtureProjection(array $fixture): array
+    {
+        foreach ($fixture['history'] as &$event) {
+            if (! is_array($event) || ! is_array($event['payload']['task'] ?? null)) {
+                continue;
+            }
+
+            // Eloquent's task connection name is the active database driver,
+            // not durable worker-protocol history.
+            unset($event['payload']['task']['connection']);
+        }
+        unset($event);
+
+        return self::canonicalizeAssociativeMaps($fixture);
+    }
+
+    private static function canonicalizeAssociativeMaps(mixed $value): mixed
+    {
+        if (! is_array($value)) {
+            return $value;
+        }
+
+        if (array_is_list($value)) {
+            return array_map(self::canonicalizeAssociativeMaps(...), $value);
+        }
+
+        ksort($value);
+
+        foreach ($value as $key => $item) {
+            $value[$key] = self::canonicalizeAssociativeMaps($item);
+        }
+
+        return $value;
     }
 
     private function createLeasedTask(WorkflowRun $run): WorkflowTask
