@@ -160,6 +160,17 @@ Additive changes — new public methods, new optional parameters with
 defaults, new constants — are minor-version changes and do not require a
 major bump.
 
+### Workflow command grammar ownership
+
+`Workflow\V2\Support\WorkflowCommandNormalizer` is the single source of
+truth for worker completion commands. HTTP hosts that validate commands
+before resolving task ownership use `parallelMetadataValidationRules()` to
+retain the transport fields and `preflightParallelMetadata()` to validate and
+canonicalize their semantics. Hosts must not maintain their own parallel field
+list, command-kind map, generated identity prefixes, path rules, or structural
+size checks; compatible grammar evolution belongs in the Workflow package and
+is consumed through those methods.
+
 ## Workflow service operation caller API
 
 PHP workflow code can initiate a durable Nexus service operation from inside

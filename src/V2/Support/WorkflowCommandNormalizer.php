@@ -34,6 +34,10 @@ use Workflow\V2\Models\WorkflowSearchAttribute;
  *
  * Extracted from App\Http\Controllers\Api\WorkerController so the server
  * is no longer the source of truth for the command grammar.
+ * HTTP hosts use the package-owned parallel metadata rules and preflight
+ * below when they must reject malformed commands before task ownership is
+ * inspected. Keep parallel command fields, kinds, identities, paths, and
+ * structural limits here rather than mirroring them in a transport.
  *
  * @api Stable class surface consumed by the standalone workflow-server.
  *      The public static method signatures on this class are covered by
@@ -143,6 +147,46 @@ final class WorkflowCommandNormalizer
     ];
 
     /**
+     * @var array<string, string>
+     */
+    private const PARALLEL_COMMAND_LEAF_KINDS = [
+        'schedule_activity' => 'activity',
+        'start_timer' => 'timer',
+        'start_child_workflow' => 'child',
+        'open_condition_wait' => 'condition',
+        'open_signal_wait' => 'signal',
+    ];
+
+    /**
+     * @var list<string>
+     */
+    private const PARALLEL_METADATA_FIELDS = [
+        'parallel_group_id',
+        'parallel_group_kind',
+        'parallel_group_mode',
+        'parallel_group_base_sequence',
+        'parallel_group_size',
+        'parallel_group_index',
+        'selection_member_key',
+        'selection_member_index',
+        'selection_member_base_sequence',
+        'selection_member_size',
+        'selection_member_kind',
+    ];
+
+    /**
+     * @var list<string>
+     */
+    private const PARALLEL_METADATA_INTEGER_FIELDS = [
+        'parallel_group_base_sequence',
+        'parallel_group_size',
+        'parallel_group_index',
+        'selection_member_index',
+        'selection_member_base_sequence',
+        'selection_member_size',
+    ];
+
+    /**
      * Return the command payload-envelope grammar consumed by
      * {@see self::normalize()}.
      *
@@ -156,6 +200,83 @@ final class WorkflowCommandNormalizer
     public static function acceptsPayloadEnvelope(string $commandType, string $field): bool
     {
         return in_array($field, self::PAYLOAD_ENVELOPE_FIELDS[$commandType] ?? [], true);
+    }
+
+    /**
+     * Return transport-level rules for retaining and type-checking every
+     * parallel metadata field before semantic preflight. The semantic grammar
+     * remains in {@see self::preflightParallelMetadata()} and
+     * {@see self::normalize()}.
+     *
+     * @return array<string, list<string>>
+     */
+    public static function parallelMetadataValidationRules(): array
+    {
+        return [
+            'commands.*.parallel_group_id' => ['nullable', 'string'],
+            'commands.*.parallel_group_kind' => ['nullable', 'string'],
+            'commands.*.parallel_group_mode' => ['nullable', 'string'],
+            'commands.*.parallel_group_base_sequence' => ['nullable', 'integer', 'min:1'],
+            'commands.*.parallel_group_size' => ['nullable', 'integer', 'min:1'],
+            'commands.*.parallel_group_index' => ['nullable', 'integer', 'min:0'],
+            'commands.*.selection_member_key' => ['nullable'],
+            'commands.*.selection_member_index' => ['nullable', 'integer', 'min:0'],
+            'commands.*.selection_member_base_sequence' => ['nullable', 'integer', 'min:1'],
+            'commands.*.selection_member_size' => ['nullable', 'integer', 'min:1'],
+            'commands.*.selection_member_kind' => ['nullable', 'string'],
+            'commands.*.parallel_group_path' => ['nullable', 'array'],
+            'commands.*.parallel_group_path.*.parallel_group_id' => ['required', 'string'],
+            'commands.*.parallel_group_path.*.parallel_group_kind' => ['required', 'string'],
+            'commands.*.parallel_group_path.*.parallel_group_mode' => ['nullable', 'string'],
+            'commands.*.parallel_group_path.*.parallel_group_base_sequence' => ['required', 'integer', 'min:1'],
+            'commands.*.parallel_group_path.*.parallel_group_size' => ['required', 'integer', 'min:1'],
+            'commands.*.parallel_group_path.*.parallel_group_index' => ['required', 'integer', 'min:0'],
+            'commands.*.parallel_group_path.*.selection_member_key' => ['nullable'],
+            'commands.*.parallel_group_path.*.selection_member_index' => ['nullable', 'integer', 'min:0'],
+            'commands.*.parallel_group_path.*.selection_member_base_sequence' => ['nullable', 'integer', 'min:1'],
+            'commands.*.parallel_group_path.*.selection_member_size' => ['nullable', 'integer', 'min:1'],
+            'commands.*.parallel_group_path.*.selection_member_kind' => ['nullable', 'string'],
+        ];
+    }
+
+    /**
+     * Validate and canonicalize the package-owned parallel command grammar
+     * without normalizing unrelated command payloads. Servers call this before
+     * checking task ownership so malformed input retains validation precedence.
+     *
+     * @param  list<array<string, mixed>>  $commands
+     * @return list<array<string, mixed>>
+     */
+    public static function preflightParallelMetadata(array $commands): array
+    {
+        $commands = self::normalizeParallelMetadataIntegerFields($commands);
+        $errors = [];
+
+        foreach ($commands as $index => $command) {
+            $type = $command['type'] ?? null;
+            if (! is_string($type)) {
+                continue;
+            }
+
+            self::assertParallelMetadataScope($type, $command, $index, $errors);
+            $metadata = self::optionalParallelMetadataForCommand($command, $type, $index, $errors);
+
+            if ($metadata === []) {
+                continue;
+            }
+
+            foreach ([...self::PARALLEL_METADATA_FIELDS, 'parallel_group_path'] as $field) {
+                unset($commands[$index][$field]);
+            }
+
+            $commands[$index] = [...$commands[$index], ...$metadata];
+        }
+
+        if ($errors !== []) {
+            throw ValidationException::withMessages($errors);
+        }
+
+        return $commands;
     }
 
     /**
@@ -177,6 +298,7 @@ final class WorkflowCommandNormalizer
             }
 
             self::assertCommandFieldScope($type, is_array($command) ? $command : [], $index, $errors);
+            self::assertParallelMetadataScope($type, is_array($command) ? $command : [], $index, $errors);
 
             if ($type === 'cancel_selection_operation') {
                 $groupId = $command['selection_group_id'] ?? null;
@@ -281,7 +403,7 @@ final class WorkflowCommandNormalizer
                 $scheduleToClose = self::optionalPositiveInt($command, 'schedule_to_close_timeout', $index, $errors);
                 $heartbeat = self::optionalPositiveInt($command, 'heartbeat_timeout', $index, $errors);
                 $workerSession = self::optionalWorkerSession($command, $index, $errors);
-                $parallelMetadata = self::optionalParallelMetadata($command, 'activity', $index, $errors);
+                $parallelMetadata = self::optionalParallelMetadataForCommand($command, $type, $index, $errors);
 
                 self::assertActivityTimeoutOrdering($startToClose, $scheduleToClose, $heartbeat, $index, $errors);
 
@@ -396,7 +518,7 @@ final class WorkflowCommandNormalizer
                 $normalized[] = [
                     'type' => $type,
                     'delay_seconds' => (int) $command['delay_seconds'],
-                    ...self::optionalParallelMetadata($command, 'timer', $index, $errors),
+                    ...self::optionalParallelMetadataForCommand($command, $type, $index, $errors),
                 ];
 
                 continue;
@@ -413,7 +535,7 @@ final class WorkflowCommandNormalizer
 
                 $parentClosePolicy = self::optionalCommandString($command, 'parent_close_policy', $index, $errors);
                 $retryPolicy = self::optionalRetryPolicy($command, $index, $errors, 'Child workflow');
-                $parallelMetadata = self::optionalParallelMetadata($command, 'child', $index, $errors);
+                $parallelMetadata = self::optionalParallelMetadataForCommand($command, $type, $index, $errors);
 
                 if ($parentClosePolicy !== null && ! in_array(
                     $parentClosePolicy,
@@ -816,7 +938,7 @@ final class WorkflowCommandNormalizer
             }
 
             if ($type === 'open_condition_wait') {
-                $parallelMetadata = self::optionalParallelMetadata($command, 'condition', $index, $errors);
+                $parallelMetadata = self::optionalParallelMetadataForCommand($command, $type, $index, $errors);
                 $conditionKey = self::optionalCommandString($command, 'condition_key', $index, $errors);
                 $conditionDefinitionFingerprint = self::optionalCommandString(
                     $command,
@@ -857,7 +979,7 @@ final class WorkflowCommandNormalizer
             }
 
             if ($type === 'open_signal_wait') {
-                $parallelMetadata = self::optionalParallelMetadata($command, 'signal', $index, $errors);
+                $parallelMetadata = self::optionalParallelMetadataForCommand($command, $type, $index, $errors);
                 if (! is_string($command['signal_name'] ?? null) || trim((string) $command['signal_name']) === '') {
                     $errors["commands.{$index}.signal_name"] = [
                         'Open signal wait commands require a non-empty signal_name.',
@@ -903,8 +1025,99 @@ final class WorkflowCommandNormalizer
     }
 
     /**
-     * @param array<string, mixed> $command
-     * @param array<string, list<string>> $errors
+     * @param  array<string, mixed>  $command
+     * @param  array<string, list<string>>  $errors
+     * @return array<string, mixed>
+     */
+    private static function optionalParallelMetadataForCommand(
+        array $command,
+        string $type,
+        int $index,
+        array &$errors,
+    ): array {
+        $leafKind = self::PARALLEL_COMMAND_LEAF_KINDS[$type] ?? null;
+
+        return $leafKind === null
+            ? []
+            : self::optionalParallelMetadata($command, $leafKind, $index, $errors);
+    }
+
+    /**
+     * @param  array<string, mixed>  $command
+     * @param  array<string, list<string>>  $errors
+     */
+    private static function assertParallelMetadataScope(
+        string $type,
+        array $command,
+        int $index,
+        array &$errors,
+    ): void {
+        if (array_key_exists($type, self::PARALLEL_COMMAND_LEAF_KINDS)) {
+            return;
+        }
+
+        foreach ([...self::PARALLEL_METADATA_FIELDS, 'parallel_group_path'] as $field) {
+            if (! array_key_exists($field, $command) || $command[$field] === null) {
+                continue;
+            }
+
+            $errors["commands.{$index}.{$field}"] = [
+                sprintf(
+                    '%s is only supported for activity, timer, and child-workflow scheduling commands.',
+                    $field,
+                ),
+            ];
+        }
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $commands
+     * @return list<array<string, mixed>>
+     */
+    private static function normalizeParallelMetadataIntegerFields(array $commands): array
+    {
+        foreach ($commands as $commandIndex => $command) {
+            foreach (self::PARALLEL_METADATA_INTEGER_FIELDS as $field) {
+                if (array_key_exists($field, $command)) {
+                    $commands[$commandIndex][$field] = self::normalizeValidatedInteger($command[$field]);
+                }
+            }
+
+            $path = $command['parallel_group_path'] ?? null;
+            if (! is_array($path)) {
+                continue;
+            }
+
+            foreach ($path as $pathIndex => $entry) {
+                if (! is_array($entry)) {
+                    continue;
+                }
+
+                foreach (self::PARALLEL_METADATA_INTEGER_FIELDS as $field) {
+                    if (array_key_exists($field, $entry)) {
+                        $path[$pathIndex][$field] = self::normalizeValidatedInteger($entry[$field]);
+                    }
+                }
+            }
+
+            $commands[$commandIndex]['parallel_group_path'] = $path;
+        }
+
+        return $commands;
+    }
+
+    private static function normalizeValidatedInteger(mixed $value): mixed
+    {
+        if (is_string($value) && preg_match('/^-?\d+$/', $value) === 1) {
+            return (int) $value;
+        }
+
+        return $value;
+    }
+
+    /**
+     * @param  array<string, mixed>  $command
+     * @param  array<string, list<string>>  $errors
      * @return array<string, mixed>
      */
     private static function optionalParallelMetadata(
@@ -913,21 +1126,8 @@ final class WorkflowCommandNormalizer
         int $index,
         array &$errors,
     ): array {
-        $fields = [
-            'parallel_group_id',
-            'parallel_group_kind',
-            'parallel_group_mode',
-            'parallel_group_base_sequence',
-            'parallel_group_size',
-            'parallel_group_index',
-            'selection_member_key',
-            'selection_member_index',
-            'selection_member_base_sequence',
-            'selection_member_size',
-            'selection_member_kind',
-        ];
         $present = array_key_exists('parallel_group_path', $command);
-        foreach ($fields as $field) {
+        foreach (self::PARALLEL_METADATA_FIELDS as $field) {
             $present = $present || array_key_exists($field, $command);
         }
         if (! $present) {

@@ -38,6 +38,62 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
         $this->assertFalse(WorkflowCommandNormalizer::acceptsPayloadEnvelope('fail_update', 'result'));
     }
 
+    public function testParallelMetadataPreflightPublishesRulesAndCanonicalizesThePackageGrammar(): void
+    {
+        $rules = WorkflowCommandNormalizer::parallelMetadataValidationRules();
+
+        $this->assertSame(['nullable', 'string'], $rules['commands.*.parallel_group_mode']);
+        $this->assertSame(
+            ['nullable', 'integer', 'min:1'],
+            $rules['commands.*.parallel_group_path.*.selection_member_size'],
+        );
+
+        $entry = [
+            'parallel_group_id' => 'select-calls:1:1',
+            'parallel_group_kind' => 'activity',
+            'parallel_group_mode' => 'select',
+            'parallel_group_base_sequence' => '1',
+            'parallel_group_size' => '1',
+            'parallel_group_index' => '0',
+            'selection_member_key' => 'activity',
+            'selection_member_index' => '0',
+            'selection_member_base_sequence' => '1',
+            'selection_member_size' => '1',
+            'selection_member_kind' => 'activity',
+        ];
+
+        $commands = WorkflowCommandNormalizer::preflightParallelMetadata([[
+            'type' => 'schedule_activity',
+            'activity_type' => 'fetch',
+            ...$entry,
+            'parallel_group_path' => [$entry],
+        ]]);
+
+        $this->assertSame(1, $commands[0]['parallel_group_base_sequence']);
+        $this->assertSame(0, $commands[0]['selection_member_index']);
+        $this->assertSame(1, $commands[0]['parallel_group_path'][0]['selection_member_size']);
+    }
+
+    public function testParallelMetadataPreflightRejectsIncompleteMetadataWithNormalizerErrors(): void
+    {
+        try {
+            WorkflowCommandNormalizer::preflightParallelMetadata([[
+                'type' => 'start_timer',
+                'delay_seconds' => 5,
+                'parallel_group_id' => 'parallel-timers:1:1',
+            ]]);
+        } catch (ValidationException $exception) {
+            $this->assertSame(
+                'Parallel workflow commands require complete top-level metadata and a non-empty group path.',
+                $exception->errors()['commands.0.parallel_group_path'][0] ?? null,
+            );
+
+            return;
+        }
+
+        $this->fail('Expected ValidationException was not thrown.');
+    }
+
     public function testCompleteWorkflowAcceptsRawStringResult(): void
     {
         $out = WorkflowCommandNormalizer::normalize([
