@@ -30,7 +30,7 @@ final class WorkerProtocolVersion
      * pagination semantics). Bump the minor for additive changes (new
      * optional fields, new non-terminal command types).
      */
-    public const VERSION = '1.18';
+    public const VERSION = '1.19';
 
     /**
      * Worker registration capability for server-routed workflow query
@@ -79,6 +79,12 @@ final class WorkerProtocolVersion
      * Worker owns a bounded exact-identity sticky workflow cache.
      */
     public const CAPABILITY_STICKY_EXECUTION = 'sticky_execution';
+
+    /**
+     * Worker can emit durable selection-group metadata and replay persisted
+     * winner and loser-lifecycle markers.
+     */
+    public const CAPABILITY_DURABLE_SELECTION = 'durable_selection';
 
     /**
      * Stable fail-closed reason a worker or server must return when it
@@ -151,6 +157,8 @@ final class WorkerProtocolVersion
     public const MIN_LONG_POLL_TIMEOUT = 0;
 
     public const PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION = '1.18';
+
+    public const DURABLE_SELECTION_MINIMUM_PROTOCOL_VERSION = '1.19';
 
     private const QUERY_TASKS_MINIMUM_PROTOCOL_VERSION = '1.8';
 
@@ -266,6 +274,10 @@ final class WorkerProtocolVersion
             $capabilities[] = self::CAPABILITY_STICKY_EXECUTION;
         }
 
+        if (self::supportsFeatureVersion($protocolVersion, self::DURABLE_SELECTION_MINIMUM_PROTOCOL_VERSION)) {
+            $capabilities[] = self::CAPABILITY_DURABLE_SELECTION;
+        }
+
         return $capabilities;
     }
 
@@ -308,6 +320,7 @@ final class WorkerProtocolVersion
     public static function nonTerminalCommandTypes(): array
     {
         return [
+            'cancel_selection_operation',
             'schedule_activity',
             'start_timer',
             'start_child_workflow',
@@ -467,6 +480,7 @@ final class WorkerProtocolVersion
             'upsert_memo_command' => self::upsertMemoCommandShape(),
             'upsert_search_attributes_command' => self::upsertSearchAttributesCommandShape(),
             'condition_wait_command' => self::conditionWaitCommandShape(),
+            'durable_selection' => self::durableSelectionSemantics(),
             'service_operation_command' => self::serviceOperationCommandShape(),
             'message_streams' => self::messageStreamSemantics(),
             'fail_workflow_command' => self::failWorkflowCommandShape(),
@@ -637,6 +651,64 @@ final class WorkerProtocolVersion
                 'capable_workers_must_submit_occurrence_id' => true,
                 'servers_below_minimum_must_reject_before_execution' => true,
                 'rejection_status' => 400,
+                'rejection_reason' => 'unsupported_protocol_version',
+            ],
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public static function durableSelectionSemantics(): array
+    {
+        return [
+            'minimum_protocol_version' => self::DURABLE_SELECTION_MINIMUM_PROTOCOL_VERSION,
+            'worker_capability' => self::CAPABILITY_DURABLE_SELECTION,
+            'group_mode' => 'select',
+            'group_id_prefix' => 'select-calls',
+            'eligible_command_types' => [
+                'schedule_activity',
+                'start_child_workflow',
+                'start_timer',
+                'open_signal_wait',
+                'open_condition_wait',
+            ],
+            'command_metadata_fields' => [
+                'parallel_group_mode',
+                'selection_member_key',
+                'selection_member_index',
+                'selection_member_base_sequence',
+                'selection_member_size',
+                'selection_member_kind',
+            ],
+            'selection_key_domain' => 'non_empty_string_or_non_negative_integer',
+            'winner_history_event' => 'SelectionResolved',
+            'cancellation_history_event' => 'SelectionOperationCancelled',
+            'cancellation_command' => 'cancel_selection_operation',
+            'cancellation_request_result' => 'void',
+            'cancellation_outcome_authority' => 'SelectionOperationCancelled',
+            'cancellation_member_authority' => 'durable_scheduled_or_open_history',
+            'terminal_before_cancellation' => 'preserve_terminal_result_without_cancellation_marker',
+            'cancellation_replay_without_marker' => 'advance_only_after_committed_noop_boundary',
+            'winner_identity_fields' => [
+                'selection_group_id',
+                'member_key',
+                'member_index',
+                'member_base_sequence',
+                'member_size',
+                'operation_kind',
+                'operation_identity',
+                'outcome',
+                'resolution_event_id',
+                'resolution_event_type',
+            ],
+            'winner_commit' => 'first_eligible_resolution_under_parent_run_lock',
+            'replay' => 'consume_recorded_winner_independent_of_later_history_order',
+            'non_winners' => ['continue', 'await', 'cancel'],
+            'implicit_cancellation' => false,
+            'version_gate' => [
+                'workers_below_minimum_must_not_advertise_capability' => true,
+                'servers_below_minimum_must_reject_selection_metadata' => true,
                 'rejection_reason' => 'unsupported_protocol_version',
             ],
         ];

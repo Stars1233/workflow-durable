@@ -411,6 +411,18 @@ abstract class Workflow
     }
 
     /**
+     * Start independent durable calls and resume when one selected member
+     * commits its terminal outcome. Losing handles remain available on the
+     * returned selection result.
+     *
+     * @param iterable<int|string, mixed> $calls
+     */
+    public static function select(iterable $calls): Support\SelectionResult|Support\SelectCall
+    {
+        return select($calls);
+    }
+
+    /**
      * Wait for a condition closure to become truthy, for a signal by name,
      * or for either plus a timeout.
      *

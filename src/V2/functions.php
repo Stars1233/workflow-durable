@@ -20,6 +20,8 @@ use Workflow\V2\Support\ContinueAsNewCall;
 use Workflow\V2\Support\InternalAsyncClosurePayload;
 use Workflow\V2\Support\LocalActivityCall;
 use Workflow\V2\Support\LocalActivityOptions;
+use Workflow\V2\Support\SelectCall;
+use Workflow\V2\Support\SelectionResult;
 use Workflow\V2\Support\ServiceOperationCall;
 use Workflow\V2\Support\ServiceOperationOptions;
 use Workflow\V2\Support\SideEffectCall;
@@ -150,6 +152,28 @@ if (! function_exists(__NAMESPACE__ . '\\parallel')) {
     function parallel(iterable $calls): mixed
     {
         return all($calls);
+    }
+}
+
+if (! function_exists(__NAMESPACE__ . '\\select')) {
+    /**
+     * Start every durable operation and resume with the first committed
+     * eligible member. Non-winning operations remain active and addressable
+     * through the returned result's handles.
+     *
+     * @param iterable<int|string, mixed> $calls
+     */
+    function select(iterable $calls): SelectionResult|SelectCall
+    {
+        $resolved = (static function () use ($calls): \Generator {
+            foreach ($calls as $key => $call) {
+                yield $key => ($call instanceof \Closure
+                    ? WorkflowFiberContext::whileInactive($call)
+                    : $call);
+            }
+        })();
+
+        return WorkflowFiberContext::suspend(new SelectCall($resolved));
     }
 }
 

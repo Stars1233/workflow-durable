@@ -23,6 +23,7 @@ use Workflow\V2\Support\ActivityCall;
 use Workflow\V2\Support\ActivityOptions;
 use Workflow\V2\Support\ChildWorkflowOptions;
 use Workflow\V2\Support\MemoPayload;
+use Workflow\V2\Support\ParallelChildGroup;
 use Workflow\V2\Support\ServiceOperationCall;
 use Workflow\V2\Support\ServiceOperationOptions;
 use Workflow\V2\Support\ServiceOperationResult;
@@ -78,6 +79,213 @@ final class WorkflowFiberRunnerTest extends TestCase
             'type' => 'start_timer',
             'delay_seconds' => 30,
         ]], $scheduled->commands);
+    }
+
+    public function testRunnerAuthorsNestedSelectionAsOneExactFlattenedCommandBatchAndThenWaits(): void
+    {
+        $scheduled = $this->runnerFor(WorkerProtocolRunnerNestedSelectionWorkflow::class)->step();
+        $outerFirst = ParallelChildGroup::groupEntry(1, 3, 0, 'mixed', 'select', 'nested', 0, 1, 2, 'group');
+        $outerSecond = ParallelChildGroup::groupEntry(1, 3, 1, 'mixed', 'select', 'nested', 0, 1, 2, 'group');
+        $innerFirst = ParallelChildGroup::groupEntry(1, 2, 0, 'activity');
+        $innerSecond = ParallelChildGroup::groupEntry(1, 2, 1, 'activity');
+        $deadline = ParallelChildGroup::groupEntry(1, 3, 2, 'mixed', 'select', 'deadline', 1, 3, 1, 'timer');
+
+        $this->assertSame([
+            [
+                'type' => 'schedule_activity',
+                'activity_type' => 'demo.first',
+                'arguments' => Serializer::serializeWithCodec('avro', []),
+                'payload_codec' => 'avro',
+                ...ParallelChildGroup::payloadForPath([$outerFirst, $innerFirst]),
+            ],
+            [
+                'type' => 'schedule_activity',
+                'activity_type' => 'demo.second',
+                'arguments' => Serializer::serializeWithCodec('avro', []),
+                'payload_codec' => 'avro',
+                ...ParallelChildGroup::payloadForPath([$outerSecond, $innerSecond]),
+            ],
+            [
+                'type' => 'start_timer',
+                'delay_seconds' => 30,
+                ...ParallelChildGroup::payloadForPath([$deadline]),
+            ],
+        ], $scheduled->commands);
+
+        $waiting = WorkflowFiberRunner::forClass(
+            WorkerProtocolRunnerNestedSelectionWorkflow::class,
+            'workflow-1',
+            'run-1',
+            [],
+            'avro',
+            $this->groupOpeningHistory($scheduled->commands),
+        )->step();
+
+        $this->assertFalse($waiting->completed);
+        $this->assertSame([], $waiting->commands);
+    }
+
+    public function testRunnerReconstructsNestedSelectionResultFromPersistedWinnerHistory(): void
+    {
+        $scheduled = $this->runnerFor(WorkerProtocolRunnerNestedSelectionWorkflow::class)->step();
+        $history = $this->groupOpeningHistory($scheduled->commands);
+        foreach ([
+            0 => 'first-result',
+            1 => 'second-result',
+        ] as $offset => $result) {
+            $history[] = [
+                'id' => "activity-completed-{$offset}",
+                'sequence' => 18 + $offset,
+                'event_type' => 'ActivityCompleted',
+                'payload' => [
+                    'sequence' => $offset + 1,
+                    'activity_execution_id' => 'activity-' . ($offset + 1),
+                    'activity_type' => $scheduled->commands[$offset]['activity_type'],
+                    'result' => Serializer::serializeWithCodec('avro', $result),
+                    'payload_codec' => 'avro',
+                    ...ParallelChildGroup::payloadForPath($scheduled->commands[$offset]['parallel_group_path']),
+                ],
+                'recorded_at' => '2026-08-27T08:00:01+00:00',
+            ];
+        }
+        $deadlineMetadata = ParallelChildGroup::payloadForPath($scheduled->commands[2]['parallel_group_path']);
+        $history[] = [
+            'id' => 'deadline-fired',
+            'sequence' => 20,
+            'event_type' => 'TimerFired',
+            'payload' => [
+                'sequence' => 3,
+                'timer_id' => 'timer-3',
+                ...$deadlineMetadata,
+            ],
+            'recorded_at' => '2026-08-27T08:00:01+00:00',
+        ];
+
+        $withoutMarker = WorkflowFiberRunner::forClass(
+            WorkerProtocolRunnerNestedSelectionWorkflow::class,
+            'workflow-1',
+            'run-1',
+            [],
+            'avro',
+            $history,
+        )->step();
+
+        $this->assertFalse($withoutMarker->completed);
+        $this->assertSame([], $withoutMarker->commands);
+
+        $history[] = [
+            'id' => 'selection-resolved',
+            'sequence' => 21,
+            'event_type' => 'SelectionResolved',
+            'payload' => [
+                'selection_group_id' => 'select-calls:1:3',
+                'selection_group_base_sequence' => 1,
+                'selection_group_size' => 3,
+                'member_key' => 'deadline',
+                'member_index' => 1,
+                'member_base_sequence' => 3,
+                'member_size' => 1,
+                'operation_kind' => 'timer',
+                'operation_identity' => 'timer-3',
+                'outcome' => 'completed',
+                'resolution_event_id' => 'deadline-fired',
+                'resolution_event_type' => 'TimerFired',
+            ],
+            'recorded_at' => '2026-08-27T08:00:01+00:00',
+        ];
+
+        $completed = WorkflowFiberRunner::forClass(
+            WorkerProtocolRunnerNestedSelectionWorkflow::class,
+            'workflow-1',
+            'run-1',
+            [],
+            'avro',
+            $history,
+        )->step();
+
+        $this->assertTrue($completed->completed);
+        $this->assertSame([
+            'key' => 'deadline',
+            'kind' => 'timer',
+            'identity' => 'timer-3',
+            'value' => true,
+            'remaining' => ['nested'],
+        ], $completed->result);
+    }
+
+    public function testRunnerRejectsOutOfDomainRecordedSelectionMemberKeys(): void
+    {
+        $scheduled = $this->runnerFor(WorkerProtocolRunnerNestedSelectionWorkflow::class)->step();
+
+        foreach (['', -1] as $key) {
+            $history = $this->groupOpeningHistory($scheduled->commands);
+            $history[0]['payload']['parallel_group_path'][0]['selection_member_key'] = $key;
+
+            try {
+                WorkflowFiberRunner::forClass(
+                    WorkerProtocolRunnerNestedSelectionWorkflow::class,
+                    'workflow-1',
+                    'run-1',
+                    [],
+                    'avro',
+                    $history,
+                )->step();
+            } catch (HistoryEventShapeMismatchException) {
+                $this->addToAssertionCount(1);
+
+                continue;
+            }
+
+            $this->fail(sprintf('Runner accepted invalid recorded selection key [%s].', (string) $key));
+        }
+    }
+
+    public function testRunnerKeepsOrdinaryAllBarrierSemanticsAcrossColdHistoryReplay(): void
+    {
+        $scheduled = $this->runnerFor(WorkerProtocolRunnerAllWorkflow::class)->step();
+
+        $this->assertSame(['schedule_activity', 'start_timer'], array_column($scheduled->commands, 'type'));
+        $this->assertSame('parallel-calls:1:2', $scheduled->commands[0]['parallel_group_id']);
+        $this->assertSame('parallel-calls:1:2', $scheduled->commands[1]['parallel_group_id']);
+
+        $history = $this->groupOpeningHistory($scheduled->commands);
+        $history[] = [
+            'id' => 'activity-completed',
+            'sequence' => 20,
+            'event_type' => 'ActivityCompleted',
+            'payload' => [
+                'sequence' => 1,
+                'activity_execution_id' => 'activity-1',
+                'activity_type' => 'demo.all',
+                'result' => Serializer::serializeWithCodec('avro', 'activity-result'),
+                'payload_codec' => 'avro',
+                ...ParallelChildGroup::payloadForPath($scheduled->commands[0]['parallel_group_path']),
+            ],
+            'recorded_at' => '2026-08-27T08:00:01+00:00',
+        ];
+        $history[] = [
+            'id' => 'timer-fired',
+            'sequence' => 21,
+            'event_type' => 'TimerFired',
+            'payload' => [
+                'sequence' => 2,
+                'timer_id' => 'timer-2',
+                ...ParallelChildGroup::payloadForPath($scheduled->commands[1]['parallel_group_path']),
+            ],
+            'recorded_at' => '2026-08-27T08:00:02+00:00',
+        ];
+
+        $completed = WorkflowFiberRunner::forClass(
+            WorkerProtocolRunnerAllWorkflow::class,
+            'workflow-1',
+            'run-1',
+            [],
+            'avro',
+            $history,
+        )->step();
+
+        $this->assertTrue($completed->completed);
+        $this->assertSame(['activity-result', true], $completed->result);
     }
 
     public function testRunnerSurfacesConditionWaitCommand(): void
@@ -1815,6 +2023,56 @@ final class WorkflowFiberRunnerTest extends TestCase
     }
 
     /**
+     * @param list<array<string, mixed>> $commands
+     * @return list<array<string, mixed>>
+     */
+    private function groupOpeningHistory(array $commands): array
+    {
+        $events = [];
+
+        foreach ($commands as $index => $command) {
+            $outer = $command['parallel_group_path'][0];
+            $sequence = $outer['parallel_group_base_sequence'] + $outer['parallel_group_index'];
+            $metadata = ParallelChildGroup::payloadForPath($command['parallel_group_path']);
+
+            if ($command['type'] === 'schedule_activity') {
+                $eventType = 'ActivityScheduled';
+                $payload = [
+                    'sequence' => $sequence,
+                    'activity_execution_id' => "activity-{$sequence}",
+                    'activity_type' => $command['activity_type'],
+                    ...$metadata,
+                ];
+            } elseif ($command['type'] === 'start_child_workflow') {
+                $eventType = 'ChildWorkflowScheduled';
+                $payload = [
+                    'sequence' => $sequence,
+                    'child_workflow_run_id' => "child-{$sequence}",
+                    'workflow_type' => $command['workflow_type'],
+                    ...$metadata,
+                ];
+            } else {
+                $eventType = 'TimerScheduled';
+                $payload = [
+                    'sequence' => $sequence,
+                    'timer_id' => "timer-{$sequence}",
+                    ...$metadata,
+                ];
+            }
+
+            $events[] = [
+                'id' => "opening-{$sequence}",
+                'sequence' => 10 + $sequence,
+                'event_type' => $eventType,
+                'payload' => $payload,
+                'recorded_at' => '2026-08-27T08:00:00+00:00',
+            ];
+        }
+
+        return $events;
+    }
+
+    /**
      * @param class-string<Workflow> $workflowClass
      */
     private function runnerFor(string $workflowClass): WorkflowFiberRunner
@@ -1880,6 +2138,39 @@ final class WorkerProtocolRunnerTimerWorkflow extends Workflow
     public function handle(): mixed
     {
         return Workflow::timer(30);
+    }
+}
+
+final class WorkerProtocolRunnerNestedSelectionWorkflow extends Workflow
+{
+    public function handle(): array
+    {
+        $selected = Workflow::select([
+            'nested' => static fn () => Workflow::all([
+                static fn () => Workflow::activity('demo.first'),
+                static fn () => Workflow::activity('demo.second'),
+            ]),
+            'deadline' => static fn () => Workflow::timer(30),
+        ]);
+
+        return [
+            'key' => $selected->key,
+            'kind' => $selected->kind,
+            'identity' => $selected->identity,
+            'value' => $selected->value,
+            'remaining' => array_keys($selected->remaining()),
+        ];
+    }
+}
+
+final class WorkerProtocolRunnerAllWorkflow extends Workflow
+{
+    public function handle(): array
+    {
+        return Workflow::all([
+            static fn () => Workflow::activity('demo.all'),
+            static fn () => Workflow::timer(10),
+        ]);
     }
 }
 

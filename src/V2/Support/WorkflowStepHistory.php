@@ -387,6 +387,29 @@ final class WorkflowStepHistory
             ]);
         }
 
+        if ($call instanceof TimerCall) {
+            return self::hasAnyEventType($eventTypes, [
+                HistoryEventType::TimerScheduled->value,
+                HistoryEventType::TimerFired->value,
+                HistoryEventType::TimerCancelled->value,
+            ]);
+        }
+
+        if ($call instanceof SignalCall) {
+            return self::hasAnyEventType($eventTypes, [
+                HistoryEventType::SignalWaitOpened->value,
+                HistoryEventType::SignalApplied->value,
+            ]);
+        }
+
+        if ($call instanceof AwaitCall || $call instanceof AwaitWithTimeoutCall) {
+            return self::hasAnyEventType($eventTypes, [
+                HistoryEventType::ConditionWaitOpened->value,
+                HistoryEventType::ConditionWaitSatisfied->value,
+                HistoryEventType::ConditionWaitTimedOut->value,
+            ]);
+        }
+
         return false;
     }
 

@@ -194,6 +194,19 @@ final class RunTimerTask implements ShouldQueue
                 'lease_expires_at' => null,
             ])->save();
 
+            if ($parallelMetadataPath !== []) {
+                ParallelChildGroup::claimSelectionWinner(
+                    $run,
+                    $parallelMetadataPath,
+                    match (true) {
+                        $conditionWaitId !== null => 'condition',
+                        $signalWaitId !== null => 'signal',
+                        default => 'timer',
+                    },
+                    $firedEvent,
+                );
+            }
+
             if (
                 $parallelMetadataPath !== []
                 && ! ParallelChildGroup::shouldWakeParentOnTimerClosure(

@@ -13,6 +13,7 @@ use RuntimeException;
 use Throwable;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Contracts\YieldedCommand;
+use Workflow\V2\Exceptions\DurableOperationCancelledException;
 use Workflow\V2\Exceptions\HistoryEventShapeMismatchException;
 use Workflow\V2\Exceptions\UnresolvedWorkflowFailureException;
 use Workflow\V2\Exceptions\UnsupportedWorkflowYieldException;
@@ -24,9 +25,9 @@ use Workflow\V2\Workflow;
  * Internal cold-replay executor for the embedded engine task bridge.
  *
  * Pass bridge `history_events` when constructing a cold runner; recorded
- * activity, timer, child-workflow, side-effect, version marker, memo, and
- * search-attribute outcomes are replayed into the Fiber before new commands
- * are emitted.
+ * activity, timer, child-workflow, durable group/selection, side-effect,
+ * version marker, memo, and search-attribute outcomes are replayed into the
+ * Fiber before new commands are emitted.
  *
  * @internal
  */
@@ -221,7 +222,9 @@ final class WorkflowFiberRunner
                 }
             } else {
                 if ($this->pendingYielded instanceof YieldedCommand) {
-                    ++$this->sequence;
+                    $this->sequence += $this->pendingYielded instanceof AllCall
+                        ? $this->pendingYielded->leafCount()
+                        : 1;
                     $this->pendingYielded = null;
                 }
 
@@ -288,6 +291,148 @@ final class WorkflowFiberRunner
             }
 
             $this->applyRecordedUpdatesForCurrentPosition();
+
+            if ($current instanceof CancelDurableOperationCall) {
+                $handle = $current->handle;
+                $cancelled = ParallelChildGroup::cancellationForHandle($this->workflow->run, $handle);
+
+                if (! $cancelled instanceof WorkflowHistoryEvent && ! ParallelChildGroup::selectionMemberIsTerminal(
+                    $this->workflow->run,
+                    $handle->baseSequence,
+                    $handle->size,
+                    $handle->kind,
+                )) {
+                    $immediateCommands[] = self::singleCommand(
+                        WorkflowStep::yielded($current, $this->payloadCodec)
+                    );
+                }
+
+                $this->execution->send(null, $cancelled?->recorded_at);
+
+                continue;
+            }
+
+            if ($current instanceof DurableOperationHandle) {
+                $resolution = $this->durableOperationResolution($current);
+
+                if (! $resolution['resolved']) {
+                    $this->waitingForHistory = true;
+
+                    return WorkflowStep::waiting($current)
+                        ->withPrependedCommands($immediateCommands);
+                }
+
+                if ($resolution['failure'] instanceof Throwable) {
+                    $this->execution->throw($resolution['failure'], $resolution['recorded_at']);
+                } else {
+                    $this->execution->send($resolution['value'], $resolution['recorded_at']);
+                }
+
+                continue;
+            }
+
+            if ($current instanceof AllCall) {
+                $historySequence = $this->historySequenceForCurrentPosition();
+                $baseSequence = $historySequence
+                    ?? ($this->hasReplayHistory ? $this->nextHistoryEventSequence() : $this->sequence);
+                $leafDescriptors = $current->leafDescriptors($baseSequence);
+                $groupSize = count($leafDescriptors);
+
+                if ($groupSize === 0) {
+                    $this->execution->send($current->nestedResults([]));
+
+                    continue;
+                }
+
+                if (! $this->hasReplayHistory || $historySequence === null) {
+                    $this->pendingYielded = $current;
+
+                    return WorkflowStep::group($current, $baseSequence, $this->payloadCodec)
+                        ->withPrependedCommands($immediateCommands);
+                }
+
+                $this->assertDurableGroupHistory($baseSequence, $leafDescriptors);
+
+                $results = [];
+                $failures = [];
+                $pending = false;
+                $latest = null;
+
+                foreach ($leafDescriptors as $descriptor) {
+                    $call = $descriptor['call'];
+                    $offset = $descriptor['offset'];
+                    $itemSequence = $baseSequence + $offset;
+                    $resolution = $this->durableLeafResolution($call, $itemSequence, '');
+
+                    if ($resolution['failure'] instanceof Throwable) {
+                        $failures[$offset] = $resolution['failure'];
+
+                        continue;
+                    }
+
+                    if (! $resolution['resolved']) {
+                        $pending = true;
+
+                        continue;
+                    }
+
+                    $results[$offset] = $resolution['value'];
+                    $latest = self::latestTime($latest, $resolution['recorded_at']);
+                }
+
+                if ($current instanceof SelectCall) {
+                    $groupId = $leafDescriptors[0]['group_path'][0]['parallel_group_id'];
+                    $selection = ParallelChildGroup::selectionResolution($this->workflow->run, $groupId);
+
+                    if ($selection instanceof WorkflowHistoryEvent) {
+                        $winner = ParallelChildGroup::validatedSelectionResolution(
+                            $this->workflow->run,
+                            $current,
+                            $baseSequence,
+                            $selection,
+                        );
+                        $this->sequence += $groupSize;
+                        $this->execution->send(
+                            $current->resolved(
+                                $baseSequence,
+                                $winner,
+                                $results,
+                                $failures,
+                                ParallelChildGroup::durableOperationIdentities($this->workflow->run),
+                            ),
+                            $selection->recorded_at,
+                        );
+
+                        continue;
+                    }
+
+                    $this->waitingForHistory = true;
+
+                    return WorkflowStep::waiting($current)
+                        ->withPrependedCommands($immediateCommands);
+                }
+                $failure = $this->durableGroupFailureResolution($current, $baseSequence, $groupSize);
+
+                if ($failure !== null) {
+                    $this->sequence += $groupSize;
+                    $this->execution->throw($failure['failure'], $failure['recorded_at']);
+
+                    continue;
+                }
+
+                if ($pending || $failures !== []) {
+                    $this->waitingForHistory = true;
+
+                    return WorkflowStep::waiting($current)
+                        ->withPrependedCommands($immediateCommands);
+                }
+
+                ksort($results);
+                $this->sequence += $groupSize;
+                $this->execution->send($current->nestedResults(array_values($results)), $latest);
+
+                continue;
+            }
 
             if ($current instanceof SideEffectCall) {
                 $historySequence = $this->historySequenceForCurrentPosition();
@@ -612,6 +757,264 @@ final class WorkflowFiberRunner
         }
     }
 
+    /**
+     * @param list<array{
+     *     call: ActivityCall|ChildWorkflowCall|TimerCall|SignalCall|AwaitCall|AwaitWithTimeoutCall,
+     *     offset: int,
+     *     result_path: list<int>,
+     *     group_path: list<array<string, mixed>>
+     * }> $leafDescriptors
+     */
+    private function assertDurableGroupHistory(int $baseSequence, array $leafDescriptors): void
+    {
+        WorkflowStepHistory::assertParallelGroupCompatible($this->workflow->run, $baseSequence, $leafDescriptors);
+
+        $authoredLeaves = 0;
+
+        foreach ($leafDescriptors as $descriptor) {
+            $call = $descriptor['call'];
+            $sequence = $baseSequence + $descriptor['offset'];
+
+            if (ParallelChildGroup::metadataPathForSequence($this->workflow->run, $sequence) !== []) {
+                ++$authoredLeaves;
+            }
+
+            if ($call instanceof LocalActivityCall) {
+                $this->assertActivityExecutionMode($sequence, true);
+            } elseif ($call instanceof ActivityCall) {
+                $this->assertActivityExecutionMode($sequence, false);
+            }
+
+            WorkflowStepHistory::assertCompatible(
+                $this->workflow->run,
+                $sequence,
+                self::shapeForDurableLeaf($call),
+                $call instanceof ActivityCall
+                    ? [
+                        'activity_type' => $call->activity,
+                    ]
+                    : ($call instanceof ChildWorkflowCall
+                        ? [
+                            'child_workflow_type' => $call->workflow,
+                        ]
+                        : []),
+            );
+        }
+
+        if ($authoredLeaves !== 0 && $authoredLeaves !== count($leafDescriptors)) {
+            $sequence = $baseSequence;
+            foreach ($leafDescriptors as $descriptor) {
+                if (ParallelChildGroup::metadataPathForSequence(
+                    $this->workflow->run,
+                    $baseSequence + $descriptor['offset'],
+                ) === []) {
+                    $sequence += $descriptor['offset'];
+
+                    break;
+                }
+            }
+
+            throw new HistoryEventShapeMismatchException(
+                $sequence,
+                WorkflowStepHistory::PARALLEL_GROUP,
+                ['ParallelGroupTopology'],
+                'Persisted durable group history contains only part of the authored leaf set.',
+            );
+        }
+    }
+
+    private static function shapeForDurableLeaf(
+        ActivityCall|ChildWorkflowCall|TimerCall|SignalCall|AwaitCall|AwaitWithTimeoutCall $call,
+    ): string {
+        return match (true) {
+            $call instanceof LocalActivityCall => WorkflowStepHistory::LOCAL_ACTIVITY,
+            $call instanceof ActivityCall => WorkflowStepHistory::ACTIVITY,
+            $call instanceof TimerCall => WorkflowStepHistory::TIMER,
+            $call instanceof SignalCall => WorkflowStepHistory::SIGNAL_WAIT,
+            $call instanceof AwaitCall, $call instanceof AwaitWithTimeoutCall => WorkflowStepHistory::CONDITION_WAIT,
+            default => WorkflowStepHistory::CHILD_WORKFLOW,
+        };
+    }
+
+    /**
+     * @return array{resolved: bool, value: mixed, failure: Throwable|null, recorded_at: CarbonInterface|null}
+     */
+    private function durableOperationResolution(DurableOperationHandle $handle): array
+    {
+        $cancelled = ParallelChildGroup::cancellationForHandle($this->workflow->run, $handle);
+        if ($cancelled instanceof WorkflowHistoryEvent) {
+            return [
+                'resolved' => true,
+                'value' => null,
+                'failure' => DurableOperationCancelledException::forHandle($handle),
+                'recorded_at' => $cancelled->recorded_at,
+            ];
+        }
+
+        if (! $handle->call instanceof AllCall) {
+            return $this->durableLeafResolution($handle->call, $handle->baseSequence, $handle->identity);
+        }
+
+        $failure = $this->durableGroupFailureResolution(
+            $handle->call,
+            $handle->baseSequence,
+            $handle->size,
+            $handle->identity,
+        );
+        if ($failure !== null) {
+            return $failure;
+        }
+
+        $results = [];
+        $latest = null;
+
+        foreach ($handle->call->leafDescriptors($handle->baseSequence) as $descriptor) {
+            $resolution = $this->durableLeafResolution(
+                $descriptor['call'],
+                $handle->baseSequence + $descriptor['offset'],
+                $handle->identity,
+            );
+            if ($resolution['failure'] instanceof Throwable || ! $resolution['resolved']) {
+                return $resolution;
+            }
+
+            $results[$descriptor['offset']] = $resolution['value'];
+            $latest = self::latestTime($latest, $resolution['recorded_at']);
+        }
+
+        ksort($results);
+
+        return [
+            'resolved' => true,
+            'value' => $handle->call->nestedResults(array_values($results)),
+            'failure' => null,
+            'recorded_at' => $latest,
+        ];
+    }
+
+    /**
+     * @return array{resolved: bool, value: mixed, failure: Throwable, recorded_at: CarbonInterface|null}|null
+     */
+    private function durableGroupFailureResolution(
+        AllCall $call,
+        int $baseSequence,
+        int $size,
+        string $identity = '',
+    ): ?array {
+        $event = ParallelChildGroup::memberFailureResolution($this->workflow->run, $baseSequence, $size);
+        if (! $event instanceof WorkflowHistoryEvent) {
+            return null;
+        }
+
+        $failureSequence = $event->payload['sequence'] ?? null;
+        foreach ($call->leafDescriptors($baseSequence) as $descriptor) {
+            $sequence = $baseSequence + $descriptor['offset'];
+            if ($failureSequence !== $sequence) {
+                continue;
+            }
+
+            $resolution = $this->durableLeafResolution($descriptor['call'], $sequence, $identity);
+            if ($resolution['failure'] instanceof Throwable) {
+                return [
+                    'resolved' => true,
+                    'value' => null,
+                    'failure' => $resolution['failure'],
+                    'recorded_at' => $resolution['recorded_at'],
+                ];
+            }
+
+            break;
+        }
+
+        throw new HistoryEventShapeMismatchException(
+            $baseSequence,
+            'the first durable failure for the authored selection member',
+            [$event->event_type->value],
+            'The terminal failure event does not match a failed durable leaf in the authored member.',
+        );
+    }
+
+    /**
+     * @return array{resolved: bool, value: mixed, failure: Throwable|null, recorded_at: CarbonInterface|null}
+     */
+    private function durableLeafResolution(
+        ActivityCall|ChildWorkflowCall|TimerCall|SignalCall|AwaitCall|AwaitWithTimeoutCall $call,
+        int $sequence,
+        string $identity,
+    ): array {
+        if ($call instanceof ActivityCall) {
+            $recorded = $this->recordedActivityOutcomes[$sequence] ?? null;
+            if ($recorded !== null) {
+                return [
+                    'resolved' => true,
+                    'value' => $recorded['result'] ?? null,
+                    'failure' => $recorded['status'] === 'completed'
+                        ? null
+                        : ($recorded['exception'] ?? new RuntimeException('Activity failed during replay.')),
+                    'recorded_at' => $recorded['recorded_at'],
+                ];
+            }
+        } elseif ($call instanceof TimerCall) {
+            $recorded = $this->recordedTimerOutcomes[$sequence] ?? null;
+            if ($recorded !== null) {
+                return [
+                    'resolved' => true,
+                    'value' => $recorded['result'],
+                    'failure' => null,
+                    'recorded_at' => $recorded['recorded_at'],
+                ];
+            }
+        } elseif ($call instanceof SignalCall) {
+            $recorded = $this->recordedSignalOutcomes[$sequence] ?? null;
+            if ($recorded !== null && $recorded['signal_name'] === $call->name) {
+                return [
+                    'resolved' => true,
+                    'value' => $recorded['result'],
+                    'failure' => null,
+                    'recorded_at' => $recorded['recorded_at'],
+                ];
+            }
+        } elseif ($call instanceof AwaitCall || $call instanceof AwaitWithTimeoutCall) {
+            $recorded = $this->recordedConditionOutcomes[$sequence] ?? null;
+            if ($recorded !== null) {
+                return [
+                    'resolved' => true,
+                    'value' => $recorded['result'],
+                    'failure' => null,
+                    'recorded_at' => $recorded['recorded_at'],
+                ];
+            }
+        } else {
+            $recorded = $this->recordedChildOutcomes[$sequence] ?? null;
+            if ($recorded !== null) {
+                return [
+                    'resolved' => true,
+                    'value' => $recorded['result'] ?? null,
+                    'failure' => $recorded['status'] === 'completed'
+                        ? null
+                        : ($recorded['exception'] ?? new RuntimeException('Child workflow failed during replay.')),
+                    'recorded_at' => $recorded['recorded_at'],
+                ];
+            }
+        }
+
+        return [
+            'resolved' => false,
+            'value' => null,
+            'failure' => null,
+            'recorded_at' => null,
+        ];
+    }
+
+    private static function latestTime(?CarbonInterface $current, ?CarbonInterface $candidate): ?CarbonInterface
+    {
+        if ($candidate === null) {
+            return $current;
+        }
+
+        return $current === null || $candidate->greaterThan($current) ? $candidate : $current;
+    }
+
     private function historyAvailableForPendingYielded(): bool
     {
         $historySequence = $this->historySequenceForCurrentPosition();
@@ -626,6 +1029,7 @@ final class WorkflowFiberRunner
         }
 
         return match (true) {
+            $this->pendingYielded instanceof AllCall => true,
             $this->pendingYielded instanceof LocalActivityCall => isset(
                 $this->recordedActivityOutcomes[$historySequence]
             ) || isset($this->openActivityWaits[$historySequence]),
@@ -652,6 +1056,20 @@ final class WorkflowFiberRunner
         }
 
         return $this->hasReplayHistory ? null : $this->sequence;
+    }
+
+    private function nextHistoryEventSequence(): int
+    {
+        $lastSequence = 0;
+
+        foreach ($this->historyEvents as $event) {
+            $sequence = self::intValue($event['sequence'] ?? null);
+            if ($sequence !== null) {
+                $lastSequence = max($lastSequence, $sequence);
+            }
+        }
+
+        return $lastSequence + 1;
     }
 
     private function applyRecordedUpdatesForCurrentPosition(): void
@@ -927,15 +1345,13 @@ final class WorkflowFiberRunner
         ], static fn (mixed $value): bool => $value !== null));
         $this->namespace = $namespace;
 
-        $startedEvents = [];
+        $events = [];
 
         foreach ($historyEvents as $event) {
-            if (self::eventType($event) === 'WorkflowStarted') {
-                $startedEvents[] = self::historyEventModel($event);
-            }
+            $events[] = self::historyEventModel($event);
         }
 
-        $run->setRelation('historyEvents', new EloquentCollection($startedEvents));
+        $run->setRelation('historyEvents', new EloquentCollection($events));
     }
 
     /**

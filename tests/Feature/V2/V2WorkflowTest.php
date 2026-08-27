@@ -46,6 +46,10 @@ use Tests\Fixtures\V2\TestPortableMemoContinueAsNewWorkflow;
 use Tests\Fixtures\V2\TestPortableMemoWorkflow;
 use Tests\Fixtures\V2\TestReclaimDuringExecutionActivity;
 use Tests\Fixtures\V2\TestRetryWorkflow;
+use Tests\Fixtures\V2\TestSelectionAwaitLoserWorkflow;
+use Tests\Fixtures\V2\TestSelectionCancelLoserWorkflow;
+use Tests\Fixtures\V2\TestSelectionCompletionBeforeCancelWorkflow;
+use Tests\Fixtures\V2\TestSelectionWorkflow;
 use Tests\Fixtures\V2\TestSignalOrderingWorkflow;
 use Tests\Fixtures\V2\TestSignalPayloadWorkflow;
 use Tests\Fixtures\V2\TestSignalWorkflow;
@@ -4104,6 +4108,134 @@ final class V2WorkflowTest extends TestCase
         $this->assertSame('completed', $workflow->output()['stage'] ?? null);
         $this->assertSame('Hello, Taylor!', $workflow->output()['results'][0] ?? null);
         $this->assertSame($link->child_workflow_run_id, $workflow->output()['results'][1]['run_id'] ?? null);
+    }
+
+    public function testSelectionResumesOnDeadlineAndKeepsActivityRunning(): void
+    {
+        self::stopWorkers();
+        Queue::fake();
+
+        $workflow = WorkflowStub::make(TestSelectionWorkflow::class, 'selection-deadline-first');
+        $workflow->start('Taylor', 0);
+        $runId = $workflow->runId();
+
+        $this->assertNotNull($runId);
+        $this->runReadyTaskForRun($runId, TaskType::Workflow);
+
+        $this->assertTrue($workflow->refresh()->completed());
+        $this->assertSame('deadline', $workflow->output()['key'] ?? null);
+        $this->assertSame('timer', $workflow->output()['kind'] ?? null);
+        $this->assertTrue($workflow->output()['result'] ?? false);
+        $this->assertSame(['work'], $workflow->output()['remaining'] ?? null);
+        $this->assertSame('selected-deadline', $workflow->query('currentState')['stage'] ?? null);
+
+        $winner = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $runId)
+            ->where('event_type', HistoryEventType::SelectionResolved->value)
+            ->firstOrFail();
+        $this->assertSame('deadline', $winner->payload['member_key']);
+
+        $this->runReadyTaskForRun($runId, TaskType::Activity);
+
+        $this->assertSame(1, WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $runId)
+            ->where('event_type', HistoryEventType::SelectionResolved->value)
+            ->count());
+        $this->assertSame('deadline', $workflow->refresh()->output()['key'] ?? null);
+    }
+
+    public function testSelectionLoserCanBeAwaitedAfterDeadlineWins(): void
+    {
+        self::stopWorkers();
+        Queue::fake();
+
+        $workflow = WorkflowStub::make(TestSelectionAwaitLoserWorkflow::class, 'selection-await-loser');
+        $workflow->start('Taylor');
+        $runId = $workflow->runId();
+
+        $this->assertNotNull($runId);
+        $this->runReadyTaskForRun($runId, TaskType::Workflow);
+
+        $this->assertSame('waiting', $workflow->refresh()->status());
+        $this->assertSame('awaiting-work', $workflow->query('currentState')['stage'] ?? null);
+
+        $this->runReadyTaskForRun($runId, TaskType::Activity);
+        $this->assertSame(1, WorkflowTask::query()
+            ->where('workflow_run_id', $runId)
+            ->where('task_type', TaskType::Workflow->value)
+            ->where('status', TaskStatus::Ready->value)
+            ->count());
+        $this->runReadyTaskForRun($runId, TaskType::Workflow);
+
+        $this->assertTrue($workflow->refresh()->completed());
+        $this->assertSame('deadline', $workflow->output()['winner'] ?? null);
+        $this->assertSame('Hello, Taylor!', $workflow->output()['work'] ?? null);
+        $this->assertSame('completed', $workflow->query('currentState')['stage'] ?? null);
+    }
+
+    public function testSelectionLoserCanBeCancelledAndCancellationReplays(): void
+    {
+        self::stopWorkers();
+        Queue::fake();
+
+        $workflow = WorkflowStub::make(TestSelectionCancelLoserWorkflow::class, 'selection-cancel-loser');
+        $workflow->start('Taylor');
+        $runId = $workflow->runId();
+
+        $this->assertNotNull($runId);
+        $this->runReadyTaskForRun($runId, TaskType::Workflow);
+
+        $this->assertTrue($workflow->refresh()->completed());
+        $this->assertSame('deadline', $workflow->output()['winner'] ?? null);
+        $this->assertSame('completed', $workflow->query('currentState')['stage'] ?? null);
+        $this->assertDatabaseHas('workflow_history_events', [
+            'workflow_run_id' => $runId,
+            'event_type' => HistoryEventType::ActivityCancelled->value,
+        ]);
+        $this->assertDatabaseHas('workflow_history_events', [
+            'workflow_run_id' => $runId,
+            'event_type' => HistoryEventType::SelectionOperationCancelled->value,
+        ]);
+        $this->assertSame(0, WorkflowTask::query()
+            ->where('workflow_run_id', $runId)
+            ->where('task_type', TaskType::Activity->value)
+            ->whereIn('status', [TaskStatus::Ready->value, TaskStatus::Leased->value])
+            ->count());
+    }
+
+    public function testSelectionCompletionBeforeCancellationReplaysWithoutCancellationMarker(): void
+    {
+        self::stopWorkers();
+        Queue::fake();
+
+        $workflow = WorkflowStub::make(
+            TestSelectionCompletionBeforeCancelWorkflow::class,
+            'selection-completion-before-cancel',
+        );
+        $workflow->start();
+        $runId = $workflow->runId();
+
+        $this->assertNotNull($runId);
+        $this->runReadyTaskForRun($runId, TaskType::Workflow);
+        $this->runReadyActivityTaskForSequence($runId, 1);
+        $this->runReadyActivityTaskForSequence($runId, 2);
+
+        $this->assertSame(
+            'booting',
+            $workflow->query('currentState')['stage'] ?? null,
+            'Query replay must stop at an uncommitted no-op cancellation boundary.',
+        );
+
+        $this->runReadyTaskForRun($runId, TaskType::Workflow);
+
+        $this->assertTrue($workflow->refresh()->completed());
+        $this->assertSame('first', $workflow->output()['winner'] ?? null);
+        $this->assertSame('Hello, Second!', $workflow->output()['loser'] ?? null);
+        $this->assertDatabaseMissing('workflow_history_events', [
+            'workflow_run_id' => $runId,
+            'event_type' => HistoryEventType::SelectionOperationCancelled->value,
+        ]);
+        $this->assertSame('completed', $workflow->query('currentState')['stage'] ?? null);
     }
 
     public function testMixedAllWaitsForActivityWhenChildCompletesFirst(): void

@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace Workflow\Tests\Unit\V2;
 
+use LogicException;
 use Orchestra\Testbench\TestCase;
 use ReflectionMethod;
 use function Workflow\V2\activity;
 use function Workflow\V2\localActivity;
 use function Workflow\V2\parallel;
+use function Workflow\V2\select;
 use Workflow\V2\Support\ActivityCall;
 use Workflow\V2\Support\ActivityOptions;
 use Workflow\V2\Support\AllCall;
@@ -18,6 +20,8 @@ use Workflow\V2\Support\ChildWorkflowCall;
 use Workflow\V2\Support\ContinueAsNewCall;
 use Workflow\V2\Support\LocalActivityCall;
 use Workflow\V2\Support\LocalActivityOptions;
+use Workflow\V2\Support\SelectCall;
+use Workflow\V2\Support\SelectionResult;
 use Workflow\V2\Support\SideEffectCall;
 use Workflow\V2\Support\SignalCall;
 use Workflow\V2\Support\TimerCall;
@@ -253,6 +257,196 @@ class WorkflowFacadeTest extends TestCase
         $this->assertInstanceOf(AllCall::class, $call);
     }
 
+    public function testSelectPreservesStableMemberKeysAndSupportsEveryDurableWaitKind(): void
+    {
+        $call = select([
+            'activity' => activity('App\\Activities\\A'),
+            'deadline' => Workflow::timer(30),
+            'signal' => Workflow::awaitSignal('resolved'),
+            'condition' => Workflow::await(static fn (): bool => false),
+            'child' => Workflow::child('App\\Workflows\\Child'),
+        ]);
+
+        $this->assertInstanceOf(SelectCall::class, $call);
+        $this->assertSame(['activity', 'deadline', 'signal', 'condition', 'child'], $call->keys);
+
+        $descriptors = $call->leafDescriptors(7);
+        $this->assertCount(5, $descriptors);
+        $this->assertSame([0, 1, 2, 3, 4], array_column($descriptors, 'offset'));
+
+        foreach ($descriptors as $index => $descriptor) {
+            $outer = $descriptor['group_path'][0];
+            $this->assertSame('select-calls:7:5', $outer['parallel_group_id']);
+            $this->assertSame('select', $outer['parallel_group_mode']);
+            $this->assertSame($call->keys[$index], $outer['selection_member_key']);
+            $this->assertSame($index, $outer['selection_member_index']);
+            $this->assertSame(7 + $index, $outer['selection_member_base_sequence']);
+            $this->assertSame(1, $outer['selection_member_size']);
+        }
+    }
+
+    public function testSelectRejectsAnEmptyOperationSet(): void
+    {
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('requires at least one durable operation');
+
+        Workflow::select([]);
+    }
+
+    public function testSelectRejectsDuplicateGeneratorKeys(): void
+    {
+        $calls = (static function (): \Generator {
+            yield 'duplicate' => Workflow::activity('App\\Activities\\A');
+            yield 'duplicate' => Workflow::activity('App\\Activities\\B');
+        })();
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('member key [duplicate] is duplicated');
+
+        Workflow::select($calls);
+    }
+
+    public function testSelectRejectsEmptyStringAndNegativeIntegerKeys(): void
+    {
+        foreach (['', -1] as $key) {
+            try {
+                Workflow::select([
+                    $key => Workflow::activity('App\\Activities\\A'),
+                ]);
+            } catch (\LogicException $exception) {
+                $this->assertStringContainsString(
+                    'must be a non-empty string or non-negative integer',
+                    $exception->getMessage(),
+                );
+
+                continue;
+            }
+
+            $this->fail(sprintf('Selection accepted the invalid member key [%s].', (string) $key));
+        }
+    }
+
+    public function testSelectPreservesValidNamedAndNumericKeys(): void
+    {
+        $call = Workflow::select([
+            0 => Workflow::activity('App\\Activities\\A'),
+            'named' => Workflow::timer(1),
+        ]);
+
+        $this->assertSame([0, 'named'], $call->keys);
+    }
+
+    public function testSelectRejectsNonScalarIterableKeys(): void
+    {
+        $calls = new class(Workflow::activity('App\\Activities\\A')) implements \Iterator {
+            private bool $valid = true;
+
+            public function __construct(
+                private readonly ActivityCall $call
+            ) {
+            }
+
+            public function current(): ActivityCall
+            {
+                return $this->call;
+            }
+
+            public function key(): object
+            {
+                return new \stdClass();
+            }
+
+            public function next(): void
+            {
+                $this->valid = false;
+            }
+
+            public function rewind(): void
+            {
+                $this->valid = true;
+            }
+
+            public function valid(): bool
+            {
+                return $this->valid;
+            }
+        };
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('member keys must be integers or strings');
+
+        Workflow::select($calls);
+    }
+
+    public function testSelectTreatsANestedAllCallAsOneDurableMember(): void
+    {
+        $call = Workflow::select([
+            'lookup' => Workflow::all([
+                Workflow::activity('App\\Activities\\A'),
+                Workflow::activity('App\\Activities\\B'),
+            ]),
+            'deadline' => Workflow::timer(5),
+        ]);
+
+        $descriptors = $call->leafDescriptors(11);
+
+        $this->assertSame([0, 1, 2], array_column($descriptors, 'offset'));
+        $this->assertSame([2, 2, 1], array_map(
+            static fn (array $descriptor): int => $descriptor['group_path'][0]['selection_member_size'],
+            $descriptors,
+        ));
+        $this->assertSame(['lookup', 'lookup', 'deadline'], array_map(
+            static fn (array $descriptor): int|string => $descriptor['group_path'][0]['selection_member_key'],
+            $descriptors,
+        ));
+        $this->assertSame('parallel-activities:11:2', $descriptors[0]['group_path'][1]['parallel_group_id']);
+    }
+
+    public function testResolvedSelectionCarriesWinnerAndAddressableLosers(): void
+    {
+        $call = Workflow::select([
+            'work' => Workflow::activity('App\\Activities\\A'),
+            'deadline' => Workflow::timer(5),
+        ]);
+
+        $result = $call->resolved(3, [
+            'member_index' => 1,
+            'operation_identity' => 'timer-42',
+        ], [
+            1 => true,
+        ], [], [
+            3 => 'activity-41',
+        ]);
+
+        $this->assertInstanceOf(SelectionResult::class, $result);
+        $this->assertSame('deadline', $result->key);
+        $this->assertSame('timer', $result->kind);
+        $this->assertSame('timer-42', $result->identity);
+        $this->assertTrue($result->result());
+        $this->assertSame(['work'], array_keys($result->remaining()));
+        $this->assertSame(3, $result->handles['work']->baseSequence);
+        $result->handles['work']->cancel();
+        $this->assertTrue(true);
+    }
+
+    public function testResolvedSelectionRejectsMissingDurableDirectMemberIdentity(): void
+    {
+        $call = Workflow::select([
+            'work' => Workflow::activity('App\\Activities\\A'),
+            'deadline' => Workflow::timer(5),
+        ]);
+
+        $this->expectException(LogicException::class);
+        $this->expectExceptionMessage('missing its durable scheduled or open operation identity');
+
+        $call->resolved(3, [
+            'member_index' => 1,
+            'operation_identity' => 'timer-42',
+        ], [
+            1 => true,
+        ]);
+    }
+
     public function testUpsertMemoSuspendsWithAnUpsertMemoCall(): void
     {
         // Outside a fiber, suspend returns the call instance; upsertMemo is
@@ -294,6 +488,7 @@ class WorkflowFacadeTest extends TestCase
             'async',
             'all',
             'parallel',
+            'select',
             'await',
             'awaitWithTimeout',
             'awaitSignal',

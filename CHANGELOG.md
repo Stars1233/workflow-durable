@@ -7,6 +7,12 @@
   class parameters, and `self` and `parent` parameter types. The v2 unit suite
   now publishes a machine-readable, branch-bound coverage summary and enforces
   a non-decreasing baseline against the complete production source inventory.
+- Workflow `2.0.0-rc.48` adds deterministic durable selection and structured
+  concurrency for activities, child workflows, timers, signal waits, and
+  condition waits. Persisted winner markers remain authoritative across cold
+  replay, non-winning handles can continue, be awaited, or be cancelled, and
+  service workers share the same protocol-gated selection identity and member
+  key contract as the embedded Laravel runtime.
 - Workflow `2.0.0-rc.47` defines the host-facing workflow control plane around
   ordinary workflow operations. Protocol 1.18 adds authoritative local-activity
   command normalization and atomic attempt, heartbeat, retry, failure, timeout,

@@ -8,8 +8,10 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
 use RuntimeException;
 use Symfony\Component\Process\Process;
+use Symfony\Component\Uid\Ulid;
 use Tests\Fixtures\V2\TestGreetingWorkflow;
 use Tests\Fixtures\V2\TestPortableMemoBinaryContentDriftWorkflow;
 use Tests\Fixtures\V2\TestPortableMemoDoubleDriftWorkflow;
@@ -61,6 +63,7 @@ use Workflow\V2\Models\WorkflowTimer;
 use Workflow\V2\Models\WorkflowUpdate;
 use Workflow\V2\Support\ChildResolutionProjectionContext;
 use Workflow\V2\Support\ChildRunHistory;
+use Workflow\V2\Support\ConditionWaits;
 use Workflow\V2\Support\DefaultHistoryProjectionRole;
 use Workflow\V2\Support\DefaultWorkflowTaskBridge;
 use Workflow\V2\Support\EmbeddedV2HistoryImport;
@@ -73,9 +76,12 @@ use Workflow\V2\Support\HistoryExport;
 use Workflow\V2\Support\HistoryTimeline;
 use Workflow\V2\Support\LocalFilesystemExternalPayloadStorage;
 use Workflow\V2\Support\MemoPayload;
+use Workflow\V2\Support\ParallelChildGroup;
 use Workflow\V2\Support\PendingMessageTask;
+use Workflow\V2\Support\QueryStateReplayer;
 use Workflow\V2\Support\RunDetailView;
 use Workflow\V2\Support\RunUpdateView;
+use Workflow\V2\Support\SignalWaits;
 use Workflow\V2\Support\TaskRepair;
 use Workflow\V2\Support\WorkerHistoryPayloadContract;
 use Workflow\V2\Support\WorkerProtocolVersion;
@@ -2486,6 +2492,140 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             ['first-result'],
             Serializer::unserializeWithCodec('avro', $resumedStep->command['arguments']),
         );
+    }
+
+    public function testFiberRunnerAuthorsAndWaitsOnNestedSelectionThroughPersistedBridgeHistory(): void
+    {
+        $run = $this->createWaitingRun();
+        $workflowClass = BridgeNestedFailureSelectionWorkflow::class;
+        $workflowType = 'nested-failure-selection';
+
+        /** @var WorkflowInstance $instance */
+        $instance = WorkflowInstance::query()->findOrFail($run->workflow_instance_id);
+        $instance->forceFill([
+            'workflow_class' => $workflowClass,
+            'workflow_type' => $workflowType,
+        ])->save();
+        $run->forceFill([
+            'workflow_class' => $workflowClass,
+            'workflow_type' => $workflowType,
+            'payload_codec' => 'avro',
+            'arguments' => Serializer::serializeWithCodec('avro', []),
+        ])->save();
+
+        WorkflowHistoryEvent::record($run, HistoryEventType::StartAccepted, [
+            'workflow_instance_id' => $instance->id,
+            'workflow_run_id' => $run->id,
+            'workflow_class' => $workflowClass,
+            'workflow_type' => $workflowType,
+        ]);
+        WorkflowHistoryEvent::record($run, HistoryEventType::WorkflowStarted, [
+            'workflow_instance_id' => $instance->id,
+            'workflow_run_id' => $run->id,
+            'workflow_class' => $workflowClass,
+            'workflow_type' => $workflowType,
+        ]);
+
+        $task = $this->createLeasedTask($run);
+        $initialHistory = $this->bridge->historyPayload($task->id);
+
+        $this->assertNotNull($initialHistory);
+        $authored = WorkflowFiberRunner::forClass(
+            $workflowClass,
+            $instance->id,
+            $run->id,
+            [],
+            'avro',
+            $initialHistory['history_events'],
+        )->step();
+
+        $this->assertSame(
+            ['schedule_activity', 'schedule_activity', 'start_timer'],
+            array_column($authored->commands, 'type'),
+        );
+        $this->assertSame([3, 3, 3], array_map(
+            static fn (array $command): int => $command['parallel_group_path'][0][
+                'parallel_group_base_sequence'
+            ],
+            $authored->commands,
+        ));
+        $this->assertSame(['group', 'group', 'timer'], array_map(
+            static fn (array $command): string => $command['parallel_group_path'][0]['selection_member_kind'],
+            $authored->commands,
+        ));
+
+        $scheduled = $this->bridge->complete($task->id, $authored->commands);
+
+        $this->assertTrue($scheduled['completed']);
+        $this->assertCount(3, $scheduled['created_task_ids']);
+
+        $persistedHistory = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->orderBy('sequence')
+            ->get()
+            ->map(static fn (WorkflowHistoryEvent $event): array => [
+                'id' => $event->id,
+                'sequence' => $event->sequence,
+                'event_type' => $event->event_type->value,
+                'payload' => $event->payload,
+                'recorded_at' => $event->recorded_at?->toJSON(),
+            ])
+            ->all();
+        $waiting = WorkflowFiberRunner::forClass(
+            $workflowClass,
+            $instance->id,
+            $run->id,
+            [],
+            'avro',
+            $persistedHistory,
+        )->step();
+
+        $this->assertFalse($waiting->completed);
+        $this->assertSame([], $waiting->commands);
+        $this->assertSame(
+            array_column($authored->commands, 'parallel_group_path'),
+            WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $run->id)
+                ->whereIn('event_type', [
+                    HistoryEventType::ActivityScheduled->value,
+                    HistoryEventType::TimerScheduled->value,
+                ])
+                ->orderBy('sequence')
+                ->get()
+                ->map(static fn (WorkflowHistoryEvent $event): array => $event->payload['parallel_group_path'])
+                ->all(),
+        );
+    }
+
+    public function testBridgeRejectsOutOfDomainSelectionMemberKeys(): void
+    {
+        foreach (['', -1] as $memberKey) {
+            $run = $this->createWaitingRun();
+            $task = $this->createLeasedTask($run);
+            $entry = [
+                'parallel_group_id' => 'select-calls:1:1',
+                'parallel_group_kind' => 'activity',
+                'parallel_group_mode' => 'select',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 1,
+                'parallel_group_index' => 0,
+                'selection_member_key' => $memberKey,
+                'selection_member_index' => 0,
+                'selection_member_base_sequence' => 1,
+                'selection_member_size' => 1,
+                'selection_member_kind' => 'activity',
+            ];
+
+            $result = $this->bridge->complete($task->id, [[
+                'type' => 'schedule_activity',
+                'activity_type' => 'invalid-key',
+                ...$entry,
+                'parallel_group_path' => [$entry],
+            ]]);
+
+            $this->assertFalse($result['completed']);
+            $this->assertSame('invalid_commands', $result['reason']);
+        }
     }
 
     public function testFiberRunnerReplaysExternalPayloadHistoryWithBridgeNamespace(): void
@@ -9420,6 +9560,719 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertSame(1, $this->readyWorkflowTaskCount($run));
     }
 
+    public function testSelectionGroupCommitsTimerWinnerAndPreservesActivityCompletion(): void
+    {
+        $this->assertSelectionWinnerIsStable(true);
+    }
+
+    public function testSelectionGroupCommitsActivityWinnerAndPreservesTimerCompletion(): void
+    {
+        $this->assertSelectionWinnerIsStable(false);
+    }
+
+    public function testRuntimeProducedSelectionHistoryMatchesCanonicalConformanceFixture(): void
+    {
+        Queue::fake();
+        Carbon::setTestNow('2026-08-27T08:00:00.000000Z');
+        $ulidAlphabet = str_split('0123456789ABCDEFGHJKMNPQRSTVWXYZ');
+        $ulidCounter = 0;
+        Str::createUlidsUsing(static function () use (&$ulidCounter, $ulidAlphabet): Ulid {
+            $ulid = new Ulid(str_pad('01J', 24, '0')
+                . $ulidAlphabet[intdiv($ulidCounter, 32)]
+                . $ulidAlphabet[$ulidCounter % 32]);
+            ++$ulidCounter;
+
+            return $ulid;
+        });
+
+        try {
+            $run = $this->createWaitingRun();
+            $task = $this->createLeasedTask($run);
+            $commands = [];
+            foreach (['slow', 'fast'] as $index => $key) {
+                $entry = [
+                    'parallel_group_id' => 'select-calls:1:2',
+                    'parallel_group_kind' => 'activity',
+                    'parallel_group_mode' => 'select',
+                    'parallel_group_base_sequence' => 1,
+                    'parallel_group_size' => 2,
+                    'parallel_group_index' => $index,
+                    'selection_member_key' => $key,
+                    'selection_member_index' => $index,
+                    'selection_member_base_sequence' => $index + 1,
+                    'selection_member_size' => 1,
+                    'selection_member_kind' => 'activity',
+                ];
+                $commands[] = [
+                    'type' => 'schedule_activity',
+                    'activity_type' => "{$key}-activity",
+                    ...$entry,
+                    'parallel_group_path' => [$entry],
+                ];
+            }
+
+            $scheduled = $this->bridge->complete($task->id, $commands);
+            $this->assertTrue($scheduled['completed']);
+            $activityBridge = $this->app->make(ActivityTaskBridge::class);
+            $this->completeActivityForSequence($activityBridge, $run, 2, 'winner-value');
+            $this->completeActivityForSequence($activityBridge, $run, 1, 'loser-value');
+
+            $reloadedRun = WorkflowRun::query()->findOrFail($run->id);
+            $history = WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $reloadedRun->id)
+                ->orderBy('sequence')
+                ->get()
+                ->map(static fn (WorkflowHistoryEvent $event): array => [
+                    'id' => $event->id,
+                    'sequence' => $event->sequence,
+                    'event_type' => $event->event_type->value,
+                    'payload' => $event->payload,
+                ])
+                ->all();
+            $fixture = [
+                'fixture_schema' => 'durable-workflow.selection-runtime-history/v1',
+                'source' => [
+                    'runtime' => 'workflow-php',
+                    'producer' => DefaultWorkflowTaskBridge::class,
+                    'worker_protocol_version' => '1.19',
+                    'exported_columns' => ['id', 'sequence', 'event_type', 'payload'],
+                ],
+                'history' => $history,
+                'expected' => [
+                    'winner' => 'fast',
+                    'winner_value' => 'winner-value',
+                    'slow' => 'loser-value',
+                ],
+            ];
+            $canonicalJson = json_encode(
+                $fixture,
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
+            ) . PHP_EOL;
+            $fixturePath = dirname(__DIR__, 3)
+                . '/resources/conformance/suite-v47/fixtures/durable-selection-runtime-history.json';
+            if (! is_file($fixturePath)) {
+                $this->fail('The canonical durable selection fixture has not been created.');
+            }
+
+            $this->assertSame((string) file_get_contents($fixturePath), $canonicalJson);
+
+            $corpusPath = dirname(__DIR__, 2)
+                . '/Fixtures/V2/ReplayRegression/durable-selection-recorded-winner.json';
+            $corpus = json_decode((string) file_get_contents($corpusPath), true, flags: JSON_THROW_ON_ERROR);
+            $corpusHistory = $corpus['history'] ?? null;
+            $this->assertIsArray($corpusHistory);
+            $this->assertSame([
+                'ActivityScheduled',
+                'ActivityScheduled',
+                'ActivityCompleted',
+                'SelectionResolved',
+                'ActivityCompleted',
+            ], array_column($corpusHistory, 'event_type'));
+
+            $runtimeHistoryById = collect($history)
+                ->keyBy('id');
+            foreach ($corpusHistory as $corpusEvent) {
+                $runtimeEvent = $runtimeHistoryById->get($corpusEvent['id'] ?? null);
+                $this->assertIsArray($runtimeEvent);
+                $this->assertSame($corpusEvent['sequence'], $runtimeEvent['sequence']);
+                $this->assertSame($corpusEvent['event_type'], $runtimeEvent['event_type']);
+                $this->assertEquals(
+                    $corpusEvent['payload'],
+                    array_intersect_key($runtimeEvent['payload'], $corpusEvent['payload']),
+                    'Replay corpus selection history must remain a projection of runtime-persisted rows.',
+                );
+            }
+        } finally {
+            Str::createUlidsNormally();
+            Carbon::setTestNow();
+        }
+    }
+
+    public function testSignalDeadlineCanWinAServiceModeSelection(): void
+    {
+        $this->assertImmediateWaitDeadlineWinsSelection('open_signal_wait', [
+            'signal_name' => 'resolved',
+            'timeout_seconds' => 0,
+        ], 'signal');
+    }
+
+    public function testConditionDeadlineCanWinAServiceModeSelection(): void
+    {
+        $this->assertImmediateWaitDeadlineWinsSelection('open_condition_wait', [
+            'condition_key' => 'ready',
+            'timeout_seconds' => 0,
+        ], 'condition');
+    }
+
+    public function testPersistedSelectionPathRejectsMissingOrWrongMemberKind(): void
+    {
+        foreach ([null, 'timer'] as $memberKind) {
+            $run = $this->createWaitingRun();
+            $task = $this->createLeasedTask($run);
+            $entry = $this->selectionCancellationEntry('work', 0, 1);
+            if ($memberKind === null) {
+                unset($entry['selection_member_kind']);
+            } else {
+                $entry['selection_member_kind'] = $memberKind;
+            }
+            $resolution = WorkflowHistoryEvent::record($run, HistoryEventType::ActivityCompleted, [
+                'activity_execution_id' => 'persisted-activity-1',
+                'activity_type' => 'lookup',
+                'sequence' => 1,
+                'result' => Serializer::serialize('completed'),
+                'payload_codec' => 'avro',
+                ...$entry,
+                'parallel_group_path' => [$entry],
+            ], $task);
+            $reloaded = WorkflowHistoryEvent::query()->findOrFail($resolution->id);
+
+            try {
+                ParallelChildGroup::claimSelectionWinner(
+                    $run->fresh(['historyEvents']),
+                    $reloaded->payload['parallel_group_path'],
+                    'activity',
+                    $reloaded,
+                );
+                $this->fail('Malformed persisted selection member kind was accepted.');
+            } catch (HistoryEventShapeMismatchException $exception) {
+                $this->assertStringContainsString('selection_member_kind', $exception->getMessage());
+            }
+        }
+    }
+
+    public function testSelectionCancellationClosesUnboundedSignalAndConditionWaits(): void
+    {
+        Queue::fake();
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+
+        foreach ([
+            ['signal', HistoryEventType::SignalWaitOpened, 'signal_wait_id', 'signal-wait-1'],
+            ['condition', HistoryEventType::ConditionWaitOpened, 'condition_wait_id', 'condition-wait-2'],
+        ] as $index => [$kind, $eventType, $waitIdField, $waitId]) {
+            $memberBase = $index + 1;
+            $entry = [
+                'parallel_group_id' => 'select-calls:1:3',
+                'parallel_group_kind' => 'mixed',
+                'parallel_group_mode' => 'select',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 3,
+                'parallel_group_index' => $index,
+                'selection_member_key' => $kind,
+                'selection_member_index' => $index,
+                'selection_member_base_sequence' => $memberBase,
+                'selection_member_size' => 1,
+            ];
+            WorkflowHistoryEvent::record($run, $eventType, [
+                $waitIdField => $waitId,
+                ...($kind === 'signal' ? [
+                    'signal_name' => 'resolved',
+                ] : [
+                    'condition_key' => 'ready',
+                ]),
+                'sequence' => $memberBase,
+                ...$entry,
+                'parallel_group_path' => [$entry],
+            ], $task);
+        }
+
+        WorkflowHistoryEvent::record($run, HistoryEventType::SelectionResolved, [
+            'selection_group_id' => 'select-calls:1:3',
+            'selection_group_base_sequence' => 1,
+            'selection_group_size' => 3,
+            'member_key' => 'deadline',
+            'member_index' => 2,
+            'member_base_sequence' => 3,
+            'member_size' => 1,
+            'operation_kind' => 'timer',
+            'operation_identity' => 'timer-3',
+            'outcome' => 'completed',
+        ], $task);
+
+        $commands = [];
+        foreach ([['signal', 0, 1], ['condition', 1, 2]] as [$kind, $index, $memberBase]) {
+            $commands[] = [
+                'type' => 'cancel_selection_operation',
+                'selection_group_id' => 'select-calls:1:3',
+                'member_key' => $kind,
+                'member_index' => $index,
+                'member_base_sequence' => $memberBase,
+                'member_size' => 1,
+                'operation_kind' => $kind,
+                'operation_identity' => "{$kind}-wait-{$memberBase}",
+            ];
+        }
+
+        $result = $this->bridge->complete($task->id, $commands);
+
+        $this->assertTrue($result['completed']);
+        $this->assertSame('cancelled', SignalWaits::forRun($run->fresh(['historyEvents']))[0]['status']);
+        $this->assertSame(
+            'selection_cancelled',
+            SignalWaits::forRun($run->fresh(['historyEvents']))[0]['source_status'],
+        );
+        $this->assertSame('cancelled', ConditionWaits::forRun($run->fresh(['historyEvents']))[0]['status']);
+        $this->assertSame(
+            'selection_cancelled',
+            ConditionWaits::forRun($run->fresh(['historyEvents']))[0]['source_status'],
+        );
+    }
+
+    public function testSelectionCancellationRejectsUntrustedKindAndIdentityClaims(): void
+    {
+        Queue::fake();
+
+        foreach ([
+            ['signal', 'activity-execution-1'],
+            ['activity', 'forged-activity-execution'],
+        ] as [$claimedKind, $claimedIdentity]) {
+            $run = $this->createWaitingRun();
+            $task = $this->createLeasedTask($run);
+            $entry = $this->selectionCancellationEntry('work', 0, 1);
+            WorkflowHistoryEvent::record($run, HistoryEventType::ActivityScheduled, [
+                'activity_execution_id' => 'activity-execution-1',
+                'activity_type' => 'lookup',
+                'sequence' => 1,
+                ...$entry,
+                'parallel_group_path' => [$entry],
+            ], $task);
+            $this->recordSelectionDeadlineWinner($run, $task);
+
+            $result = $this->bridge->complete($task->id, [[
+                'type' => 'cancel_selection_operation',
+                'selection_group_id' => 'select-calls:1:2',
+                'member_key' => 'work',
+                'member_index' => 0,
+                'member_base_sequence' => 1,
+                'member_size' => 1,
+                'operation_kind' => $claimedKind,
+                'operation_identity' => $claimedIdentity,
+            ]]);
+
+            $this->assertFalse($result['completed']);
+            $this->assertSame('invalid_commands', $result['reason']);
+            $this->assertDatabaseMissing('workflow_history_events', [
+                'workflow_run_id' => $run->id,
+                'event_type' => HistoryEventType::SelectionOperationCancelled->value,
+            ]);
+        }
+    }
+
+    public function testTerminalSelectionMembersCannotBeRelabelledAsCancelled(): void
+    {
+        Queue::fake();
+
+        foreach (['activity', 'signal', 'condition'] as $kind) {
+            $run = $this->createWaitingRun();
+            $task = $this->createLeasedTask($run);
+            $entry = $this->selectionCancellationEntry('work', 0, 1);
+            $identity = "{$kind}-identity-1";
+
+            if ($kind === 'activity') {
+                WorkflowHistoryEvent::record($run, HistoryEventType::ActivityScheduled, [
+                    'activity_execution_id' => $identity,
+                    'activity_type' => 'lookup',
+                    'sequence' => 1,
+                    ...$entry,
+                    'parallel_group_path' => [$entry],
+                ], $task);
+            } elseif ($kind === 'signal') {
+                WorkflowHistoryEvent::record($run, HistoryEventType::SignalWaitOpened, [
+                    'signal_wait_id' => $identity,
+                    'signal_name' => 'resolved',
+                    'sequence' => 1,
+                    ...$entry,
+                    'parallel_group_path' => [$entry],
+                ], $task);
+            } else {
+                WorkflowHistoryEvent::record($run, HistoryEventType::ConditionWaitOpened, [
+                    'condition_wait_id' => $identity,
+                    'condition_key' => 'ready',
+                    'sequence' => 1,
+                    ...$entry,
+                    'parallel_group_path' => [$entry],
+                ], $task);
+            }
+
+            $this->recordSelectionDeadlineWinner($run, $task);
+
+            if ($kind === 'activity') {
+                WorkflowHistoryEvent::record($run, HistoryEventType::ActivityCompleted, [
+                    'activity_execution_id' => $identity,
+                    'activity_type' => 'lookup',
+                    'sequence' => 1,
+                    'result' => Serializer::serialize('completed-first'),
+                    'payload_codec' => 'avro',
+                    ...$entry,
+                    'parallel_group_path' => [$entry],
+                ], $task);
+            } elseif ($kind === 'signal') {
+                WorkflowHistoryEvent::record($run, HistoryEventType::SignalReceived, [
+                    'signal_wait_id' => $identity,
+                    'signal_name' => 'resolved',
+                ], $task);
+            } else {
+                WorkflowHistoryEvent::record($run, HistoryEventType::ConditionWaitSatisfied, [
+                    'condition_wait_id' => $identity,
+                    'condition_key' => 'ready',
+                    'sequence' => 1,
+                ], $task);
+            }
+
+            $result = $this->bridge->complete($task->id, [[
+                'type' => 'cancel_selection_operation',
+                'selection_group_id' => 'select-calls:1:2',
+                'member_key' => 'work',
+                'member_index' => 0,
+                'member_base_sequence' => 1,
+                'member_size' => 1,
+                'operation_kind' => $kind,
+                'operation_identity' => $identity,
+            ]]);
+
+            $this->assertTrue($result['completed']);
+            $this->assertDatabaseMissing('workflow_history_events', [
+                'workflow_run_id' => $run->id,
+                'event_type' => HistoryEventType::SelectionOperationCancelled->value,
+            ]);
+        }
+    }
+
+    public function testNestedSelectionCancellationUsesDurableGroupAuthority(): void
+    {
+        Queue::fake();
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+
+        foreach ([
+            ['signal', HistoryEventType::SignalWaitOpened, 'signal_wait_id', 'signal-wait-1'],
+            ['condition', HistoryEventType::ConditionWaitOpened, 'condition_wait_id', 'condition-wait-2'],
+        ] as $index => [$kind, $eventType, $identityField, $identity]) {
+            $outer = $this->selectionCancellationEntry('nested', 0, 1, 2, $index, 3);
+            $inner = [
+                'parallel_group_id' => 'parallel-calls:1:2',
+                'parallel_group_kind' => 'mixed',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 2,
+                'parallel_group_index' => $index,
+            ];
+            WorkflowHistoryEvent::record($run, $eventType, [
+                $identityField => $identity,
+                ...($kind === 'signal' ? [
+                    'signal_name' => 'resolved',
+                ] : [
+                    'condition_key' => 'ready',
+                ]),
+                'sequence' => $index + 1,
+                ...$inner,
+                'parallel_group_path' => [$outer, $inner],
+            ], $task);
+        }
+        $this->recordSelectionDeadlineWinner($run, $task, 3, 3);
+
+        $result = $this->bridge->complete($task->id, [[
+            'type' => 'cancel_selection_operation',
+            'selection_group_id' => 'select-calls:1:3',
+            'member_key' => 'nested',
+            'member_index' => 0,
+            'member_base_sequence' => 1,
+            'member_size' => 2,
+            'operation_kind' => 'group',
+            'operation_identity' => 'group:1:2',
+        ]]);
+
+        $this->assertTrue($result['completed']);
+        $marker = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::SelectionOperationCancelled->value)
+            ->sole();
+        $this->assertSame('group', $marker->payload['operation_kind']);
+        $this->assertSame('group:1:2', $marker->payload['operation_identity']);
+        $this->assertSame('cancelled', SignalWaits::forRun($run->fresh(['historyEvents']))[0]['status']);
+        $this->assertSame('cancelled', ConditionWaits::forRun($run->fresh(['historyEvents']))[0]['status']);
+    }
+
+    public function testNestedFailureBeforeCancellationPreservesTheFailureAndPendingSibling(): void
+    {
+        Queue::fake();
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+        $commands = [];
+
+        for ($offset = 0; $offset < 2; ++$offset) {
+            $outer = [
+                'parallel_group_id' => 'select-calls:1:3',
+                'parallel_group_kind' => 'mixed',
+                'parallel_group_mode' => 'select',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 3,
+                'parallel_group_index' => $offset,
+                'selection_member_key' => 'nested',
+                'selection_member_index' => 0,
+                'selection_member_base_sequence' => 1,
+                'selection_member_size' => 2,
+                'selection_member_kind' => 'group',
+            ];
+            $inner = [
+                'parallel_group_id' => 'parallel-activities:1:2',
+                'parallel_group_kind' => 'activity',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 2,
+                'parallel_group_index' => $offset,
+            ];
+            $commands[] = [
+                'type' => 'schedule_activity',
+                'activity_type' => "nested-{$offset}",
+                ...$inner,
+                'parallel_group_path' => [$outer, $inner],
+            ];
+        }
+
+        $deadline = [
+            'parallel_group_id' => 'select-calls:1:3',
+            'parallel_group_kind' => 'mixed',
+            'parallel_group_mode' => 'select',
+            'parallel_group_base_sequence' => 1,
+            'parallel_group_size' => 3,
+            'parallel_group_index' => 2,
+            'selection_member_key' => 'deadline',
+            'selection_member_index' => 1,
+            'selection_member_base_sequence' => 3,
+            'selection_member_size' => 1,
+            'selection_member_kind' => 'timer',
+        ];
+        $commands[] = [
+            'type' => 'start_timer',
+            'delay_seconds' => 0,
+            ...$deadline,
+            'parallel_group_path' => [$deadline],
+        ];
+
+        $scheduled = $this->bridge->complete($task->id, $commands);
+        $this->assertTrue($scheduled['completed']);
+
+        /** @var WorkflowTask $timerTask */
+        $timerTask = WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Timer->value)
+            ->firstOrFail();
+        $this->app->call([new RunTimerTask($timerTask->id), 'handle']);
+
+        /** @var ActivityExecution $laterExecution */
+        $laterExecution = ActivityExecution::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('sequence', 2)
+            ->sole();
+        /** @var WorkflowTask $laterActivityTask */
+        $laterActivityTask = WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Activity->value)
+            ->get()
+            ->first(static fn (WorkflowTask $candidate): bool =>
+                ($candidate->payload['activity_execution_id'] ?? null) === $laterExecution->id);
+        $activityBridge = $this->app->make(ActivityTaskBridge::class);
+        $claim = $activityBridge->claim($laterActivityTask->id, 'selection-failure-worker');
+        $this->assertNotNull($claim);
+        $failure = $activityBridge->fail($claim['activity_attempt_id'], new RuntimeException('nested later failure'));
+        $this->assertTrue($failure['recorded']);
+
+        /** @var WorkflowTask $resumeTask */
+        $resumeTask = WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Workflow->value)
+            ->where('status', TaskStatus::Ready->value)
+            ->firstOrFail();
+        $this->assertNotNull($this->bridge->claim($resumeTask->id, 'selection-worker'));
+        $cancelled = $this->bridge->complete($resumeTask->id, [[
+            'type' => 'cancel_selection_operation',
+            'selection_group_id' => 'select-calls:1:3',
+            'member_key' => 'nested',
+            'member_index' => 0,
+            'member_base_sequence' => 1,
+            'member_size' => 2,
+            'operation_kind' => 'group',
+            'operation_identity' => 'group:1:2',
+        ]]);
+
+        $this->assertTrue($cancelled['completed']);
+        $this->assertDatabaseMissing('workflow_history_events', [
+            'workflow_run_id' => $run->id,
+            'event_type' => HistoryEventType::SelectionOperationCancelled->value,
+        ]);
+        $this->assertDatabaseHas('workflow_history_events', [
+            'workflow_run_id' => $run->id,
+            'event_type' => HistoryEventType::ActivityFailed->value,
+        ]);
+        $this->assertSame(ActivityStatus::Pending, ActivityExecution::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('sequence', 1)
+            ->sole()
+            ->status);
+
+        $expectedFailure = [
+            'exception' => RuntimeException::class,
+            'message' => 'nested later failure',
+        ];
+        $this->assertSame($expectedFailure, $this->replayNestedSelectionFailure($run));
+
+        /** @var WorkflowTask $embeddedReplayTask */
+        $embeddedReplayTask = WorkflowTask::query()->create([
+            'workflow_run_id' => $run->id,
+            'task_type' => TaskType::Workflow->value,
+            'status' => TaskStatus::Ready->value,
+            'available_at' => now()
+                ->subSecond(),
+            'payload' => [],
+            'connection' => 'redis',
+            'queue' => 'default',
+            'compatibility' => 'build-a',
+        ]);
+        $executed = $this->bridge->execute($embeddedReplayTask->id);
+        $replayedRun = $run->fresh();
+
+        $this->assertTrue($executed['executed']);
+        $this->assertSame(RunStatus::Completed, $replayedRun->status);
+        $this->assertIsString($replayedRun->output);
+        $this->assertSame(
+            $expectedFailure,
+            Serializer::unserializeWithCodec($replayedRun->output_payload_codec, $replayedRun->output),
+        );
+    }
+
+    public function testLaterNestedFailureDoesNotWakeAParentThatAlreadyHandledTheWinner(): void
+    {
+        Queue::fake();
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+        $commands = [];
+
+        for ($offset = 0; $offset < 2; ++$offset) {
+            $outer = [
+                'parallel_group_id' => 'select-calls:1:3',
+                'parallel_group_kind' => 'mixed',
+                'parallel_group_mode' => 'select',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 3,
+                'parallel_group_index' => $offset,
+                'selection_member_key' => 'nested',
+                'selection_member_index' => 0,
+                'selection_member_base_sequence' => 1,
+                'selection_member_size' => 2,
+                'selection_member_kind' => 'group',
+            ];
+            $inner = [
+                'parallel_group_id' => 'parallel-activities:1:2',
+                'parallel_group_kind' => 'activity',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 2,
+                'parallel_group_index' => $offset,
+            ];
+            $commands[] = [
+                'type' => 'schedule_activity',
+                'activity_type' => "nested-{$offset}",
+                ...$inner,
+                'parallel_group_path' => [$outer, $inner],
+            ];
+        }
+
+        $deadline = [
+            'parallel_group_id' => 'select-calls:1:3',
+            'parallel_group_kind' => 'mixed',
+            'parallel_group_mode' => 'select',
+            'parallel_group_base_sequence' => 1,
+            'parallel_group_size' => 3,
+            'parallel_group_index' => 2,
+            'selection_member_key' => 'deadline',
+            'selection_member_index' => 1,
+            'selection_member_base_sequence' => 3,
+            'selection_member_size' => 1,
+            'selection_member_kind' => 'timer',
+        ];
+        $commands[] = [
+            'type' => 'start_timer',
+            'delay_seconds' => 60,
+            ...$deadline,
+            'parallel_group_path' => [$deadline],
+        ];
+
+        $scheduled = $this->bridge->complete($task->id, $commands);
+        $this->assertTrue($scheduled['completed']);
+
+        $activityBridge = $this->app->make(ActivityTaskBridge::class);
+        $failActivity = function (int $sequence, string $message) use ($activityBridge, $run): void {
+            /** @var ActivityExecution $execution */
+            $execution = ActivityExecution::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('sequence', $sequence)
+                ->sole();
+            /** @var WorkflowTask $activityTask */
+            $activityTask = WorkflowTask::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('task_type', TaskType::Activity->value)
+                ->get()
+                ->sole(static fn (WorkflowTask $candidate): bool =>
+                    ($candidate->payload['activity_execution_id'] ?? null) === $execution->id);
+            $claim = $activityBridge->claim($activityTask->id, "nested-failure-worker-{$sequence}");
+
+            $this->assertNotNull($claim);
+            $failed = $activityBridge->fail($claim['activity_attempt_id'], new RuntimeException($message));
+            $this->assertTrue($failed['recorded']);
+        };
+
+        $failActivity(2, 'nested authoritative failure');
+
+        $winner = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::SelectionResolved->value)
+            ->sole();
+        $this->assertSame('nested', $winner->payload['member_key']);
+        $this->assertSame('failed', $winner->payload['outcome']);
+        $this->assertSame(1, $this->readyWorkflowTaskCount($run));
+
+        /** @var WorkflowTask $resumeTask */
+        $resumeTask = WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Workflow->value)
+            ->where('status', TaskStatus::Ready->value)
+            ->sole();
+        $this->assertNotNull($this->bridge->claim($resumeTask->id, 'nested-selection-worker'));
+        $completed = $this->bridge->complete($resumeTask->id, [[
+            'type' => 'complete_workflow',
+            'result' => Serializer::serialize('nested failure handled'),
+        ]]);
+
+        $this->assertTrue($completed['completed']);
+        $this->assertSame(RunStatus::Completed, $run->fresh()->status);
+        $this->assertSame(0, $this->readyWorkflowTaskCount($run));
+
+        $failActivity(1, 'nested late sibling failure');
+
+        $persistedWinner = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::SelectionResolved->value)
+            ->sole();
+        $this->assertSame($winner->id, $persistedWinner->id);
+        $this->assertSame($winner->payload['resolution_event_id'], $persistedWinner->payload['resolution_event_id']);
+        $this->assertSame(0, WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Workflow->value)
+            ->whereIn('status', [TaskStatus::Ready->value, TaskStatus::Leased->value])
+            ->count());
+
+        /** @var WorkflowHistoryEvent $authoritativeFailure */
+        $authoritativeFailure = WorkflowHistoryEvent::query()
+            ->findOrFail($persistedWinner->payload['resolution_event_id']);
+        $this->assertSame(HistoryEventType::ActivityFailed, $authoritativeFailure->event_type);
+        $this->assertSame(2, $authoritativeFailure->payload['sequence']);
+        $this->assertSame(RuntimeException::class, $authoritativeFailure->payload['exception_class']);
+        $this->assertSame('nested authoritative failure', $authoritativeFailure->payload['message']);
+
+        $this->assertSame([
+            'exception' => RuntimeException::class,
+            'message' => 'nested authoritative failure',
+        ], $this->replayNestedSelectionFailure($run));
+    }
+
     public function testMixedParallelGroupWakesWorkflowOnceForEitherCompletionOrder(): void
     {
         Queue::fake();
@@ -9966,6 +10819,135 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         );
     }
 
+    /**
+     * @param array<string, mixed> $waitCommand
+     */
+    private function assertImmediateWaitDeadlineWinsSelection(
+        string $waitType,
+        array $waitCommand,
+        string $expectedKind,
+    ): void {
+        Queue::fake();
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+        $commands = [];
+
+        foreach ([['work', 'activity'], ['wait', $expectedKind]] as $index => [$memberKey, $leafKind]) {
+            $entry = [
+                'parallel_group_id' => 'select-calls:1:2',
+                'parallel_group_kind' => 'mixed',
+                'parallel_group_mode' => 'select',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 2,
+                'parallel_group_index' => $index,
+                'selection_member_key' => $memberKey,
+                'selection_member_index' => $index,
+                'selection_member_base_sequence' => 1 + $index,
+                'selection_member_size' => 1,
+                'selection_member_kind' => $leafKind,
+            ];
+            $commands[] = [
+                'type' => $index === 0 ? 'schedule_activity' : $waitType,
+                ...($index === 0 ? [
+                    'activity_type' => 'activity-a',
+                ] : $waitCommand),
+                ...$entry,
+                'parallel_group_path' => [$entry],
+            ];
+        }
+
+        $result = $this->bridge->complete($task->id, $commands);
+
+        $this->assertTrue($result['completed']);
+        $winner = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::SelectionResolved->value)
+            ->firstOrFail();
+        $this->assertSame('wait', $winner->payload['member_key']);
+        $this->assertSame($expectedKind, $winner->payload['operation_kind']);
+        $openedType = $waitType === 'open_signal_wait'
+            ? HistoryEventType::SignalWaitOpened
+            : HistoryEventType::ConditionWaitOpened;
+        $opened = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', $openedType->value)
+            ->firstOrFail();
+        $this->assertSame('select', $opened->payload['parallel_group_mode'] ?? null);
+        $this->assertSame('wait', $opened->payload['selection_member_key'] ?? null);
+    }
+
+    private function assertSelectionWinnerIsStable(bool $timerFirst): void
+    {
+        Queue::fake();
+
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+        $commands = [];
+
+        foreach ([
+            ['schedule_activity', 'activity_type', 'activity-a', 'work'],
+            ['start_timer', 'delay_seconds', 0, 'deadline'],
+        ] as $index => [$type, $field, $value, $memberKey]) {
+            $entry = [
+                'parallel_group_id' => 'select-calls:1:2',
+                'parallel_group_kind' => 'mixed',
+                'parallel_group_mode' => 'select',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 2,
+                'parallel_group_index' => $index,
+                'selection_member_key' => $memberKey,
+                'selection_member_index' => $index,
+                'selection_member_base_sequence' => 1 + $index,
+                'selection_member_size' => 1,
+                'selection_member_kind' => $index === 0 ? 'activity' : 'timer',
+            ];
+            $commands[] = [
+                'type' => $type,
+                $field => $value,
+                ...$entry,
+                'parallel_group_path' => [$entry],
+            ];
+        }
+
+        $result = $this->bridge->complete($task->id, $commands);
+        $this->assertTrue($result['completed']);
+        $this->assertCount(2, $result['created_task_ids']);
+
+        $activityTask = WorkflowTask::query()->findOrFail($result['created_task_ids'][0]);
+        $timerTask = WorkflowTask::query()->findOrFail($result['created_task_ids'][1]);
+        $activityBridge = $this->app->make(ActivityTaskBridge::class);
+        $completeActivity = function () use ($activityBridge, $activityTask): void {
+            $claim = $activityBridge->claim($activityTask->id, 'selection-worker');
+            $this->assertNotNull($claim);
+            $activityBridge->complete($claim['activity_attempt_id'], 'activity-result');
+        };
+        $fireTimer = fn () => $this->app->call([new RunTimerTask($timerTask->id), 'handle']);
+
+        $timerFirst ? $fireTimer() : $completeActivity();
+
+        $winner = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::SelectionResolved->value)
+            ->firstOrFail();
+        $this->assertSame($timerFirst ? 'deadline' : 'work', $winner->payload['member_key']);
+        $this->assertSame($timerFirst ? 'timer' : 'activity', $winner->payload['operation_kind']);
+        $this->assertSame(1, $this->readyWorkflowTaskCount($run));
+
+        $timerFirst ? $completeActivity() : $fireTimer();
+
+        $this->assertSame(1, $this->readyWorkflowTaskCount($run));
+        $this->assertSame(1, WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::SelectionResolved->value)
+            ->count());
+        $this->assertDatabaseHas('workflow_history_events', [
+            'workflow_run_id' => $run->id,
+            'event_type' => $timerFirst
+                ? HistoryEventType::ActivityCompleted->value
+                : HistoryEventType::TimerFired->value,
+        ]);
+    }
+
     private function bindHistoryProjectionSpy()
     {
         $customRole = new class(new DefaultHistoryProjectionRole()) implements HistoryProjectionRole {
@@ -10114,6 +11096,85 @@ SQL);
         return $task;
     }
 
+    /**
+     * @return array<string, mixed>
+     */
+    private function completeActivityForSequence(
+        ActivityTaskBridge $activityBridge,
+        WorkflowRun $run,
+        int $sequence,
+        mixed $result,
+    ): void {
+        /** @var ActivityExecution $execution */
+        $execution = ActivityExecution::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('sequence', $sequence)
+            ->sole();
+        /** @var WorkflowTask $activityTask */
+        $activityTask = WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Activity->value)
+            ->get()
+            ->sole(static fn (WorkflowTask $candidate): bool =>
+                ($candidate->payload['activity_execution_id'] ?? null) === $execution->id);
+        $claim = $activityBridge->claim($activityTask->id, "canonical-selection-activity-{$sequence}");
+
+        $this->assertNotNull($claim);
+        $this->assertIsString($claim['activity_attempt_id']);
+        $completed = $activityBridge->complete($claim['activity_attempt_id'], $result);
+        $this->assertTrue($completed['recorded']);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function selectionCancellationEntry(
+        string $key,
+        int $memberIndex,
+        int $memberBase,
+        int $memberSize = 1,
+        int $groupIndex = 0,
+        int $groupSize = 2,
+    ): array {
+        return [
+            'parallel_group_id' => "select-calls:1:{$groupSize}",
+            'parallel_group_kind' => 'mixed',
+            'parallel_group_mode' => 'select',
+            'parallel_group_base_sequence' => 1,
+            'parallel_group_size' => $groupSize,
+            'parallel_group_index' => $groupIndex,
+            'selection_member_key' => $key,
+            'selection_member_index' => $memberIndex,
+            'selection_member_base_sequence' => $memberBase,
+            'selection_member_size' => $memberSize,
+            'selection_member_kind' => $memberSize > 1
+                ? 'group'
+                : (in_array($key, ['activity', 'child', 'timer', 'signal', 'condition'], true)
+                    ? $key
+                    : 'activity'),
+        ];
+    }
+
+    private function recordSelectionDeadlineWinner(
+        WorkflowRun $run,
+        WorkflowTask $task,
+        int $memberBase = 2,
+        int $groupSize = 2,
+    ): void {
+        WorkflowHistoryEvent::record($run, HistoryEventType::SelectionResolved, [
+            'selection_group_id' => "select-calls:1:{$groupSize}",
+            'selection_group_base_sequence' => 1,
+            'selection_group_size' => $groupSize,
+            'member_key' => 'deadline',
+            'member_index' => 1,
+            'member_base_sequence' => $memberBase,
+            'member_size' => 1,
+            'operation_kind' => 'timer',
+            'operation_identity' => "timer-{$memberBase}",
+            'outcome' => 'completed',
+        ], $task);
+    }
+
     private function clearWorkflowStateForPortableMemoImport(): void
     {
         foreach ([
@@ -10148,6 +11209,56 @@ SQL);
             ->where('task_type', TaskType::Workflow->value)
             ->where('status', TaskStatus::Ready->value)
             ->count();
+    }
+
+    /**
+     * @return array{exception: class-string, message: string}
+     */
+    private function replayNestedSelectionFailure(WorkflowRun $run): array
+    {
+        $workflowClass = BridgeNestedFailureSelectionWorkflow::class;
+        $workflowType = 'nested-failure-selection';
+        $run->forceFill([
+            'workflow_class' => $workflowClass,
+            'workflow_type' => $workflowType,
+        ])->save();
+        WorkflowInstance::query()
+            ->findOrFail($run->workflow_instance_id)
+            ->forceFill([
+                'workflow_class' => $workflowClass,
+                'workflow_type' => $workflowType,
+            ])->save();
+
+        $replayed = (new QueryStateReplayer())->replayState(WorkflowRun::query()->findOrFail($run->id));
+
+        $this->assertNull($replayed->current);
+        $this->assertInstanceOf(BridgeNestedFailureSelectionWorkflow::class, $replayed->workflow);
+
+        $history = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->orderBy('sequence')
+            ->get()
+            ->map(static fn (WorkflowHistoryEvent $event): array => [
+                'id' => $event->id,
+                'sequence' => $event->sequence,
+                'event_type' => $event->event_type->value,
+                'payload' => $event->payload,
+                'recorded_at' => $event->recorded_at?->toJSON(),
+            ])
+            ->all();
+        $fiberReplay = WorkflowFiberRunner::forClass(
+            $workflowClass,
+            $workflowType,
+            $run->id,
+            [],
+            'avro',
+            $history,
+        )->step();
+
+        $this->assertTrue($fiberReplay->completed);
+        $this->assertSame($replayed->workflow->replayedFailure(), $fiberReplay->result);
+
+        return $replayed->workflow->replayedFailure();
     }
 
     private function recordReceivedSignal(
@@ -10603,6 +11714,48 @@ final class BridgeHistorySequenceWorkflow extends V2Workflow
         $first = V2Workflow::activity('demo.first', $input);
 
         return V2Workflow::activity('demo.second', $first);
+    }
+}
+
+final class BridgeNestedFailureSelectionWorkflow extends V2Workflow
+{
+    /**
+     * @var array{exception: class-string, message: string}
+     */
+    private array $replayedFailure = [];
+
+    /**
+     * @return array{exception: class-string, message: string}
+     */
+    public function handle(): array
+    {
+        $selected = V2Workflow::select([
+            'nested' => static fn () => V2Workflow::all([
+                static fn () => V2Workflow::activity('nested-0'),
+                static fn () => V2Workflow::activity('nested-1'),
+            ]),
+            'deadline' => static fn () => V2Workflow::timer(0),
+        ]);
+        $selected->handles['nested']->cancel();
+
+        try {
+            $selected->handles['nested']->await();
+        } catch (RuntimeException $exception) {
+            return $this->replayedFailure = [
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ];
+        }
+
+        throw new RuntimeException('Expected the durable nested activity failure to replay.');
+    }
+
+    /**
+     * @return array{exception: class-string, message: string}
+     */
+    public function replayedFailure(): array
+    {
+        return $this->replayedFailure;
     }
 }
 

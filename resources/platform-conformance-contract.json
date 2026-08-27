@@ -1,6 +1,6 @@
 {
   "schema": "durable-workflow.v2.platform-conformance.suite",
-  "version": 46,
+  "version": 47,
   "authority_doc": "docs/platform-conformance.md",
   "authority_url": "https://durable-workflow.github.io/docs/2.0/platform-conformance",
   "surface_stability_authority": "durable-workflow.v2.surface-stability.contract",
@@ -10,26 +10,26 @@
     "cluster-info-envelope.schema.json": {
       "artifact_id": "durable-workflow.v2.cluster-info-envelope@catalog-16",
       "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/f781ced1ae33c8697835bd527a125bdf3eaf4321/static/platform-protocol-specs/cluster-info-envelope.schema.json",
-      "source_path": "resources/conformance/suite-v46/platform-protocol-specs/cluster-info-envelope.schema.json",
+      "source_path": "resources/conformance/suite-v47/platform-protocol-specs/cluster-info-envelope.schema.json",
       "sha256": "sha256:7f761da2eda221a6240d1250b6dd774a36c2077642405f0f036e8124121ea4bc"
     },
     "history-export-bundle.schema.json": {
       "artifact_id": "durable-workflow.v2.history-export-bundle@workflow-2.0.0-rc.42-schema-2",
       "resolver_url": "https://raw.githubusercontent.com/durable-workflow/workflow/2.0.0-rc.42/resources/conformance/suite-v43/platform-protocol-specs/history-export-bundle.schema.json",
       "source_release": "2.0.0-rc.42",
-      "source_path": "resources/conformance/suite-v46/platform-protocol-specs/history-export-bundle.schema.json",
+      "source_path": "resources/conformance/suite-v47/platform-protocol-specs/history-export-bundle.schema.json",
       "sha256": "sha256:29f9842ca426f231e79a454e95e23520e5b51b5d8f8453fb0c27f278d68bb21b"
     },
     "local-activity-runtime.schema.json": {
       "artifact_id": "durable-workflow.v2.local-activity-runtime@catalog-16",
       "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/f781ced1ae33c8697835bd527a125bdf3eaf4321/static/platform-protocol-specs/local-activity-runtime.schema.json",
-      "source_path": "resources/conformance/suite-v46/platform-protocol-specs/local-activity-runtime.schema.json",
+      "source_path": "resources/conformance/suite-v47/platform-protocol-specs/local-activity-runtime.schema.json",
       "sha256": "sha256:de74d7175cda4f761a57263aae2b32046e617783acf0677d4c5aa6c5358619ef"
     },
     "worker-sessions-runtime.schema.json": {
       "artifact_id": "durable-workflow.v2.worker-sessions-runtime@catalog-16",
       "resolver_url": "https://raw.githubusercontent.com/durable-workflow/durable-workflow.github.io/f781ced1ae33c8697835bd527a125bdf3eaf4321/static/platform-protocol-specs/worker-sessions-runtime.schema.json",
-      "source_path": "resources/conformance/suite-v46/platform-protocol-specs/worker-sessions-runtime.schema.json",
+      "source_path": "resources/conformance/suite-v47/platform-protocol-specs/worker-sessions-runtime.schema.json",
       "sha256": "sha256:36b16340fe9524653baef7de0a32b2f744562bfc57e91853579a2c94dd512581"
     }
   },
@@ -330,11 +330,19 @@
         },
         {
           "suite_version": 46,
+          "status": "historical",
+          "lifecycle": "lifecycle_neutral",
+          "artifact_id": "durable-workflow.v2.worker-protocol-api@catalog-16-protocol-1.18-history",
+          "resolver_url": "https://durable-workflow.github.io/platform-protocol-specs/v1.18/worker-protocol-api.openapi.yaml",
+          "sha256": "sha256:d704de374bf097bae08421ff293638af6e036f97184ac8f5b732f31dabf6c920"
+        },
+        {
+          "suite_version": 47,
           "status": "current",
           "lifecycle": "lifecycle_neutral",
           "artifact_id": "durable-workflow.v2.worker-protocol-api@catalog-16",
-          "resolver_url": "https://durable-workflow.github.io/platform-protocol-specs/v1.18/worker-protocol-api.openapi.yaml",
-          "sha256": "sha256:d704de374bf097bae08421ff293638af6e036f97184ac8f5b732f31dabf6c920"
+          "resolver_url": "https://durable-workflow.github.io/platform-protocol-specs/v1.19/worker-protocol-api.openapi.yaml",
+          "sha256": "sha256:2d5dc5aa3d68816f5ca42f58264020e4060a735e3ace77599f53407e109a0c7e"
         }
       ]
     },
@@ -375,11 +383,19 @@
         },
         {
           "suite_version": 46,
+          "status": "historical",
+          "lifecycle": "lifecycle_neutral",
+          "artifact_id": "durable-workflow.v2.worker-protocol-stream@catalog-16-protocol-1.18-history",
+          "resolver_url": "https://durable-workflow.github.io/platform-protocol-specs/v1.18/worker-protocol-stream.asyncapi.yaml",
+          "sha256": "sha256:4842cf99b4e7a036cdc0d96600a6b34ed79a626e6ac422ed9d26afe5ad10b02a"
+        },
+        {
+          "suite_version": 47,
           "status": "current",
           "lifecycle": "lifecycle_neutral",
           "artifact_id": "durable-workflow.v2.worker-protocol-stream@catalog-16",
-          "resolver_url": "https://durable-workflow.github.io/platform-protocol-specs/v1.18/worker-protocol-stream.asyncapi.yaml",
-          "sha256": "sha256:4842cf99b4e7a036cdc0d96600a6b34ed79a626e6ac422ed9d26afe5ad10b02a"
+          "resolver_url": "https://durable-workflow.github.io/platform-protocol-specs/v1.19/worker-protocol-stream.asyncapi.yaml",
+          "sha256": "sha256:ead97fa4b2ce6efe5b242e1c80596c06a70772a80307b8143cb8cd16fff3d85f"
         }
       ]
     }
@@ -572,13 +588,13 @@
       "sources": [
         {
           "artifact_id": "durable-workflow.v2.worker-protocol-api@catalog-16",
-          "resolver_url": "https://durable-workflow.github.io/platform-protocol-specs/v1.18/worker-protocol-api.openapi.yaml",
-          "sha256": "sha256:d704de374bf097bae08421ff293638af6e036f97184ac8f5b732f31dabf6c920"
+          "resolver_url": "https://durable-workflow.github.io/platform-protocol-specs/v1.19/worker-protocol-api.openapi.yaml",
+          "sha256": "sha256:2d5dc5aa3d68816f5ca42f58264020e4060a735e3ace77599f53407e109a0c7e"
         },
         {
           "artifact_id": "durable-workflow.v2.worker-protocol-stream@catalog-16",
-          "resolver_url": "https://durable-workflow.github.io/platform-protocol-specs/v1.18/worker-protocol-stream.asyncapi.yaml",
-          "sha256": "sha256:4842cf99b4e7a036cdc0d96600a6b34ed79a626e6ac422ed9d26afe5ad10b02a"
+          "resolver_url": "https://durable-workflow.github.io/platform-protocol-specs/v1.19/worker-protocol-stream.asyncapi.yaml",
+          "sha256": "sha256:ead97fa4b2ce6efe5b242e1c80596c06a70772a80307b8143cb8cd16fff3d85f"
         }
       ],
       "authority_doc": "https://durable-workflow.github.io/docs/2.0/polyglot/worker-protocol"

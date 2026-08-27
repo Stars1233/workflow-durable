@@ -35,4 +35,24 @@ final class HistoryEventPayloadContractTest extends TestCase
             'surprise' => true,
         ]);
     }
+
+    public function testSelectionResolutionAcceptsDurableWinnerMetadata(): void
+    {
+        HistoryEventPayloadContract::assertKnownPayloadKeys(HistoryEventType::SelectionResolved, [
+            'selection_group_id' => 'select-calls:3:2',
+            'selection_group_base_sequence' => 3,
+            'selection_group_size' => 2,
+            'member_key' => 'deadline',
+            'member_index' => 1,
+            'member_base_sequence' => 4,
+            'member_size' => 1,
+            'operation_kind' => 'timer',
+            'operation_identity' => 'timer-42',
+            'outcome' => 'completed',
+            'resolution_event_id' => 'event-42',
+            'resolution_event_type' => HistoryEventType::TimerFired->value,
+        ]);
+
+        $this->addToAssertionCount(1);
+    }
 }

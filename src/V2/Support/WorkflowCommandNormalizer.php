@@ -178,6 +178,54 @@ final class WorkflowCommandNormalizer
 
             self::assertCommandFieldScope($type, is_array($command) ? $command : [], $index, $errors);
 
+            if ($type === 'cancel_selection_operation') {
+                $groupId = $command['selection_group_id'] ?? null;
+                $memberKey = $command['member_key'] ?? null;
+                $memberIndex = $command['member_index'] ?? null;
+                $memberBase = $command['member_base_sequence'] ?? null;
+                $memberSize = $command['member_size'] ?? null;
+                $operationKind = $command['operation_kind'] ?? null;
+                $operationIdentity = $command['operation_identity'] ?? null;
+                $matches = is_string($groupId)
+                    && preg_match('/^select-calls:([1-9][0-9]*):([1-9][0-9]*)$/', $groupId, $groupParts) === 1;
+                $groupBase = $matches ? (int) $groupParts[1] : null;
+                $groupSize = $matches ? (int) $groupParts[2] : null;
+
+                if (! $matches
+                    || ! self::validSelectionKey($memberKey)
+                    || ! is_int($memberIndex) || $memberIndex < 0 || $memberIndex >= $groupSize
+                    || ! is_int($memberBase) || $memberBase < $groupBase
+                    || ! is_int($memberSize) || $memberSize < 1
+                    || $memberBase + $memberSize > $groupBase + $groupSize
+                    || ! is_string($operationKind) || ! in_array(
+                        $operationKind,
+                        ['activity', 'child', 'timer', 'signal', 'condition', 'group'],
+                        true,
+                    )
+                    || ! is_string($operationIdentity) || trim($operationIdentity) === ''
+                    || ($operationKind === 'group'
+                        && $operationIdentity !== sprintf('group:%d:%d', $memberBase, $memberSize))) {
+                    $errors["commands.{$index}.selection_group_id"] = [
+                        'Selection cancellation must identify one authored member within a durable selection group.',
+                    ];
+
+                    continue;
+                }
+
+                $normalized[] = [
+                    'type' => $type,
+                    'selection_group_id' => $groupId,
+                    'member_key' => $memberKey,
+                    'member_index' => $memberIndex,
+                    'member_base_sequence' => $memberBase,
+                    'member_size' => $memberSize,
+                    'operation_kind' => $operationKind,
+                    'operation_identity' => trim($operationIdentity),
+                ];
+
+                continue;
+            }
+
             if ($type === 'complete_workflow') {
                 $result = self::resolveCommandPayloadWithCodec($command, 'result', $index, $errors);
                 $payloadCodec = self::payloadCodecForResolvedPayload($command, $result, 'result', $index, $errors);
@@ -768,6 +816,7 @@ final class WorkflowCommandNormalizer
             }
 
             if ($type === 'open_condition_wait') {
+                $parallelMetadata = self::optionalParallelMetadata($command, 'condition', $index, $errors);
                 $conditionKey = self::optionalCommandString($command, 'condition_key', $index, $errors);
                 $conditionDefinitionFingerprint = self::optionalCommandString(
                     $command,
@@ -801,12 +850,14 @@ final class WorkflowCommandNormalizer
                     'condition_definition_fingerprint' => $conditionDefinitionFingerprint,
                     'condition_wait_occurrence_id' => $conditionWaitOccurrenceId,
                     'timeout_seconds' => $timeoutSeconds,
+                    ...$parallelMetadata,
                 ], static fn (mixed $value): bool => $value !== null);
 
                 continue;
             }
 
             if ($type === 'open_signal_wait') {
+                $parallelMetadata = self::optionalParallelMetadata($command, 'signal', $index, $errors);
                 if (! is_string($command['signal_name'] ?? null) || trim((string) $command['signal_name']) === '') {
                     $errors["commands.{$index}.signal_name"] = [
                         'Open signal wait commands require a non-empty signal_name.',
@@ -833,6 +884,7 @@ final class WorkflowCommandNormalizer
                     'type' => $type,
                     'signal_name' => trim((string) $command['signal_name']),
                     'timeout_seconds' => $timeoutSeconds,
+                    ...$parallelMetadata,
                 ], static fn (mixed $value): bool => $value !== null);
 
                 continue;
@@ -864,9 +916,15 @@ final class WorkflowCommandNormalizer
         $fields = [
             'parallel_group_id',
             'parallel_group_kind',
+            'parallel_group_mode',
             'parallel_group_base_sequence',
             'parallel_group_size',
             'parallel_group_index',
+            'selection_member_key',
+            'selection_member_index',
+            'selection_member_base_sequence',
+            'selection_member_size',
+            'selection_member_kind',
         ];
         $present = array_key_exists('parallel_group_path', $command);
         foreach ($fields as $field) {
@@ -926,16 +984,18 @@ final class WorkflowCommandNormalizer
         $base = $value['parallel_group_base_sequence'] ?? null;
         $size = $value['parallel_group_size'] ?? null;
         $index = $value['parallel_group_index'] ?? null;
+        $mode = $value['parallel_group_mode'] ?? 'all';
         $limit = StructuralLimits::commandBatchSizeLimit();
         if (! is_string($id) || $id === ''
             || ! is_string($kind) || ! in_array($kind, [$leafKind, 'mixed'], true)
             || ! is_int($base) || $base < 1
             || ! is_int($size) || $size < 1 || ($limit > 0 && $size > $limit)
-            || ! is_int($index) || $index < 0 || $index >= $size) {
+            || ! is_int($index) || $index < 0 || $index >= $size
+            || ! is_string($mode) || ! in_array($mode, ['all', 'select'], true)) {
             return null;
         }
 
-        $prefix = match ($kind) {
+        $prefix = $mode === 'select' ? 'select-calls' : match ($kind) {
             'activity' => 'parallel-activities',
             'child' => 'parallel-children',
             'timer' => 'parallel-timers',
@@ -945,13 +1005,40 @@ final class WorkflowCommandNormalizer
             return null;
         }
 
-        return [
+        $memberKey = $value['selection_member_key'] ?? null;
+        $memberIndex = $value['selection_member_index'] ?? null;
+        $memberBase = $value['selection_member_base_sequence'] ?? null;
+        $memberSize = $value['selection_member_size'] ?? null;
+        $memberKind = $value['selection_member_kind'] ?? null;
+        if ($mode === 'select' && (
+            ! self::validSelectionKey($memberKey)
+            || ! is_int($memberIndex) || $memberIndex < 0
+            || ! is_int($memberBase) || $memberBase < $base || $memberBase >= $base + $size
+            || ! is_int($memberSize) || $memberSize < 1 || $memberBase + $memberSize > $base + $size
+            || ! is_string($memberKind)
+            || ! in_array($memberKind, ['activity', 'child', 'timer', 'signal', 'condition', 'group'], true)
+        )) {
+            return null;
+        }
+
+        return array_filter([
             'parallel_group_id' => $id,
             'parallel_group_kind' => $kind,
+            'parallel_group_mode' => $mode === 'select' ? $mode : null,
             'parallel_group_base_sequence' => $base,
             'parallel_group_size' => $size,
             'parallel_group_index' => $index,
-        ];
+            'selection_member_key' => $mode === 'select' ? $memberKey : null,
+            'selection_member_index' => $mode === 'select' ? $memberIndex : null,
+            'selection_member_base_sequence' => $mode === 'select' ? $memberBase : null,
+            'selection_member_size' => $mode === 'select' ? $memberSize : null,
+            'selection_member_kind' => $mode === 'select' ? $memberKind : null,
+        ], static fn (mixed $item): bool => $item !== null);
+    }
+
+    private static function validSelectionKey(mixed $value): bool
+    {
+        return (is_string($value) && $value !== '') || (is_int($value) && $value >= 0);
     }
 
     /**

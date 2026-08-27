@@ -97,6 +97,20 @@ final class WorkflowStep
         return new self(false, null, $yielded instanceof ActivityCall ? $yielded : null, $yielded, null, []);
     }
 
+    public static function group(AllCall $group, int $baseSequence, string $payloadCodec = 'avro'): self
+    {
+        $commands = [];
+
+        foreach ($group->leafDescriptors($baseSequence) as $descriptor) {
+            $commands[] = [
+                ...self::commandForYielded($descriptor['call'], $payloadCodec),
+                ...ParallelChildGroup::payloadForPath($descriptor['group_path']),
+            ];
+        }
+
+        return new self(false, null, null, $group, $commands[0] ?? null, $commands);
+    }
+
     public static function recordSideEffect(SideEffectCall $call, mixed $result, string $payloadCodec = 'avro'): self
     {
         $command = [
@@ -143,6 +157,16 @@ final class WorkflowStep
             ),
             $yielded instanceof ChildWorkflowCall => self::childWorkflowCommand($yielded, $payloadCodec),
             $yielded instanceof ServiceOperationCall => self::serviceOperationCommand($yielded, $payloadCodec),
+            $yielded instanceof CancelDurableOperationCall => [
+                'type' => 'cancel_selection_operation',
+                'selection_group_id' => $yielded->handle->selectionGroupId,
+                'member_key' => $yielded->handle->key,
+                'member_index' => $yielded->handle->index,
+                'member_base_sequence' => $yielded->handle->baseSequence,
+                'member_size' => $yielded->handle->size,
+                'operation_kind' => $yielded->handle->kind,
+                'operation_identity' => $yielded->handle->identity,
+            ],
             $yielded instanceof SideEffectCall => throw new UnsupportedWorkflowYieldException(
                 'Workflow engine side effects require WorkflowFiberRunner history resolution before command emission.',
             ),

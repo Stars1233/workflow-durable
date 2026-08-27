@@ -1387,6 +1387,160 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
         $this->assertSame('parallel-calls:1:3', $normalized[2]['parallel_group_path'][0]['parallel_group_id']);
     }
 
+    public function testSelectionMetadataIsPreservedForMixedDurableCommands(): void
+    {
+        $commands = [];
+        foreach ([
+            ['schedule_activity', 'activity_type', 'fetch', 'activity'],
+            ['start_timer', 'delay_seconds', 5, 'timer'],
+            ['open_signal_wait', 'signal_name', 'resolved', 'signal'],
+            ['open_condition_wait', 'condition_key', 'ready', 'condition'],
+        ] as $index => [$type, $detailField, $detail, $leafKind]) {
+            $entry = [
+                'parallel_group_id' => 'select-calls:1:4',
+                'parallel_group_kind' => 'mixed',
+                'parallel_group_mode' => 'select',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 4,
+                'parallel_group_index' => $index,
+                'selection_member_key' => $leafKind,
+                'selection_member_index' => $index,
+                'selection_member_base_sequence' => 1 + $index,
+                'selection_member_size' => 1,
+                'selection_member_kind' => $leafKind,
+            ];
+            $commands[] = [
+                'type' => $type,
+                $detailField => $detail,
+                ...$entry,
+                'parallel_group_path' => [$entry],
+            ];
+        }
+
+        $normalized = WorkflowCommandNormalizer::normalize($commands);
+
+        $this->assertSame(['select', 'select', 'select', 'select'], array_column(
+            $normalized,
+            'parallel_group_mode',
+        ));
+        $this->assertSame(['activity', 'timer', 'signal', 'condition'], array_column(
+            $normalized,
+            'selection_member_key',
+        ));
+    }
+
+    public function testSelectionCancellationIsNormalizedByThePackageGrammar(): void
+    {
+        $command = [
+            'type' => 'cancel_selection_operation',
+            'selection_group_id' => 'select-calls:4:3',
+            'member_key' => 'nested',
+            'member_index' => 0,
+            'member_base_sequence' => 4,
+            'member_size' => 2,
+            'operation_kind' => 'group',
+            'operation_identity' => 'group:4:2',
+        ];
+
+        $this->assertSame([$command], WorkflowCommandNormalizer::normalize([$command]));
+
+        foreach ([
+            ['operation_identity', 'group:4:1'],
+            ['member_base_sequence', 6],
+            ['member_size', 4],
+        ] as [$field, $value]) {
+            $invalid = $command;
+            $invalid[$field] = $value;
+            $errors = $this->normalizeAndCaptureErrors([$invalid]);
+
+            $this->assertArrayHasKey('commands.0.selection_group_id', $errors);
+        }
+    }
+
+    public function testSelectionGrammarRejectsOutOfDomainMemberKeys(): void
+    {
+        foreach (['', -1] as $memberKey) {
+            $entry = [
+                'parallel_group_id' => 'select-calls:1:1',
+                'parallel_group_kind' => 'activity',
+                'parallel_group_mode' => 'select',
+                'parallel_group_base_sequence' => 1,
+                'parallel_group_size' => 1,
+                'parallel_group_index' => 0,
+                'selection_member_key' => $memberKey,
+                'selection_member_index' => 0,
+                'selection_member_base_sequence' => 1,
+                'selection_member_size' => 1,
+                'selection_member_kind' => 'activity',
+            ];
+            $errors = $this->normalizeAndCaptureErrors([[
+                'type' => 'schedule_activity',
+                'activity_type' => 'fetch',
+                ...$entry,
+                'parallel_group_path' => [$entry],
+            ]]);
+
+            $this->assertArrayHasKey('commands.0.parallel_group_path', $errors);
+
+            $errors = $this->normalizeAndCaptureErrors([[
+                'type' => 'cancel_selection_operation',
+                'selection_group_id' => 'select-calls:1:1',
+                'member_key' => $memberKey,
+                'member_index' => 0,
+                'member_base_sequence' => 1,
+                'member_size' => 1,
+                'operation_kind' => 'activity',
+                'operation_identity' => 'activity-1',
+            ]]);
+
+            $this->assertArrayHasKey('commands.0.selection_group_id', $errors);
+        }
+    }
+
+    public function testNestedSelectionMemberKindSurvivesOneAndManyLeafGroupPaths(): void
+    {
+        foreach ([1, 2] as $memberSize) {
+            $groupSize = $memberSize + 1;
+            $commands = [];
+            for ($offset = 0; $offset < $memberSize; ++$offset) {
+                $outer = [
+                    'parallel_group_id' => "select-calls:1:{$groupSize}",
+                    'parallel_group_kind' => 'mixed',
+                    'parallel_group_mode' => 'select',
+                    'parallel_group_base_sequence' => 1,
+                    'parallel_group_size' => $groupSize,
+                    'parallel_group_index' => $offset,
+                    'selection_member_key' => 'nested',
+                    'selection_member_index' => 0,
+                    'selection_member_base_sequence' => 1,
+                    'selection_member_size' => $memberSize,
+                    'selection_member_kind' => 'group',
+                ];
+                $inner = [
+                    'parallel_group_id' => "parallel-activities:1:{$memberSize}",
+                    'parallel_group_kind' => 'activity',
+                    'parallel_group_base_sequence' => 1,
+                    'parallel_group_size' => $memberSize,
+                    'parallel_group_index' => $offset,
+                ];
+                $commands[] = [
+                    'type' => 'schedule_activity',
+                    'activity_type' => "nested-{$offset}",
+                    ...$inner,
+                    'parallel_group_path' => [$outer, $inner],
+                ];
+            }
+
+            $normalized = WorkflowCommandNormalizer::normalize($commands);
+
+            $this->assertCount($memberSize, $normalized);
+            foreach ($normalized as $command) {
+                $this->assertSame('group', $command['parallel_group_path'][0]['selection_member_kind']);
+                $this->assertSame($memberSize, $command['parallel_group_path'][0]['selection_member_size']);
+            }
+        }
+    }
+
     public function testParallelMetadataRejectsPartialOrIncompatibleIdentity(): void
     {
         $errors = $this->normalizeAndCaptureErrors([[

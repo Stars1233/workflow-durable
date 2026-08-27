@@ -14,7 +14,11 @@ use Workflow\Serializers\Serializer;
 use Workflow\V2\Enums\ActivityStatus;
 use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Enums\RunStatus;
+use Workflow\V2\Enums\TaskStatus;
+use Workflow\V2\Enums\TaskType;
 use Workflow\V2\Enums\TimerStatus;
+use Workflow\V2\Exceptions\DurableOperationCancelledException;
+use Workflow\V2\Exceptions\HistoryEventShapeMismatchException;
 use Workflow\V2\Exceptions\UnsupportedWorkflowYieldException;
 use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowCommand;
@@ -22,6 +26,7 @@ use Workflow\V2\Models\WorkflowFailure;
 use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowSignal;
+use Workflow\V2\Models\WorkflowTask;
 use Workflow\V2\Workflow;
 
 final class QueryStateReplayer
@@ -65,6 +70,43 @@ final class QueryStateReplayer
             if (! $workflowExecution->valid()) {
                 $this->syncWorkflowCursor($workflow, $sequence);
                 return new ReplayState($workflow, $sequence, null);
+            }
+
+            if ($current instanceof CancelDurableOperationCall) {
+                $cancelled = $this->selectionOperationCancelledEvent($run, $current->handle);
+                if (! $cancelled instanceof WorkflowHistoryEvent && ! $this->unmarkedCancellationWasCommitted(
+                    $run,
+                    $current->handle,
+                    $sequence,
+                    $historySequencesByPosition,
+                )) {
+                    $this->syncWorkflowCursor($workflow, $sequence);
+
+                    return new ReplayState($workflow, $sequence, $current);
+                }
+                $this->syncWorkflowCursor($workflow, $sequence);
+                $current = $workflowExecution->send(
+                    null,
+                    $cancelled instanceof WorkflowHistoryEvent ? $cancelled->recorded_at : null,
+                );
+
+                continue;
+            }
+
+            if ($current instanceof DurableOperationHandle) {
+                $resolution = $this->durableOperationResolution($run, $current);
+                if (! $resolution['resolved']) {
+                    $this->syncWorkflowCursor($workflow, $sequence);
+
+                    return new ReplayState($workflow, $sequence, $current);
+                }
+
+                $this->syncWorkflowCursor($workflow, $sequence);
+                $current = $resolution['failure'] instanceof Throwable
+                    ? $workflowExecution->throw($resolution['failure'], $resolution['recorded_at'])
+                    : $workflowExecution->send($resolution['value'], $resolution['recorded_at']);
+
+                continue;
             }
 
             if ($current instanceof LocalActivityCall) {
@@ -553,6 +595,7 @@ final class QueryStateReplayer
                 $pending = false;
                 $results = [];
                 $failure = null;
+                $failures = [];
 
                 WorkflowStepHistory::assertParallelGroupCompatible($run, $historySequence, $leafDescriptors);
 
@@ -567,16 +610,20 @@ final class QueryStateReplayer
                     WorkflowStepHistory::assertCompatible(
                         $run,
                         $itemSequence,
-                        $call instanceof ActivityCall
-                            ? WorkflowStepHistory::ACTIVITY
-                            : WorkflowStepHistory::CHILD_WORKFLOW,
+                        match (true) {
+                            $call instanceof ActivityCall => WorkflowStepHistory::ACTIVITY,
+                            $call instanceof TimerCall => WorkflowStepHistory::TIMER,
+                            $call instanceof SignalCall => WorkflowStepHistory::SIGNAL_WAIT,
+                            $call instanceof AwaitCall,
+                            $call instanceof AwaitWithTimeoutCall => WorkflowStepHistory::CONDITION_WAIT,
+                            default => WorkflowStepHistory::CHILD_WORKFLOW,
+                        },
                         $call instanceof ActivityCall
                             ? [
                                 'activity_type' => $call->activity,
-                            ]
-                            : [
+                            ] : ($call instanceof ChildWorkflowCall ? [
                                 'child_workflow_type' => $call->workflow,
-                            ],
+                            ] : []),
                     );
 
                     if ($call instanceof ActivityCall) {
@@ -597,6 +644,7 @@ final class QueryStateReplayer
                                     ?? $activityCompletion->created_at?->getTimestampMs()
                                     ?? PHP_INT_MAX,
                             );
+                            $failures[$offset] = $this->activityException($activityCompletion, null, $run);
 
                             continue;
                         }
@@ -649,6 +697,59 @@ final class QueryStateReplayer
                             $this->activityException(null, $execution, $run),
                             $execution->closed_at?->getTimestampMs() ?? PHP_INT_MAX,
                         );
+                        $failures[$offset] = $this->activityException(null, $execution, $run);
+
+                        continue;
+                    }
+
+                    if ($call instanceof TimerCall) {
+                        $timerFired = $this->timerFiredEvent($run, $itemSequence);
+                        $timer = $run->timers->firstWhere('sequence', $itemSequence);
+
+                        if ($timerFired !== null || $timer?->status === TimerStatus::Fired) {
+                            $results[$offset] = true;
+
+                            continue;
+                        }
+
+                        $pending = true;
+
+                        continue;
+                    }
+
+                    if ($call instanceof SignalCall) {
+                        $signalEvent = $this->signalResolutionEvent($run, $itemSequence, $call);
+                        if ($signalEvent !== null) {
+                            $results[$offset] = $this->signalValue($signalEvent, $run);
+
+                            continue;
+                        }
+
+                        $timeoutFired = $call->timeoutSeconds !== null
+                            ? $this->signalTimeoutFiredEvent($run, $itemSequence, $call->name)
+                            : null;
+                        if ($timeoutFired !== null) {
+                            $results[$offset] = null;
+
+                            continue;
+                        }
+
+                        $pending = true;
+
+                        continue;
+                    }
+
+                    if ($call instanceof AwaitCall || $call instanceof AwaitWithTimeoutCall) {
+                        ConditionWaits::assertReplayCompatible($run, $itemSequence, $call);
+                        $conditionEvent = $this->conditionWaitResolutionEvent($run, $itemSequence);
+                        if ($conditionEvent !== null) {
+                            $results[$offset] = $conditionEvent->event_type
+                                === HistoryEventType::ConditionWaitSatisfied;
+
+                            continue;
+                        }
+
+                        $pending = true;
 
                         continue;
                     }
@@ -671,6 +772,7 @@ final class QueryStateReplayer
                                 ?? $resolutionEvent->created_at?->getTimestampMs()
                                 ?? PHP_INT_MAX,
                         );
+                        $failures[$offset] = ChildRunHistory::exceptionForResolution($resolutionEvent, $childRun);
 
                         continue;
                     }
@@ -702,6 +804,7 @@ final class QueryStateReplayer
                             ChildRunHistory::exceptionForChildRun($childRun),
                             $childRun->closed_at?->getTimestampMs() ?? PHP_INT_MAX,
                         );
+                        $failures[$offset] = ChildRunHistory::exceptionForChildRun($childRun);
 
                         continue;
                     }
@@ -723,7 +826,33 @@ final class QueryStateReplayer
                     $pending = true;
                 }
 
-                if ($failure !== null) {
+                if ($current instanceof SelectCall) {
+                    $groupId = $leafDescriptors[0]['group_path'][0]['parallel_group_id'];
+                    $selection = ParallelChildGroup::selectionResolution($run, $groupId);
+
+                    if ($selection instanceof WorkflowHistoryEvent) {
+                        $winner = ParallelChildGroup::validatedSelectionResolution(
+                            $run,
+                            $current,
+                            $historySequence,
+                            $selection,
+                        );
+                        $this->syncWorkflowCursor($workflow, $sequence + $groupSize);
+                        $current = $workflowExecution->send(
+                            $current->resolved(
+                                $historySequence,
+                                $winner,
+                                $results,
+                                $failures,
+                                ParallelChildGroup::durableOperationIdentities($run),
+                            ),
+                            $selection->recorded_at,
+                        );
+                        $sequence += $groupSize;
+
+                        continue;
+                    }
+                } elseif ($failure !== null) {
                     $this->syncWorkflowCursor($workflow, $sequence + $groupSize);
                     $failureTime = isset($failure['recorded_at']) && is_int(
                         $failure['recorded_at']
@@ -763,6 +892,277 @@ final class QueryStateReplayer
                 get_debug_type($current),
             ));
         }
+    }
+
+    /**
+     * @return array{resolved: bool, value: mixed, failure: Throwable|null, recorded_at: \Carbon\CarbonInterface|null}
+     */
+    private function durableOperationResolution(WorkflowRun $run, DurableOperationHandle $handle): array
+    {
+        $cancelled = $this->selectionOperationCancelledEvent($run, $handle);
+        if ($cancelled instanceof WorkflowHistoryEvent) {
+            return [
+                'resolved' => true,
+                'value' => null,
+                'failure' => DurableOperationCancelledException::forHandle($handle),
+                'recorded_at' => $cancelled->recorded_at,
+            ];
+        }
+
+        if (! $handle->call instanceof AllCall) {
+            return $this->durableLeafResolution($run, $handle->call, $handle->baseSequence, $handle->identity);
+        }
+
+        $failure = $this->durableGroupFailureResolution($run, $handle);
+        if ($failure !== null) {
+            return $failure;
+        }
+
+        $results = [];
+        $latest = null;
+        foreach ($handle->call->leafDescriptors($handle->baseSequence) as $descriptor) {
+            $resolution = $this->durableLeafResolution(
+                $run,
+                $descriptor['call'],
+                $handle->baseSequence + $descriptor['offset'],
+                $handle->identity,
+            );
+            if ($resolution['failure'] instanceof Throwable || ! $resolution['resolved']) {
+                return $resolution;
+            }
+
+            $results[$descriptor['offset']] = $resolution['value'];
+            $candidate = $resolution['recorded_at'];
+            if ($candidate !== null && ($latest === null || $candidate->greaterThan($latest))) {
+                $latest = $candidate;
+            }
+        }
+
+        ksort($results);
+
+        return [
+            'resolved' => true,
+            'value' => $handle->call->nestedResults(array_values($results)),
+            'failure' => null,
+            'recorded_at' => $latest,
+        ];
+    }
+
+    /**
+     * @return array{resolved: bool, value: mixed, failure: Throwable|null, recorded_at: \Carbon\CarbonInterface|null}|null
+     */
+    private function durableGroupFailureResolution(WorkflowRun $run, DurableOperationHandle $handle): ?array
+    {
+        $event = ParallelChildGroup::memberFailureResolution($run, $handle->baseSequence, $handle->size);
+        if (! $event instanceof WorkflowHistoryEvent) {
+            return null;
+        }
+
+        $failureSequence = $event->payload['sequence'] ?? null;
+        foreach ($handle->call->leafDescriptors($handle->baseSequence) as $descriptor) {
+            $sequence = $handle->baseSequence + $descriptor['offset'];
+            if ($failureSequence !== $sequence) {
+                continue;
+            }
+
+            $resolution = $this->durableLeafResolution($run, $descriptor['call'], $sequence, $handle->identity);
+            if ($resolution['failure'] instanceof Throwable) {
+                return $resolution;
+            }
+
+            break;
+        }
+
+        throw new HistoryEventShapeMismatchException(
+            $handle->baseSequence,
+            'the first durable failure for the authored selection member',
+            [$event->event_type->value],
+            'The terminal failure event does not match a failed durable leaf in the authored member.',
+        );
+    }
+
+    /**
+     * @return array{resolved: bool, value: mixed, failure: Throwable|null, recorded_at: \Carbon\CarbonInterface|null}
+     */
+    private function durableLeafResolution(
+        WorkflowRun $run,
+        ActivityCall|ChildWorkflowCall|TimerCall|SignalCall|AwaitCall|AwaitWithTimeoutCall $call,
+        int $sequence,
+        string $identity,
+    ): array {
+        if ($call instanceof ActivityCall) {
+            $event = $this->activityCompletionEvent($run, $sequence);
+            if ($event instanceof WorkflowHistoryEvent) {
+                return $event->event_type === HistoryEventType::ActivityCompleted
+                    ? [
+                        'resolved' => true,
+                        'value' => $this->activityResult($event, $run),
+                        'failure' => null,
+                        'recorded_at' => $event->recorded_at,
+                    ]
+                    : [
+                        'resolved' => true,
+                        'value' => null,
+                        'failure' => $this->activityException($event, null, $run),
+                        'recorded_at' => $event->recorded_at,
+                    ];
+            }
+
+            /** @var ActivityExecution|null $execution */
+            $execution = $run->activityExecutions->firstWhere('sequence', $sequence);
+            if ($execution instanceof ActivityExecution && ! in_array($execution->status, [
+                ActivityStatus::Pending,
+                ActivityStatus::Running,
+            ], true)) {
+                return $execution->status === ActivityStatus::Completed
+                    ? [
+                        'resolved' => true,
+                        'value' => $execution->activityResult(),
+                        'failure' => null,
+                        'recorded_at' => $execution->closed_at,
+                    ]
+                    : [
+                        'resolved' => true,
+                        'value' => null,
+                        'failure' => $this->activityException(null, $execution, $run),
+                        'recorded_at' => $execution->closed_at,
+                    ];
+            }
+        } elseif ($call instanceof TimerCall) {
+            $event = $this->timerFiredEvent($run, $sequence);
+            if ($event instanceof WorkflowHistoryEvent) {
+                return [
+                    'resolved' => true,
+                    'value' => true,
+                    'failure' => null,
+                    'recorded_at' => $event->recorded_at,
+                ];
+            }
+            $timer = $run->timers->firstWhere('sequence', $sequence);
+            if ($timer?->status === TimerStatus::Fired) {
+                return [
+                    'resolved' => true,
+                    'value' => true,
+                    'failure' => null,
+                    'recorded_at' => $timer->fired_at,
+                ];
+            }
+            if ($timer?->status === TimerStatus::Cancelled) {
+                return [
+                    'resolved' => true,
+                    'value' => null,
+                    'failure' => DurableOperationCancelledException::forOperation('timer', $identity),
+                    'recorded_at' => $timer->updated_at,
+                ];
+            }
+        } elseif ($call instanceof SignalCall) {
+            $event = $this->signalResolutionEvent($run, $sequence, $call);
+            if ($event instanceof WorkflowHistoryEvent) {
+                return [
+                    'resolved' => true,
+                    'value' => $this->signalValue($event, $run),
+                    'failure' => null,
+                    'recorded_at' => $event->recorded_at,
+                ];
+            }
+            $timeout = $call->timeoutSeconds !== null
+                ? $this->signalTimeoutFiredEvent($run, $sequence, $call->name)
+                : null;
+            if ($timeout instanceof WorkflowHistoryEvent) {
+                return [
+                    'resolved' => true,
+                    'value' => null,
+                    'failure' => null,
+                    'recorded_at' => $timeout->recorded_at,
+                ];
+            }
+        } elseif ($call instanceof AwaitCall || $call instanceof AwaitWithTimeoutCall) {
+            $event = $this->conditionWaitResolutionEvent($run, $sequence);
+            if ($event instanceof WorkflowHistoryEvent) {
+                return [
+                    'resolved' => true,
+                    'value' => $event->event_type === HistoryEventType::ConditionWaitSatisfied,
+                    'failure' => null,
+                    'recorded_at' => $event->recorded_at,
+                ];
+            }
+        } else {
+            $event = ChildRunHistory::resolutionEventForSequence($run, $sequence);
+            $childRun = ChildRunHistory::childRunForSequence($run, $sequence);
+            if ($event instanceof WorkflowHistoryEvent) {
+                return $event->event_type === HistoryEventType::ChildRunCompleted
+                    ? [
+                        'resolved' => true,
+                        'value' => ChildRunHistory::outputForResolution($event, $childRun),
+                        'failure' => null,
+                        'recorded_at' => $event->recorded_at,
+                    ]
+                    : [
+                        'resolved' => true,
+                        'value' => null,
+                        'failure' => ChildRunHistory::exceptionForResolution($event, $childRun),
+                        'recorded_at' => $event->recorded_at,
+                    ];
+            }
+        }
+
+        return [
+            'resolved' => false,
+            'value' => null,
+            'failure' => null,
+            'recorded_at' => null,
+        ];
+    }
+
+    private function selectionOperationCancelledEvent(
+        WorkflowRun $run,
+        DurableOperationHandle $handle,
+    ): ?WorkflowHistoryEvent {
+        return ParallelChildGroup::cancellationForHandle($run, $handle);
+    }
+
+    /**
+     * A missing cancellation marker means either that completion won before
+     * cancellation or that the workflow task has not committed the no-op yet.
+     * Only durable successor, terminal-run, or completed-task evidence may
+     * advance query replay past that boundary.
+     *
+     * @param array<int, int> $historySequencesByPosition
+     */
+    private function unmarkedCancellationWasCommitted(
+        WorkflowRun $run,
+        DurableOperationHandle $handle,
+        int $sequence,
+        array $historySequencesByPosition,
+    ): bool {
+        if (! ParallelChildGroup::selectionMemberIsTerminal(
+            $run,
+            $handle->baseSequence,
+            $handle->size,
+            $handle->kind,
+        )) {
+            return false;
+        }
+
+        if (isset($historySequencesByPosition[$sequence]) || $run->status->isTerminal()) {
+            return true;
+        }
+
+        $selection = ParallelChildGroup::selectionResolution($run, $handle->selectionGroupId);
+        if (! $selection instanceof WorkflowHistoryEvent || $selection->recorded_at === null) {
+            return false;
+        }
+
+        /** @var WorkflowTask|null $committingTask */
+        $committingTask = WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Workflow->value)
+            ->orderBy('created_at')
+            ->get()
+            ->first(static fn (WorkflowTask $task): bool => $task->created_at !== null
+                && $task->created_at->greaterThanOrEqualTo($selection->recorded_at));
+
+        return $committingTask?->status === TaskStatus::Completed;
     }
 
     private function loadReplayRelations(WorkflowRun $run): void

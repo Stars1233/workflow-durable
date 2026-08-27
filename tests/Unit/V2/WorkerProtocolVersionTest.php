@@ -19,7 +19,7 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
 
     public function testVersionTracksServiceOperationCommandShape(): void
     {
-        $this->assertSame('1.18', WorkerProtocolVersion::VERSION);
+        $this->assertSame('1.19', WorkerProtocolVersion::VERSION);
         $this->assertContains('start_service_operation', WorkerProtocolVersion::nonTerminalCommandTypes());
         $this->assertSame(0, WorkerProtocolVersion::longPollSemantics()['min_timeout_seconds']);
     }
@@ -80,6 +80,7 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
                 'local_activities',
                 'worker_sessions',
                 'sticky_execution',
+                'durable_selection',
             ],
             WorkerProtocolVersion::workerCapabilities(),
         );
@@ -119,11 +120,26 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
             ],
             WorkerProtocolVersion::workerCapabilitiesForVersion('1.18'),
         );
+        $this->assertSame(
+            [
+                'query_tasks',
+                'memo_upserts',
+                'message_streams',
+                'typed_search_attributes',
+                'condition_wait_occurrence_identity',
+                'local_activities',
+                'worker_sessions',
+                'sticky_execution',
+                'durable_selection',
+            ],
+            WorkerProtocolVersion::workerCapabilitiesForVersion('1.19'),
+        );
     }
 
     public function testNonTerminalCommandTypesAreFrozen(): void
     {
         $this->assertSame([
+            'cancel_selection_operation',
             'schedule_activity',
             'start_timer',
             'start_child_workflow',
@@ -138,6 +154,29 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
             'open_condition_wait',
             'open_signal_wait',
         ], WorkerProtocolVersion::nonTerminalCommandTypes());
+    }
+
+    public function testSelectionCancellationAcceptsThePublishedNestedGroupKind(): void
+    {
+        $normalize = new \ReflectionMethod(
+            \Workflow\V2\Support\DefaultWorkflowTaskBridge::class,
+            'normalizeCancelSelectionOperationCommand',
+        );
+        $command = [
+            'type' => 'cancel_selection_operation',
+            'selection_group_id' => 'select-calls:1:3',
+            'member_key' => 'work',
+            'member_index' => 0,
+            'member_base_sequence' => 1,
+            'member_size' => 2,
+            'operation_kind' => 'group',
+            'operation_identity' => 'group:1',
+        ];
+
+        $this->assertSame($command, $normalize->invoke(null, $command));
+
+        $command['operation_kind'] = 'mixed';
+        $this->assertNull($normalize->invoke(null, $command));
     }
 
     public function testTerminalCommandTypesAreFrozen(): void
@@ -212,6 +251,30 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
         $this->assertSame(WorkflowSearchAttribute::VALID_TYPES, $shape['attribute_types']['valid_values']);
         $this->assertSame('reject_command', $shape['attribute_types']['invalid_values']);
         $this->assertSame(['sequence', 'attributes', 'attribute_types'], $shape['history']['replay_identity']);
+    }
+
+    public function testDescribeIncludesDurableSelectionSemantics(): void
+    {
+        $shape = WorkerProtocolVersion::describe()['durable_selection'];
+
+        $this->assertSame('1.19', $shape['minimum_protocol_version']);
+        $this->assertSame('durable_selection', $shape['worker_capability']);
+        $this->assertSame('select', $shape['group_mode']);
+        $this->assertSame('SelectionResolved', $shape['winner_history_event']);
+        $this->assertSame('void', $shape['cancellation_request_result']);
+        $this->assertSame(
+            'advance_only_after_committed_noop_boundary',
+            $shape['cancellation_replay_without_marker'],
+        );
+        $this->assertSame('non_empty_string_or_non_negative_integer', $shape['selection_key_domain']);
+        $this->assertContains('selection_member_kind', $shape['command_metadata_fields']);
+        $this->assertSame('durable_scheduled_or_open_history', $shape['cancellation_member_authority']);
+        $this->assertSame(
+            'preserve_terminal_result_without_cancellation_marker',
+            $shape['terminal_before_cancellation'],
+        );
+        $this->assertSame(['continue', 'await', 'cancel'], $shape['non_winners']);
+        $this->assertFalse($shape['implicit_cancellation']);
     }
 
     public function testDescribeIncludesPortableMemoCommandAndHistorySemantics(): void

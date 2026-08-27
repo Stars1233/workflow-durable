@@ -148,6 +148,10 @@ final class ConditionWaits
                 HistoryEventType::ConditionWaitSatisfied,
                 HistoryEventType::ConditionWaitTimedOut,
             ], true)) {
+                if ($event->event_type === HistoryEventType::SelectionOperationCancelled) {
+                    self::closeCancelledSelectionWaits($waits, $openWaitIds, $event);
+                }
+
                 if (in_array($event->event_type, [
                     HistoryEventType::WorkflowCompleted,
                     HistoryEventType::WorkflowFailed,
@@ -259,6 +263,45 @@ final class ConditionWaits
     public static function conditionKeyForSequence(WorkflowRun $run, int $sequence): ?string
     {
         return self::conditionDefinitionForSequence($run, $sequence)['condition_key'];
+    }
+
+    /**
+     * @param array<string, array<string, mixed>> $waits
+     * @param list<string> $openWaitIds
+     */
+    private static function closeCancelledSelectionWaits(
+        array &$waits,
+        array &$openWaitIds,
+        WorkflowHistoryEvent $event,
+    ): void {
+        $baseSequence = self::intValue($event->payload['member_base_sequence'] ?? null);
+        $memberSize = self::intValue($event->payload['member_size'] ?? null);
+
+        if ($baseSequence === null || $memberSize === null || $memberSize < 1) {
+            return;
+        }
+
+        foreach ($waits as $waitId => &$wait) {
+            $sequence = self::intValue($wait['sequence'] ?? null);
+            if ($sequence === null
+                || $sequence < $baseSequence
+                || $sequence >= $baseSequence + $memberSize
+                || ($wait['status'] ?? null) !== 'open') {
+                continue;
+            }
+
+            $wait['status'] = 'cancelled';
+            $wait['source_status'] = 'selection_cancelled';
+            $wait['resolved_at'] = $event->recorded_at ?? $event->created_at;
+            $wait['resume_source_kind'] = 'selection_cancellation';
+            $wait['resume_source_id'] = self::stringValue($event->payload['selection_group_id'] ?? null);
+
+            $index = array_search($waitId, $openWaitIds, true);
+            if ($index !== false) {
+                array_splice($openWaitIds, $index, 1);
+            }
+        }
+        unset($wait);
     }
 
     /**

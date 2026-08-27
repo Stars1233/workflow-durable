@@ -141,6 +141,12 @@ final class SignalWaits
                 continue;
             }
 
+            if ($event->event_type === HistoryEventType::SelectionOperationCancelled) {
+                self::closeCancelledSelectionWaits($waits, $openWaitIdsByName, $event);
+
+                continue;
+            }
+
             if (in_array($event->event_type, [
                 HistoryEventType::SignalReceived,
                 HistoryEventType::SignalApplied,
@@ -230,6 +236,48 @@ final class SignalWaits
         });
 
         return end($openWaits)['signal_wait_id'] ?? null;
+    }
+
+    /**
+     * @param array<string, array<string, mixed>> $waits
+     * @param array<string, list<string>> $openWaitIdsByName
+     */
+    private static function closeCancelledSelectionWaits(
+        array &$waits,
+        array &$openWaitIdsByName,
+        WorkflowHistoryEvent $event,
+    ): void {
+        $baseSequence = self::intValue($event->payload['member_base_sequence'] ?? null);
+        $memberSize = self::intValue($event->payload['member_size'] ?? null);
+
+        if ($baseSequence === null || $memberSize === null || $memberSize < 1) {
+            return;
+        }
+
+        foreach ($waits as $waitId => &$wait) {
+            $sequence = self::intValue($wait['sequence'] ?? null);
+            if ($sequence === null
+                || $sequence < $baseSequence
+                || $sequence >= $baseSequence + $memberSize
+                || ($wait['status'] ?? null) !== 'open') {
+                continue;
+            }
+
+            $wait['status'] = 'cancelled';
+            $wait['source_status'] = 'selection_cancelled';
+            $wait['resolved_at'] = $event->recorded_at ?? $event->created_at;
+
+            $signalName = self::stringValue($wait['signal_name'] ?? null);
+            if ($signalName === null || ! isset($openWaitIdsByName[$signalName])) {
+                continue;
+            }
+
+            $index = array_search($waitId, $openWaitIdsByName[$signalName], true);
+            if ($index !== false) {
+                array_splice($openWaitIdsByName[$signalName], $index, 1);
+            }
+        }
+        unset($wait);
     }
 
     /**

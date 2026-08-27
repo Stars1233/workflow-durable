@@ -119,6 +119,10 @@ final class ReplayRegressionCorpusTest extends TestCase
         if (($fixture['id'] ?? null) === 'parallel-child-group-final-sibling-release') {
             $this->assertParallelChildReplayPrefix($fixture, $step);
         }
+
+        if (($fixture['id'] ?? null) === 'durable-selection-recorded-winner') {
+            $this->assertDurableSelectionMarkerAuthority($fixture, $step);
+        }
     }
 
     public function testRawBlobsAndInlineEnvelopesProduceTheSameWorkflowResult(): void
@@ -297,6 +301,34 @@ final class ReplayRegressionCorpusTest extends TestCase
         $this->assertCount(1, $completed->commands);
         $this->assertSame('complete_workflow', $completed->commands[0]['type']);
         $this->assertSame($fixture['expected']['result'], $completed->result);
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     */
+    private function assertDurableSelectionMarkerAuthority(array $fixture, WorkflowStep $completed): void
+    {
+        $workflow = $fixture['workflow'];
+        $historyWithoutMarker = array_values(array_filter(
+            $fixture['history'],
+            static fn (array $event): bool => ($event['event_type'] ?? null) !== 'SelectionResolved',
+        ));
+        $waiting = WorkflowFiberRunner::forClass(
+            $workflow['type'],
+            'regression-corpus-selection-without-marker',
+            'regression-corpus-run-selection-without-marker',
+            $workflow['arguments'],
+            $workflow['payload_codec'],
+            $historyWithoutMarker,
+        )->step();
+
+        $this->assertFalse($waiting->completed);
+        $this->assertSame([], $waiting->commands);
+        $this->assertTrue($completed->completed);
+        $this->assertSame('fast', $completed->result['winner'] ?? null);
+        $this->assertSame('01j00000000000000000000009', $completed->result['winner_identity'] ?? null);
+        $this->assertSame('winner-value', $completed->result['winner_value'] ?? null);
+        $this->assertSame('loser-value', $completed->result['slow'] ?? null);
     }
 
     /**

@@ -17,6 +17,7 @@ use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Contracts\HistoryProjectionRole;
 use Workflow\V2\Contracts\ServiceControlPlane;
+use Workflow\V2\Contracts\WorkflowControlPlane;
 use Workflow\V2\Contracts\WorkflowTaskBridge;
 use Workflow\V2\Enums\ActivityStatus;
 use Workflow\V2\Enums\ChildCallStatus;
@@ -115,6 +116,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
     private const TERMINAL_TYPES = ['complete_workflow', 'fail_workflow', 'continue_as_new'];
 
     private const NON_TERMINAL_TYPES = [
+        'cancel_selection_operation',
         'schedule_activity',
         'start_timer',
         'start_child_workflow',
@@ -930,6 +932,17 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 ];
             }
 
+            if (! $this->selectionCancellationCommandsAreValid($run, $parsed['non_terminal'])) {
+                return [
+                    'completed' => false,
+                    'task_id' => $taskId,
+                    'workflow_run_id' => $run->id,
+                    'run_status' => $run->status->value,
+                    'created_task_ids' => [],
+                    'reason' => 'invalid_commands',
+                ];
+            }
+
             if (! self::parallelCommandsMatchSequences($parsed['non_terminal'], $sequence)) {
                 return [
                     'completed' => false,
@@ -1339,14 +1352,18 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             $this->cancelOpenSignalTimer($run, $task, $sequence, $signalWaitId);
         }
 
-        WorkflowHistoryEvent::record($run, HistoryEventType::SignalApplied, array_filter([
+        $parallelPath = ParallelChildGroup::metadataPathFromPayload($openedPayload);
+        $parallelMetadata = ParallelChildGroup::payloadForPath($parallelPath);
+        $appliedEvent = WorkflowHistoryEvent::record($run, HistoryEventType::SignalApplied, array_filter([
             'workflow_command_id' => $signal->workflow_command_id,
             'signal_id' => $signal->id,
             'signal_name' => $signalName,
             'signal_wait_id' => $signalWaitId,
             'sequence' => $sequence,
             'value' => Serializer::serializeWithCodec($run->payload_codec ?? CodecRegistry::defaultCodec(), $value),
+            ...$parallelMetadata,
         ], static fn (mixed $payloadValue): bool => $payloadValue !== null), $task, $command);
+        ParallelChildGroup::claimSelectionWinner($run, $parallelPath, 'signal', $appliedEvent);
     }
 
     private static function canApplyUnprojectedExternalSignal(WorkflowRun $run, WorkflowSignal $signal): bool
@@ -1522,6 +1539,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         array &$createdTaskIds,
     ): int {
         return match ($command['type']) {
+            'cancel_selection_operation' => $this->applyCancelSelectionOperation($run, $task, $command, $sequence),
             'schedule_activity' => $this->applyScheduleActivity($run, $task, $command, $sequence, $createdTaskIds),
             'start_timer' => $this->applyStartTimer($run, $task, $command, $sequence, $createdTaskIds),
             'start_child_workflow' => $this->applyStartChildWorkflow($run, $task, $command, $sequence, $createdTaskIds),
@@ -1543,6 +1561,301 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'open_signal_wait' => $this->applyOpenSignalWait($run, $task, $command, $sequence, $createdTaskIds),
             default => $sequence,
         };
+    }
+
+    /**
+     * Explicitly cancel one non-winning selection member without consuming a
+     * new workflow operation sequence. The durable cancellation marker makes
+     * retries idempotent and keeps replay independent of transport retries.
+     *
+     * @param array<string, mixed> $command
+     */
+    private function applyCancelSelectionOperation(
+        WorkflowRun $run,
+        WorkflowTask $task,
+        array $command,
+        int $sequence,
+    ): int {
+        $groupId = $command['selection_group_id'];
+        $memberBase = $command['member_base_sequence'];
+
+        $existing = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::SelectionOperationCancelled->value)
+            ->get()
+            ->first(static fn (WorkflowHistoryEvent $event): bool =>
+                ($event->payload['selection_group_id'] ?? null) === $groupId
+                && ($event->payload['member_base_sequence'] ?? null) === $memberBase);
+        if ($existing instanceof WorkflowHistoryEvent) {
+            return $sequence;
+        }
+
+        $winner = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::SelectionResolved->value)
+            ->get()
+            ->first(static fn (WorkflowHistoryEvent $event): bool =>
+                ($event->payload['selection_group_id'] ?? null) === $groupId);
+        if (! $winner instanceof WorkflowHistoryEvent
+            || ($winner->payload['member_base_sequence'] ?? null) === $memberBase) {
+            return $sequence;
+        }
+
+        $member = $this->selectionCancellationMember($run, $command);
+        if ($member === null) {
+            return $sequence;
+        }
+
+        if (ParallelChildGroup::selectionMemberIsTerminal(
+            $run,
+            $memberBase,
+            $command['member_size'],
+            $member['kind'],
+        )) {
+            return $sequence;
+        }
+
+        $cancelled = false;
+        for ($offset = 0; $offset < $command['member_size']; ++$offset) {
+            $cancelled = $this->cancelSelectionLeaf($run, $task, $memberBase + $offset) || $cancelled;
+        }
+        if (! $cancelled) {
+            return $sequence;
+        }
+
+        WorkflowHistoryEvent::record($run, HistoryEventType::SelectionOperationCancelled, [
+            'selection_group_id' => $groupId,
+            'member_key' => $command['member_key'],
+            'member_index' => $command['member_index'],
+            'member_base_sequence' => $memberBase,
+            'member_size' => $command['member_size'],
+            'operation_kind' => $member['kind'],
+            'operation_identity' => $member['identity'],
+            'cancelled_at' => now()
+                ->toJSON(),
+        ], $task);
+
+        return $sequence;
+    }
+
+    /**
+     * @param list<array{type: string, ...}> $commands
+     */
+    private function selectionCancellationCommandsAreValid(WorkflowRun $run, array $commands): bool
+    {
+        foreach ($commands as $command) {
+            if (($command['type'] ?? null) !== 'cancel_selection_operation') {
+                continue;
+            }
+
+            $member = $this->selectionCancellationMember($run, $command);
+            if ($member === null
+                || $command['operation_kind'] !== $member['kind']
+                || $command['operation_identity'] !== $member['identity']) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Derive cancellation authority from the durable member-opening history.
+     * Worker-provided kind and identity are assertions, never authority.
+     *
+     * @param array<string, mixed> $command
+     * @return array{kind: string, identity: string}|null
+     */
+    private function selectionCancellationMember(WorkflowRun $run, array $command): ?array
+    {
+        /** @var array<int, array{kind: string, identity: string, priority: int}> $openings */
+        $openings = [];
+        $nested = false;
+        $memberBase = $command['member_base_sequence'];
+        $memberSize = $command['member_size'];
+
+        $events = ConfiguredV2Models::query('history_event_model', WorkflowHistoryEvent::class)
+            ->where('workflow_run_id', $run->id)
+            ->orderBy('sequence')
+            ->get();
+
+        foreach ($events as $event) {
+            if (! $event instanceof WorkflowHistoryEvent) {
+                continue;
+            }
+
+            $path = $event->payload['parallel_group_path'] ?? null;
+            if (! is_array($path)) {
+                continue;
+            }
+
+            $selectionDepth = null;
+            foreach ($path as $depth => $entry) {
+                if (is_array($entry) && self::selectionEntryMatchesCommand($entry, $command)) {
+                    $selectionDepth = $depth;
+                    break;
+                }
+            }
+            if (! is_int($selectionDepth)) {
+                continue;
+            }
+
+            $eventSequence = $event->payload['sequence'] ?? null;
+            if (! is_int($eventSequence)
+                || $eventSequence < $memberBase
+                || $eventSequence >= $memberBase + $memberSize) {
+                continue;
+            }
+
+            $opening = self::selectionOpeningIdentity($event);
+            if ($opening === null) {
+                continue;
+            }
+
+            if (! isset($openings[$eventSequence])
+                || $opening['priority'] > $openings[$eventSequence]['priority']) {
+                $openings[$eventSequence] = $opening;
+            }
+            $nested = $nested || count($path) > $selectionDepth + 1;
+        }
+
+        if (count($openings) !== $memberSize) {
+            return null;
+        }
+
+        if ($nested || $memberSize > 1) {
+            return [
+                'kind' => 'group',
+                'identity' => sprintf('group:%d:%d', $memberBase, $memberSize),
+            ];
+        }
+
+        $opening = $openings[$memberBase] ?? null;
+
+        return $opening === null ? null : [
+            'kind' => $opening['kind'],
+            'identity' => $opening['identity'],
+        ];
+    }
+
+    /** @param array<string, mixed> $entry
+     *  @param array<string, mixed> $command
+     */
+    private static function selectionEntryMatchesCommand(array $entry, array $command): bool
+    {
+        return ($entry['parallel_group_mode'] ?? 'all') === 'select'
+            && ($entry['parallel_group_id'] ?? null) === $command['selection_group_id']
+            && ($entry['selection_member_key'] ?? null) === $command['member_key']
+            && ($entry['selection_member_index'] ?? null) === $command['member_index']
+            && ($entry['selection_member_base_sequence'] ?? null) === $command['member_base_sequence']
+            && ($entry['selection_member_size'] ?? null) === $command['member_size'];
+    }
+
+    /**
+     * @return array{kind: string, identity: string, priority: int}|null
+     */
+    private static function selectionOpeningIdentity(WorkflowHistoryEvent $event): ?array
+    {
+        $descriptor = match ($event->event_type) {
+            HistoryEventType::ActivityScheduled => ['activity', 'activity_execution_id', 10],
+            HistoryEventType::ChildWorkflowScheduled => ['child', 'child_workflow_run_id', 10],
+            HistoryEventType::TimerScheduled => ['timer', 'timer_id', 1],
+            HistoryEventType::SignalWaitOpened => ['signal', 'signal_wait_id', 20],
+            HistoryEventType::ConditionWaitOpened => ['condition', 'condition_wait_id', 20],
+            default => null,
+        };
+        if ($descriptor === null) {
+            return null;
+        }
+
+        [$kind, $field, $priority] = $descriptor;
+        $identity = self::nonEmptyString($event->payload[$field] ?? null);
+
+        return $identity === null ? null : [
+            'kind' => $kind,
+            'identity' => $identity,
+            'priority' => $priority,
+        ];
+    }
+
+    private function cancelSelectionLeaf(WorkflowRun $run, WorkflowTask $task, int $sequence): bool
+    {
+        /** @var ActivityExecution|null $execution */
+        $execution = ActivityExecution::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('sequence', $sequence)
+            ->first();
+        if ($execution instanceof ActivityExecution && in_array($execution->status, [
+            ActivityStatus::Pending,
+            ActivityStatus::Running,
+        ], true)) {
+            /** @var WorkflowTask|null $activityTask */
+            $activityTask = WorkflowTask::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('task_type', TaskType::Activity->value)
+                ->whereIn('status', [TaskStatus::Ready->value, TaskStatus::Leased->value])
+                ->get()
+                ->first(static fn (WorkflowTask $candidate): bool =>
+                    ($candidate->payload['activity_execution_id'] ?? null) === $execution->id);
+            ActivityCancellation::record($run, $execution, $activityTask);
+
+            return true;
+        }
+
+        /** @var WorkflowTimer|null $timer */
+        $timer = WorkflowTimer::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('sequence', $sequence)
+            ->where('status', TimerStatus::Pending->value)
+            ->first();
+        if ($timer instanceof WorkflowTimer) {
+            $timer->forceFill([
+                'status' => TimerStatus::Cancelled,
+            ])->save();
+            TimerCancellation::record($run, $timer, $task);
+            WorkflowTask::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('task_type', TaskType::Timer->value)
+                ->whereIn('status', [TaskStatus::Ready->value, TaskStatus::Leased->value])
+                ->get()
+                ->filter(static fn (WorkflowTask $candidate): bool =>
+                    ($candidate->payload['timer_id'] ?? null) === $timer->id)
+                ->each(static fn (WorkflowTask $candidate) => $candidate->forceFill([
+                    'status' => TaskStatus::Cancelled,
+                    'lease_expires_at' => null,
+                ])->save());
+
+            return true;
+        }
+
+        $childRun = ChildRunHistory::childRunForSequence($run, $sequence);
+        if ($childRun instanceof WorkflowRun && in_array($childRun->status, [
+            RunStatus::Pending,
+            RunStatus::Running,
+            RunStatus::Waiting,
+        ], true)) {
+            $result = app(WorkflowControlPlane::class)->cancel($childRun->workflow_instance_id, [
+                'reason' => 'Cancelled by durable selection handle.',
+            ]);
+
+            return ($result['accepted'] ?? false) === true;
+        }
+
+        $run->unsetRelation('historyEvents');
+        foreach (SignalWaits::forRun($run) as $wait) {
+            if (($wait['sequence'] ?? null) === $sequence && ($wait['status'] ?? null) === 'open') {
+                return true;
+            }
+        }
+
+        $run->unsetRelation('historyEvents');
+        foreach (ConditionWaits::forRun($run) as $wait) {
+            if (($wait['sequence'] ?? null) === $sequence && ($wait['status'] ?? null) === 'open') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -1617,7 +1930,18 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
 
         $this->markConditionWaitSignalConsumed($run, $task, $wait);
 
-        WorkflowHistoryEvent::record($run, HistoryEventType::ConditionWaitSatisfied, array_filter([
+        /** @var WorkflowHistoryEvent|null $opened */
+        $opened = ConfiguredV2Models::query('history_event_model', WorkflowHistoryEvent::class)
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::ConditionWaitOpened->value)
+            ->get()
+            ->first(static fn (WorkflowHistoryEvent $event): bool =>
+                ($event->payload['condition_wait_id'] ?? null) === $wait['condition_wait_id']);
+        $parallelPath = ParallelChildGroup::metadataPathFromPayload(
+            $opened instanceof WorkflowHistoryEvent && is_array($opened->payload) ? $opened->payload : [],
+        );
+        $parallelMetadata = ParallelChildGroup::payloadForPath($parallelPath);
+        $satisfiedEvent = WorkflowHistoryEvent::record($run, HistoryEventType::ConditionWaitSatisfied, array_filter([
             'condition_wait_id' => $wait['condition_wait_id'],
             'condition_wait_occurrence_id' => $wait['condition_wait_occurrence_id'],
             'condition_key' => $wait['condition_key'],
@@ -1628,7 +1952,9 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'workflow_signal_id' => self::nonEmptyString($taskPayload['workflow_signal_id'] ?? null),
             'signal_name' => self::nonEmptyString($taskPayload['signal_name'] ?? null),
             'signal_wait_id' => self::nonEmptyString($taskPayload['signal_wait_id'] ?? null),
+            ...$parallelMetadata,
         ], static fn (mixed $value): bool => $value !== null), $task);
+        ParallelChildGroup::claimSelectionWinner($run, $parallelPath, 'condition', $satisfiedEvent);
 
         $this->cancelOpenConditionTimer($run, $task, $wait);
     }
@@ -2594,6 +2920,8 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         $timeoutSeconds = is_int($command['timeout_seconds'] ?? null) && $command['timeout_seconds'] >= 0
             ? (int) $command['timeout_seconds']
             : null;
+        $parallelMetadata = self::parallelMetadataForCommand($command);
+        $parallelPath = ParallelChildGroup::metadataPathFromPayload($parallelMetadata);
 
         $waitId = (string) Str::ulid();
 
@@ -2604,7 +2932,36 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'condition_definition_fingerprint' => $conditionDefinitionFingerprint,
             'sequence' => $sequence,
             'timeout_seconds' => $timeoutSeconds,
+            ...$parallelMetadata,
         ], static fn (mixed $value): bool => $value !== null), $task);
+
+        if ($timeoutSeconds === 0) {
+            $firedEvent = $this->fireImmediateConditionTimeout(
+                $run,
+                $task,
+                $sequence,
+                $waitId,
+                $conditionWaitOccurrenceId,
+                $conditionKey,
+                $conditionDefinitionFingerprint,
+                $parallelMetadata,
+            );
+            ParallelChildGroup::claimSelectionWinner($run, $parallelPath, 'condition', $firedEvent);
+
+            /** @var WorkflowTask $resumeTask */
+            $resumeTask = WorkflowTask::query()->create([
+                'workflow_run_id' => $run->id,
+                'namespace' => $run->namespace,
+                'task_type' => TaskType::Workflow->value,
+                'status' => TaskStatus::Ready->value,
+                'available_at' => now(),
+                'payload' => WorkflowTaskPayload::forTimerResolution($firedEvent),
+                'connection' => $run->connection,
+                'queue' => $run->queue,
+                'compatibility' => $run->compatibility,
+            ]);
+            $createdTaskIds[] = $resumeTask->id;
+        }
 
         if ($timeoutSeconds !== null && $timeoutSeconds > 0) {
             $fireAt = now()
@@ -2629,6 +2986,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 'condition_wait_occurrence_id' => $conditionWaitOccurrenceId,
                 'condition_key' => $conditionKey,
                 'condition_definition_fingerprint' => $conditionDefinitionFingerprint,
+                ...$parallelMetadata,
             ], static fn (mixed $value): bool => $value !== null), $task);
 
             /** @var WorkflowTask $timerTask */
@@ -2644,6 +3002,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                     'condition_wait_occurrence_id' => $conditionWaitOccurrenceId,
                     'condition_key' => $conditionKey,
                     'condition_definition_fingerprint' => $conditionDefinitionFingerprint,
+                    ...$parallelMetadata,
                 ], static fn (mixed $value): bool => $value !== null),
                 'connection' => $run->connection,
                 'queue' => $run->queue,
@@ -2675,6 +3034,8 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         $timeoutSeconds = is_int($command['timeout_seconds'] ?? null) && $command['timeout_seconds'] >= 0
             ? (int) $command['timeout_seconds']
             : null;
+        $parallelMetadata = self::parallelMetadataForCommand($command);
+        $parallelPath = ParallelChildGroup::metadataPathFromPayload($parallelMetadata);
         $pendingSignalWaitId = $this->pendingSignalWaitIdForOpenSignalWait($run, $signalName);
         $waitId = $pendingSignalWaitId ?? (string) Str::ulid();
 
@@ -2683,10 +3044,19 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'signal_wait_id' => $waitId,
             'sequence' => $sequence,
             'timeout_seconds' => $timeoutSeconds,
+            ...$parallelMetadata,
         ], static fn (mixed $value): bool => $value !== null), $task);
 
         if ($timeoutSeconds === 0 && $pendingSignalWaitId === null) {
-            $firedEvent = $this->fireImmediateSignalTimeout($run, $task, $sequence, $waitId, $signalName);
+            $firedEvent = $this->fireImmediateSignalTimeout(
+                $run,
+                $task,
+                $sequence,
+                $waitId,
+                $signalName,
+                $parallelMetadata,
+            );
+            ParallelChildGroup::claimSelectionWinner($run, $parallelPath, 'signal', $firedEvent);
 
             /** @var WorkflowTask $resumeTask */
             $resumeTask = WorkflowTask::query()->create([
@@ -2723,6 +3093,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 'timer_kind' => 'signal_timeout',
                 'signal_wait_id' => $waitId,
                 'signal_name' => $signalName,
+                ...$parallelMetadata,
             ], $task);
 
             /** @var WorkflowTask $timerTask */
@@ -2736,6 +3107,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                     'timer_id' => $timer->id,
                     'signal_wait_id' => $waitId,
                     'signal_name' => $signalName,
+                    ...$parallelMetadata,
                 ],
                 'connection' => $run->connection,
                 'queue' => $run->queue,
@@ -2754,6 +3126,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         int $sequence,
         string $waitId,
         string $signalName,
+        array $parallelMetadata = [],
     ): WorkflowHistoryEvent {
         $recordedAt = now();
 
@@ -2775,6 +3148,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'timer_kind' => 'signal_timeout',
             'signal_wait_id' => $waitId,
             'signal_name' => $signalName,
+            ...$parallelMetadata,
         ], $task);
 
         return WorkflowHistoryEvent::record($run, HistoryEventType::TimerFired, [
@@ -2785,6 +3159,53 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'timer_kind' => 'signal_timeout',
             'signal_wait_id' => $waitId,
             'signal_name' => $signalName,
+            ...$parallelMetadata,
+        ], $task);
+    }
+
+    /**
+     * @param array<string, mixed> $parallelMetadata
+     */
+    private function fireImmediateConditionTimeout(
+        WorkflowRun $run,
+        WorkflowTask $task,
+        int $sequence,
+        string $waitId,
+        ?string $occurrenceId,
+        ?string $conditionKey,
+        ?string $definitionFingerprint,
+        array $parallelMetadata = [],
+    ): WorkflowHistoryEvent {
+        $recordedAt = now();
+        /** @var WorkflowTimer $timer */
+        $timer = WorkflowTimer::query()->create([
+            'workflow_run_id' => $run->id,
+            'sequence' => $sequence,
+            'status' => TimerStatus::Fired->value,
+            'delay_seconds' => 0,
+            'fire_at' => $recordedAt,
+            'fired_at' => $recordedAt,
+        ]);
+        $payload = array_filter([
+            'timer_id' => $timer->id,
+            'sequence' => $sequence,
+            'delay_seconds' => 0,
+            'timer_kind' => 'condition_timeout',
+            'condition_wait_id' => $waitId,
+            'condition_wait_occurrence_id' => $occurrenceId,
+            'condition_key' => $conditionKey,
+            'condition_definition_fingerprint' => $definitionFingerprint,
+            ...$parallelMetadata,
+        ], static fn (mixed $value): bool => $value !== null);
+
+        WorkflowHistoryEvent::record($run, HistoryEventType::TimerScheduled, [
+            ...$payload,
+            'fire_at' => $recordedAt->toJSON(),
+        ], $task);
+
+        return WorkflowHistoryEvent::record($run, HistoryEventType::TimerFired, [
+            ...$payload,
+            'fired_at' => $recordedAt->toJSON(),
         ], $task);
     }
 
@@ -4184,6 +4605,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         }
 
         return match ($type) {
+            'cancel_selection_operation' => self::normalizeCancelSelectionOperationCommand($command),
             'complete_workflow' => self::normalizeCompleteWorkflowCommand($command),
             'fail_workflow' => self::normalizeFailWorkflowCommand($command),
             'schedule_activity' => self::normalizeScheduleActivityCommand($command),
@@ -4206,6 +4628,44 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
 
     /**
      * @param array<string, mixed> $command
+     */
+    private static function normalizeCancelSelectionOperationCommand(array $command): ?array
+    {
+        $groupId = self::normalizeOptionalString($command['selection_group_id'] ?? null);
+        $memberKey = $command['member_key'] ?? null;
+        $memberIndex = $command['member_index'] ?? null;
+        $memberBase = $command['member_base_sequence'] ?? null;
+        $memberSize = $command['member_size'] ?? null;
+        $operationKind = self::normalizeOptionalString($command['operation_kind'] ?? null);
+        $operationIdentity = self::normalizeOptionalString($command['operation_identity'] ?? null);
+        if ($groupId === null || ! preg_match('/^select-calls:[1-9][0-9]*:[1-9][0-9]*$/', $groupId)
+            || ! self::validSelectionKey($memberKey)
+            || ! is_int($memberIndex) || $memberIndex < 0
+            || ! is_int($memberBase) || $memberBase < 1
+            || ! is_int($memberSize) || $memberSize < 1
+            || $operationKind === null || ! in_array(
+                $operationKind,
+                ['activity', 'child', 'timer', 'signal', 'condition', 'group'],
+                true,
+            )
+            || $operationIdentity === null) {
+            return null;
+        }
+
+        return [
+            'type' => 'cancel_selection_operation',
+            'selection_group_id' => $groupId,
+            'member_key' => $memberKey,
+            'member_index' => $memberIndex,
+            'member_base_sequence' => $memberBase,
+            'member_size' => $memberSize,
+            'operation_kind' => $operationKind,
+            'operation_identity' => $operationIdentity,
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $command
      * @return array{
      *     type: string,
      *     condition_key?: string,
@@ -4220,6 +4680,11 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             return null;
         }
 
+        $parallelMetadata = self::normalizeParallelCommandMetadata($command, 'condition');
+        if ($parallelMetadata === null) {
+            return null;
+        }
+
         return array_filter([
             'type' => 'open_condition_wait',
             'condition_key' => self::normalizeOptionalString($command['condition_key'] ?? null),
@@ -4230,6 +4695,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 $command['condition_wait_occurrence_id'] ?? null,
             ),
             'timeout_seconds' => self::normalizeWaitTimeoutSeconds($command),
+            ...$parallelMetadata,
         ], static fn (mixed $value): bool => $value !== null);
     }
 
@@ -4253,10 +4719,16 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             return null;
         }
 
+        $parallelMetadata = self::normalizeParallelCommandMetadata($command, 'signal');
+        if ($parallelMetadata === null) {
+            return null;
+        }
+
         return array_filter([
             'type' => 'open_signal_wait',
             'signal_name' => $signalName,
             'timeout_seconds' => self::normalizeWaitTimeoutSeconds($command),
+            ...$parallelMetadata,
         ], static fn (mixed $value): bool => $value !== null);
     }
 
@@ -4561,9 +5033,15 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         $fields = [
             'parallel_group_id',
             'parallel_group_kind',
+            'parallel_group_mode',
             'parallel_group_base_sequence',
             'parallel_group_size',
             'parallel_group_index',
+            'selection_member_key',
+            'selection_member_index',
+            'selection_member_base_sequence',
+            'selection_member_size',
+            'selection_member_kind',
         ];
         $present = array_key_exists('parallel_group_path', $command);
         foreach ($fields as $field) {
@@ -4611,16 +5089,18 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         $base = $value['parallel_group_base_sequence'] ?? null;
         $size = $value['parallel_group_size'] ?? null;
         $index = $value['parallel_group_index'] ?? null;
+        $mode = $value['parallel_group_mode'] ?? 'all';
         $limit = StructuralLimits::commandBatchSizeLimit();
         if (! is_string($id) || $id === ''
             || ! is_string($kind) || ! in_array($kind, [$leafKind, 'mixed'], true)
             || ! is_int($base) || $base < 1
             || ! is_int($size) || $size < 1 || ($limit > 0 && $size > $limit)
-            || ! is_int($index) || $index < 0 || $index >= $size) {
+            || ! is_int($index) || $index < 0 || $index >= $size
+            || ! is_string($mode) || ! in_array($mode, ['all', 'select'], true)) {
             return null;
         }
 
-        $prefix = match ($kind) {
+        $prefix = $mode === 'select' ? 'select-calls' : match ($kind) {
             'activity' => 'parallel-activities',
             'child' => 'parallel-children',
             'timer' => 'parallel-timers',
@@ -4630,13 +5110,40 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             return null;
         }
 
-        return [
+        $memberKey = $value['selection_member_key'] ?? null;
+        $memberIndex = $value['selection_member_index'] ?? null;
+        $memberBase = $value['selection_member_base_sequence'] ?? null;
+        $memberSize = $value['selection_member_size'] ?? null;
+        $memberKind = $value['selection_member_kind'] ?? null;
+        if ($mode === 'select' && (
+            ! self::validSelectionKey($memberKey)
+            || ! is_int($memberIndex) || $memberIndex < 0
+            || ! is_int($memberBase) || $memberBase < $base || $memberBase >= $base + $size
+            || ! is_int($memberSize) || $memberSize < 1 || $memberBase + $memberSize > $base + $size
+            || ! is_string($memberKind)
+            || ! in_array($memberKind, ['activity', 'child', 'timer', 'signal', 'condition', 'group'], true)
+        )) {
+            return null;
+        }
+
+        return array_filter([
             'parallel_group_id' => $id,
             'parallel_group_kind' => $kind,
+            'parallel_group_mode' => $mode === 'select' ? $mode : null,
             'parallel_group_base_sequence' => $base,
             'parallel_group_size' => $size,
             'parallel_group_index' => $index,
-        ];
+            'selection_member_key' => $mode === 'select' ? $memberKey : null,
+            'selection_member_index' => $mode === 'select' ? $memberIndex : null,
+            'selection_member_base_sequence' => $mode === 'select' ? $memberBase : null,
+            'selection_member_size' => $mode === 'select' ? $memberSize : null,
+            'selection_member_kind' => $mode === 'select' ? $memberKind : null,
+        ], static fn (mixed $item): bool => $item !== null);
+    }
+
+    private static function validSelectionKey(mixed $value): bool
+    {
+        return (is_string($value) && $value !== '') || (is_int($value) && $value >= 0);
     }
 
     /** @param array<string, mixed> $command
@@ -4657,6 +5164,9 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         $commandsBySequence = [];
         $sequence = $baseSequence;
         foreach ($commands as $command) {
+            if (($command['type'] ?? null) === 'cancel_selection_operation') {
+                continue;
+            }
             $commandsBySequence[$sequence] = $command;
             $path = $command['parallel_group_path'] ?? null;
             if (is_array($path)) {
@@ -4685,12 +5195,41 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 if (! is_int($groupBase) || ! is_int($groupSize)) {
                     return false;
                 }
+
+                $memberBase = $entry['selection_member_base_sequence'] ?? null;
+                $memberSize = $entry['selection_member_size'] ?? null;
+                if (($entry['parallel_group_mode'] ?? 'all') === 'select') {
+                    if (! is_int($memberBase) || ! is_int($memberSize)) {
+                        return false;
+                    }
+
+                    $commandSequence = $groupBase + (int) ($entry['parallel_group_index'] ?? -1);
+                    if ($commandSequence < $memberBase || $commandSequence >= $memberBase + $memberSize) {
+                        return false;
+                    }
+
+                    for ($memberOffset = 0; $memberOffset < $memberSize; ++$memberOffset) {
+                        $memberPath = $commandsBySequence[$memberBase + $memberOffset]['parallel_group_path'] ?? null;
+                        $selectionMember = is_array($memberPath) ? ($memberPath[$depth] ?? null) : null;
+                        if (! is_array($selectionMember)
+                            || ($selectionMember['selection_member_key'] ?? null)
+                                !== ($entry['selection_member_key'] ?? null)
+                            || ($selectionMember['selection_member_index'] ?? null)
+                                !== ($entry['selection_member_index'] ?? null)
+                            || ($selectionMember['selection_member_base_sequence'] ?? null) !== $memberBase
+                            || ($selectionMember['selection_member_size'] ?? null) !== $memberSize) {
+                            return false;
+                        }
+                    }
+                }
+
                 for ($index = 0; $index < $groupSize; ++$index) {
                     $memberPath = $commandsBySequence[$groupBase + $index]['parallel_group_path'] ?? null;
                     $member = is_array($memberPath) ? ($memberPath[$depth] ?? null) : null;
                     if (! is_array($member)
                         || ($member['parallel_group_id'] ?? null) !== ($entry['parallel_group_id'] ?? null)
                         || ($member['parallel_group_kind'] ?? null) !== ($entry['parallel_group_kind'] ?? null)
+                        || ($member['parallel_group_mode'] ?? 'all') !== ($entry['parallel_group_mode'] ?? 'all')
                         || ($member['parallel_group_base_sequence'] ?? null) !== $groupBase
                         || ($member['parallel_group_size'] ?? null) !== $groupSize
                         || ($member['parallel_group_index'] ?? null) !== $index) {

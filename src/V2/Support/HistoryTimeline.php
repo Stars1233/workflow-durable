@@ -251,6 +251,8 @@ final class HistoryTimeline
             HistoryEventType::FailureHandled => 'failure',
             HistoryEventType::SideEffectRecorded => 'side_effect',
             HistoryEventType::VersionMarkerRecorded => 'version',
+            HistoryEventType::SelectionResolved => 'selection',
+            HistoryEventType::SelectionOperationCancelled => 'selection',
             HistoryEventType::TimerScheduled,
             HistoryEventType::TimerFired,
             HistoryEventType::TimerCancelled => 'timer',
@@ -291,6 +293,18 @@ final class HistoryTimeline
             HistoryEventType::WorkflowContinuedAsNew => sprintf(
                 'Continued as new on run %s.',
                 self::stringValue($payload['continued_to_run_id'] ?? null) ?? 'unknown'
+            ),
+            HistoryEventType::SelectionResolved => sprintf(
+                'Selected %s member %s.',
+                self::stringValue($payload['operation_kind'] ?? null) ?? 'durable operation',
+                self::stringValue($payload['member_key'] ?? null)
+                    ?? (string) (self::intValue($payload['member_index'] ?? null) ?? 0),
+            ),
+            HistoryEventType::SelectionOperationCancelled => sprintf(
+                'Cancelled selected-group %s member %s.',
+                self::stringValue($payload['operation_kind'] ?? null) ?? 'durable operation',
+                self::stringValue($payload['member_key'] ?? null)
+                    ?? (string) (self::intValue($payload['member_index'] ?? null) ?? 0),
             ),
             HistoryEventType::ChildWorkflowScheduled => sprintf('Scheduled child workflow %s.', $childLabel),
             HistoryEventType::ChildRunStarted => sprintf('Child workflow %s started.', $childLabel),

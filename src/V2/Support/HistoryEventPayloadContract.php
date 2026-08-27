@@ -10,6 +10,18 @@ use Workflow\V2\Enums\HistoryEventType;
 final class HistoryEventPayloadContract
 {
     /**
+     * @var list<string>
+     */
+    private const SELECTION_GROUP_KEYS = [
+        'parallel_group_mode',
+        'selection_member_key',
+        'selection_member_index',
+        'selection_member_base_sequence',
+        'selection_member_size',
+        'selection_member_kind',
+    ];
+
+    /**
      * @var array<string, list<string>>
      */
     private const PAYLOAD_KEYS = [
@@ -298,6 +310,30 @@ final class HistoryEventPayloadContract
             'signal_wait_id',
             'signal_name',
         ],
+        'SelectionResolved' => [
+            'selection_group_id',
+            'selection_group_base_sequence',
+            'selection_group_size',
+            'member_key',
+            'member_index',
+            'member_base_sequence',
+            'member_size',
+            'operation_kind',
+            'operation_identity',
+            'outcome',
+            'resolution_event_id',
+            'resolution_event_type',
+        ],
+        'SelectionOperationCancelled' => [
+            'selection_group_id',
+            'member_key',
+            'member_index',
+            'member_base_sequence',
+            'member_size',
+            'operation_kind',
+            'operation_identity',
+            'cancelled_at',
+        ],
         'TimerCancelled' => [
             'timer_id',
             'sequence',
@@ -328,8 +364,32 @@ final class HistoryEventPayloadContract
             'arguments',
             'payload_codec',
         ],
-        'SignalApplied' => ['workflow_command_id', 'signal_id', 'signal_name', 'signal_wait_id', 'sequence', 'value'],
-        'SignalWaitOpened' => ['signal_name', 'signal_wait_id', 'sequence', 'timeout_seconds'],
+        'SignalApplied' => [
+            'workflow_command_id',
+            'signal_id',
+            'signal_name',
+            'signal_wait_id',
+            'sequence',
+            'value',
+            'parallel_group_id',
+            'parallel_group_kind',
+            'parallel_group_base_sequence',
+            'parallel_group_size',
+            'parallel_group_index',
+            'parallel_group_path',
+        ],
+        'SignalWaitOpened' => [
+            'signal_name',
+            'signal_wait_id',
+            'sequence',
+            'timeout_seconds',
+            'parallel_group_id',
+            'parallel_group_kind',
+            'parallel_group_base_sequence',
+            'parallel_group_size',
+            'parallel_group_index',
+            'parallel_group_path',
+        ],
         'UpdateAccepted' => [
             'workflow_command_id',
             'update_id',
@@ -385,6 +445,12 @@ final class HistoryEventPayloadContract
             'condition_definition_fingerprint',
             'sequence',
             'timeout_seconds',
+            'parallel_group_id',
+            'parallel_group_kind',
+            'parallel_group_base_sequence',
+            'parallel_group_size',
+            'parallel_group_index',
+            'parallel_group_path',
         ],
         'ConditionWaitSatisfied' => [
             'condition_wait_id',
@@ -397,6 +463,12 @@ final class HistoryEventPayloadContract
             'workflow_signal_id',
             'signal_name',
             'signal_wait_id',
+            'parallel_group_id',
+            'parallel_group_kind',
+            'parallel_group_base_sequence',
+            'parallel_group_size',
+            'parallel_group_index',
+            'parallel_group_path',
         ],
         'ConditionWaitTimedOut' => [
             'condition_wait_id',
@@ -406,6 +478,12 @@ final class HistoryEventPayloadContract
             'sequence',
             'timer_id',
             'timeout_seconds',
+            'parallel_group_id',
+            'parallel_group_kind',
+            'parallel_group_base_sequence',
+            'parallel_group_size',
+            'parallel_group_index',
+            'parallel_group_path',
         ],
         'SideEffectRecorded' => ['sequence', 'result'],
         'VersionMarkerRecorded' => ['sequence', 'change_id', 'version', 'min_supported', 'max_supported'],
@@ -797,7 +875,16 @@ final class HistoryEventPayloadContract
      */
     public static function payloadKeys(): array
     {
-        return self::PAYLOAD_KEYS;
+        $keys = self::PAYLOAD_KEYS;
+
+        foreach ($keys as &$eventKeys) {
+            if (in_array('parallel_group_path', $eventKeys, true)) {
+                $eventKeys = array_values(array_unique([...$eventKeys, ...self::SELECTION_GROUP_KEYS]));
+            }
+        }
+        unset($eventKeys);
+
+        return $keys;
     }
 
     /**
@@ -805,7 +892,7 @@ final class HistoryEventPayloadContract
      */
     public static function assertKnownPayloadKeys(HistoryEventType $eventType, array $payload): void
     {
-        $allowed = self::PAYLOAD_KEYS[$eventType->value] ?? null;
+        $allowed = self::payloadKeys()[$eventType->value] ?? null;
 
         if ($allowed === null) {
             throw new InvalidArgumentException(sprintf(
