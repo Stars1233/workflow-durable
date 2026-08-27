@@ -3,6 +3,7 @@
   "unknown_feature_weight_seconds": 30,
   "unit_contracts": [
     "tests/Unit/Serializers/ExternalStorageEnvelopeTest.php",
+    "tests/Unit/Traits/ResolvesMethodDependenciesTest.php",
     "tests/Unit/V2/CompiledWorkflowDefinitionTest.php",
     "tests/Unit/V2/ExternalPayloadStorageTest.php",
     "tests/Unit/V2/PlatformProtocolSpecsTest.php",

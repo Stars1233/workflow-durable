@@ -408,11 +408,18 @@ final class GreetingActivity extends Activity
     {
     }
 
-    public function handle(string $name): string
+    public function handle(GreetingService $methodGreetings, string $name): string
     {
         Log::info('embedded-upgrade-v2-activity', ['name' => $name]);
 
-        return $this->greetings->greet($name);
+        $constructorGreeting = $this->greetings->greet($name);
+        $methodGreeting = $methodGreetings->greet($name);
+
+        if ($constructorGreeting !== $methodGreeting) {
+            throw new \RuntimeException('Constructor and method dependency resolution diverged.');
+        }
+
+        return $methodGreeting;
     }
 }
 PHP
@@ -438,9 +445,15 @@ final class GreetingWorkflow extends Workflow
     {
     }
 
-    public function handle(string $name): array
+    public function handle(GreetingService $methodGreetings, string $name): array
     {
-        $workflowGreeting = $this->greetings->greet($name);
+        $constructorGreeting = $this->greetings->greet($name);
+        $workflowGreeting = $methodGreetings->greet($name);
+
+        if ($constructorGreeting !== $workflowGreeting) {
+            throw new \RuntimeException('Constructor and method dependency resolution diverged.');
+        }
+
         $activityGreeting = activity(GreetingActivity::class, $name);
         $confirmation = signal('finish');
 

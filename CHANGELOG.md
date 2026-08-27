@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.48` owns method-dependency resolution across supported
+  Laravel versions, including contextual attributes, enum defaults, supplied
+  class parameters, and `self` and `parent` parameter types. The v2 unit suite
+  now publishes a machine-readable, branch-bound coverage summary and enforces
+  a non-decreasing baseline against the complete production source inventory.
 - Workflow `2.0.0-rc.47` defines the host-facing workflow control plane around
   ordinary workflow operations. Protocol 1.18 adds authoritative local-activity
   command normalization and atomic attempt, heartbeat, retry, failure, timeout,

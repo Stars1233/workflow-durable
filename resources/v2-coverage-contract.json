@@ -1,0 +1,21 @@
+{
+    "schema_version": 1,
+    "branch": "v2",
+    "measurement": {
+        "metric": "line",
+        "test_suite": "unit",
+        "source": {
+            "root": "src",
+            "suffix": ".php",
+            "excluded_paths": []
+        }
+    },
+    "ratchet": {
+        "accepted_baseline_basis_points": 5300,
+        "target_basis_points": 10000
+    },
+    "provenance": {
+        "observed_at": "2026-08-24",
+        "evidence": "The branch-qualified v2 coverage result reported 53 percent."
+    }
+}
