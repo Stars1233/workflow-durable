@@ -29,4 +29,34 @@ final class ParallelFailureSelectorTest extends NonDatabaseTestCase
         $this->assertSame('first', $selected['exception']->getMessage());
         $this->assertSame(100, $selected['recorded_at']);
     }
+
+    public function testItCarriesFailureMetadataAndKeepsTheEarlierSelection(): void
+    {
+        $selected = ParallelFailureSelector::select(
+            null,
+            0,
+            new RuntimeException('first'),
+            100,
+            'failure-1',
+            [
+                'type' => 'activity_failed',
+            ],
+        );
+        $unchanged = ParallelFailureSelector::select(
+            $selected,
+            1,
+            new RuntimeException('later'),
+            200,
+            'failure-2',
+            [
+                'type' => 'timer_failed',
+            ],
+        );
+
+        $this->assertSame('failure-1', $selected['failure_id']);
+        $this->assertSame([
+            'type' => 'activity_failed',
+        ], $selected['failure_payload']);
+        $this->assertSame($selected, $unchanged);
+    }
 }

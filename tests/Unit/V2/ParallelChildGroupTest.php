@@ -148,6 +148,41 @@ final class ParallelChildGroupTest extends TestCase
         ParallelChildGroup::cancellationForHandle($run, $mismatchedHandle);
     }
 
+    public function testMalformedMetadataPathsAreIgnoredOrFallBackToValidRootMetadata(): void
+    {
+        $root = ParallelChildGroup::groupEntry(7, 2, 1, 'timer');
+
+        $this->assertSame([], ParallelChildGroup::payloadForPath(['malformed', $root]));
+        $this->assertSame([$root], ParallelChildGroup::metadataPathFromPayload([
+            ...$root,
+            'parallel_group_path' => [
+                'malformed',
+                [
+                    'parallel_group_id' => 'unknown:7:2',
+                    'parallel_group_base_sequence' => 7,
+                    'parallel_group_size' => 2,
+                    'parallel_group_index' => 1,
+                ],
+                [
+                    'parallel_group_id' => 'parallel-timers:7:0',
+                    'parallel_group_base_sequence' => 7,
+                    'parallel_group_size' => 0,
+                    'parallel_group_index' => 1,
+                ],
+            ],
+        ]));
+        $this->assertSame([], ParallelChildGroup::metadataPathFromPayload([
+            'parallel_group_path' => 'malformed',
+        ]));
+        $this->assertNull(ParallelChildGroup::metadataFromPayload([
+            'parallel_group_id' => 'select-calls:7:2',
+            'parallel_group_base_sequence' => 7,
+            'parallel_group_size' => 2,
+            'parallel_group_index' => 1,
+            'selection_member_key' => -1,
+        ]));
+    }
+
     public function testRecordedSelectionResolutionsBindEveryDurableMemberKindToItsTerminalEvent(): void
     {
         $cases = [
@@ -316,6 +351,75 @@ final class ParallelChildGroupTest extends TestCase
             } catch (HistoryEventShapeMismatchException $exception) {
                 $this->assertStringContainsString('selection', strtolower($exception->getMessage()));
             }
+        }
+    }
+
+    public function testNestedSelectionWinnerMustUseTheCanonicalEventAndACompletedBarrier(): void
+    {
+        $call = new SelectCall([
+            'batch' => new AllCall([
+                new ActivityCall('FirstActivity', []),
+                new ActivityCall('SecondActivity', []),
+            ]),
+        ]);
+        $first = $this->historyEvent(HistoryEventType::ActivityCompleted, 1, [
+            'activity_execution_id' => 'activity-10',
+            'sequence' => 10,
+        ], 'first-completion');
+        $second = $this->historyEvent(HistoryEventType::ActivityCompleted, 2, [
+            'activity_execution_id' => 'activity-11',
+            'sequence' => 11,
+        ], 'second-completion');
+        $payload = [
+            'selection_group_id' => 'select-calls:10:2',
+            'selection_group_base_sequence' => 10,
+            'selection_group_size' => 2,
+            'member_key' => 'batch',
+            'member_index' => 0,
+            'member_base_sequence' => 10,
+            'member_size' => 2,
+            'operation_kind' => 'group',
+            'operation_identity' => 'group:10:2',
+            'outcome' => 'completed',
+            'resolution_event_id' => $first->id,
+            'resolution_event_type' => HistoryEventType::ActivityCompleted->value,
+        ];
+        $nonCanonicalMarker = $this->historyEvent(
+            HistoryEventType::SelectionResolved,
+            3,
+            $payload,
+            'non-canonical-marker',
+        );
+
+        try {
+            ParallelChildGroup::validatedSelectionResolution(
+                $this->runWithHistoryEvents([$first, $second, $nonCanonicalMarker]),
+                $call,
+                10,
+                $nonCanonicalMarker,
+            );
+            $this->fail('A nested winner bound to a non-canonical terminal event was accepted.');
+        } catch (HistoryEventShapeMismatchException $exception) {
+            $this->assertStringContainsString('event that made the authored member terminal', $exception->getMessage());
+        }
+
+        $incompleteMarker = $this->historyEvent(
+            HistoryEventType::SelectionResolved,
+            2,
+            $payload,
+            'incomplete-marker',
+        );
+
+        try {
+            ParallelChildGroup::validatedSelectionResolution(
+                $this->runWithHistoryEvents([$first, $incompleteMarker]),
+                $call,
+                10,
+                $incompleteMarker,
+            );
+            $this->fail('An incomplete nested durable barrier was accepted as a completed winner.');
+        } catch (HistoryEventShapeMismatchException $exception) {
+            $this->assertStringContainsString('fully completed durable barrier', $exception->getMessage());
         }
     }
 
@@ -488,6 +592,55 @@ final class ParallelChildGroupTest extends TestCase
         ));
     }
 
+    public function testClaimSelectionWinnerRejectsAnIncompleteNestedBarrier(): void
+    {
+        $run = $this->createRun();
+        $outer = ParallelChildGroup::groupEntry(1, 2, 0, 'mixed', 'select', 'batch', 0, 1, 2, 'group');
+        $innerFirst = ParallelChildGroup::groupEntry(1, 2, 0, 'activity');
+        $innerSecond = ParallelChildGroup::groupEntry(1, 2, 1, 'activity');
+        $this->record($run, HistoryEventType::ActivityScheduled, [
+            'activity_execution_id' => 'activity-1',
+            'activity_type' => 'FirstActivity',
+            'sequence' => 1,
+        ]);
+        $this->record($run, HistoryEventType::ActivityScheduled, [
+            'activity_execution_id' => 'activity-2',
+            'activity_type' => 'SecondActivity',
+            'sequence' => 2,
+        ]);
+        $first = $this->record($run, HistoryEventType::ActivityCompleted, [
+            'activity_execution_id' => 'activity-1',
+            'activity_type' => 'FirstActivity',
+            'sequence' => 1,
+        ]);
+
+        $this->assertFalse(ParallelChildGroup::claimSelectionWinner(
+            $run->fresh(['historyEvents']),
+            [$outer, $innerFirst],
+            'activity',
+            $first,
+        ));
+
+        $second = $this->record($run, HistoryEventType::ActivityCompleted, [
+            'activity_execution_id' => 'activity-2',
+            'activity_type' => 'SecondActivity',
+            'sequence' => 2,
+        ]);
+        $run = $run->fresh(['historyEvents']);
+
+        $this->assertTrue(ParallelChildGroup::claimSelectionWinner(
+            $run,
+            [$outer, $innerSecond],
+            'activity',
+            $second,
+        ));
+        $this->assertFalse(ParallelChildGroup::claimSelectionWinner($run, [$innerSecond], 'activity', $second));
+        $this->assertSame(
+            $second->id,
+            ParallelChildGroup::selectionResolution($run, 'select-calls:1:2')?->payload['resolution_event_id'],
+        );
+    }
+
     public function testMixedAllBarrierWaitsForActivitySignalConditionTimerAndChildCompletion(): void
     {
         $run = $this->createRun();
@@ -564,6 +717,181 @@ final class ParallelChildGroupTest extends TestCase
         $this->assertTrue(ParallelChildGroup::shouldWakeParentOnTimerClosure($run, [], TimerStatus::Cancelled));
         $this->assertTrue(ParallelChildGroup::shouldWakeParentOnChildClosure($run, [], RunStatus::Failed));
         $this->assertFalse(ParallelChildGroup::selectionMemberIsTerminal($run, 99, 1, 'timer'));
+    }
+
+    public function testAllBarrierRejectsPendingAndFailedDurableMemberStates(): void
+    {
+        $activityGroup = [ParallelChildGroup::groupEntry(1, 1, 0, 'activity')];
+        $pendingActivityRun = $this->createRun();
+        $this->record($pendingActivityRun, HistoryEventType::ActivityScheduled, [
+            'activity_execution_id' => 'pending-activity',
+            'activity_type' => 'PendingActivity',
+            'sequence' => 1,
+        ]);
+        $this->assertFalse(ParallelChildGroup::shouldWakeParentOnActivityClosure(
+            $pendingActivityRun->fresh(['historyEvents']),
+            $activityGroup,
+            ActivityStatus::Completed,
+        ));
+
+        $failedActivityRun = $this->createRun();
+        $this->record($failedActivityRun, HistoryEventType::ActivityScheduled, [
+            'activity_execution_id' => 'failed-activity',
+            'activity_type' => 'FailedActivity',
+            'sequence' => 1,
+        ]);
+        $this->record($failedActivityRun, HistoryEventType::ActivityFailed, [
+            'activity_execution_id' => 'failed-activity',
+            'activity_type' => 'FailedActivity',
+            'sequence' => 1,
+        ]);
+        $this->assertFalse(ParallelChildGroup::shouldWakeParentOnActivityClosure(
+            $failedActivityRun->fresh(['historyEvents']),
+            $activityGroup,
+            ActivityStatus::Completed,
+        ));
+
+        $timerGroup = [ParallelChildGroup::groupEntry(1, 1, 0, 'timer')];
+        $pendingTimerRun = $this->createRun();
+        $this->record($pendingTimerRun, HistoryEventType::TimerScheduled, [
+            'timer_id' => 'pending-timer',
+            'delay_seconds' => 5,
+            'sequence' => 1,
+        ]);
+        $this->assertFalse(ParallelChildGroup::shouldWakeParentOnTimerClosure(
+            $pendingTimerRun->fresh(['historyEvents']),
+            $timerGroup,
+            TimerStatus::Fired,
+        ));
+
+        $childGroup = [ParallelChildGroup::groupEntry(1, 1, 0)];
+        $unresolvedChildRun = $this->createRun();
+        $this->record($unresolvedChildRun, HistoryEventType::ChildWorkflowScheduled, [
+            'child_workflow_run_id' => 'missing-child-run',
+            'child_workflow_type' => 'MissingChildWorkflow',
+            'sequence' => 1,
+        ]);
+        $this->assertFalse(ParallelChildGroup::shouldWakeParentOnChildClosure(
+            $unresolvedChildRun->fresh(['historyEvents']),
+            $childGroup,
+            RunStatus::Completed,
+        ));
+
+        $pendingChild = $this->createRun();
+        $pendingChild->forceFill([
+            'status' => RunStatus::Pending,
+        ])->save();
+        $pendingChildRun = $this->createRun();
+        $this->record($pendingChildRun, HistoryEventType::ChildWorkflowScheduled, [
+            'child_workflow_instance_id' => $pendingChild->workflow_instance_id,
+            'child_workflow_run_id' => $pendingChild->id,
+            'child_workflow_type' => 'PendingChildWorkflow',
+            'sequence' => 1,
+        ]);
+        $this->record($pendingChildRun, HistoryEventType::ChildRunStarted, [
+            'child_workflow_instance_id' => $pendingChild->workflow_instance_id,
+            'child_workflow_run_id' => $pendingChild->id,
+            'child_workflow_type' => 'PendingChildWorkflow',
+            'sequence' => 1,
+        ]);
+        $this->assertFalse(ParallelChildGroup::shouldWakeParentOnChildClosure(
+            $pendingChildRun->fresh(['historyEvents']),
+            $childGroup,
+            RunStatus::Completed,
+        ));
+
+        $failedChildRun = $this->createRun();
+        $this->record($failedChildRun, HistoryEventType::ChildWorkflowScheduled, [
+            'child_workflow_run_id' => 'failed-child-run',
+            'child_workflow_type' => 'FailedChildWorkflow',
+            'sequence' => 1,
+        ]);
+        $this->record($failedChildRun, HistoryEventType::ChildRunFailed, [
+            'child_workflow_run_id' => 'failed-child-run',
+            'child_workflow_type' => 'FailedChildWorkflow',
+            'child_status' => RunStatus::Failed->value,
+            'sequence' => 1,
+        ]);
+        $this->assertFalse(ParallelChildGroup::shouldWakeParentOnChildClosure(
+            $failedChildRun->fresh(['historyEvents']),
+            $childGroup,
+            RunStatus::Completed,
+        ));
+    }
+
+    public function testSelectionWinnerUsesTerminalIdentityFallbackAndRejectsMissingIdentity(): void
+    {
+        $entry = ParallelChildGroup::groupEntry(1, 1, 0, 'timer', 'select', 'deadline', 0, 1, 1, 'timer');
+
+        $run = $this->createRun();
+        $resolution = $this->record($run, HistoryEventType::TimerFired, [
+            'timer_id' => 'terminal-timer',
+            'sequence' => 1,
+        ]);
+        $this->assertTrue(ParallelChildGroup::claimSelectionWinner(
+            $run->fresh(['historyEvents']),
+            [$entry],
+            'timer',
+            $resolution,
+        ));
+        $this->assertSame(
+            'terminal-timer',
+            ParallelChildGroup::selectionResolution($run, 'select-calls:1:1')?->payload['operation_identity'],
+        );
+
+        $failedRun = $this->createRun();
+        $failure = $this->record($failedRun, HistoryEventType::ActivityFailed, [
+            'activity_execution_id' => 'failed-activity',
+            'sequence' => 3,
+        ]);
+        $failedRun->unsetRelation('historyEvents');
+        $this->assertSame($failure->id, ParallelChildGroup::memberFailureResolution($failedRun, 3, 1)?->id);
+        $this->assertTrue(ParallelChildGroup::selectionMemberIsTerminal($failedRun, 3, 1, 'activity'));
+
+        $lockedRun = $this->createRun();
+        $lockedEntry = ParallelChildGroup::groupEntry(
+            1,
+            1,
+            0,
+            'child',
+            'select',
+            'child',
+            0,
+            selectionMemberKind: 'child',
+        );
+        $this->record($lockedRun, HistoryEventType::ChildWorkflowScheduled, [
+            'child_workflow_run_id' => 'completed-child-run',
+            'child_workflow_type' => 'CompletedChildWorkflow',
+            'sequence' => 1,
+        ]);
+        $this->record($lockedRun, HistoryEventType::ChildRunCompleted, [
+            'child_workflow_run_id' => 'completed-child-run',
+            'child_workflow_type' => 'CompletedChildWorkflow',
+            'child_status' => RunStatus::Completed->value,
+            'sequence' => 1,
+        ]);
+        $this->assertTrue(ParallelChildGroup::shouldWakeParentOnChildClosure(
+            $lockedRun->fresh(['historyEvents']),
+            [$lockedEntry],
+            RunStatus::Completed,
+            true,
+        ));
+        $this->assertTrue(ParallelChildGroup::selectionMemberIsTerminal($lockedRun, 1, 0, 'group'));
+
+        $missingIdentityRun = $this->createRun();
+        $missingIdentityResolution = $this->record($missingIdentityRun, HistoryEventType::TimerFired, [
+            'sequence' => 1,
+        ]);
+
+        $this->expectException(HistoryEventShapeMismatchException::class);
+        $this->expectExceptionMessage('has no durable scheduled or open operation identity');
+
+        ParallelChildGroup::claimSelectionWinner(
+            $missingIdentityRun->fresh(['historyEvents']),
+            [$entry],
+            'timer',
+            $missingIdentityResolution,
+        );
     }
 
     private function createRun(): WorkflowRun
