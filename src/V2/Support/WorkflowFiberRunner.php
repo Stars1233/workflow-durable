@@ -13,6 +13,7 @@ use RuntimeException;
 use Throwable;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Contracts\YieldedCommand;
+use Workflow\V2\Exceptions\HistoryEventShapeMismatchException;
 use Workflow\V2\Exceptions\UnresolvedWorkflowFailureException;
 use Workflow\V2\Exceptions\UnsupportedWorkflowYieldException;
 use Workflow\V2\Models\WorkflowHistoryEvent;
@@ -55,6 +56,11 @@ final class WorkflowFiberRunner
      * @var array<int, true>
      */
     private array $openActivityWaits = [];
+
+    /**
+     * @var array<int, true>
+     */
+    private array $localActivitySequences = [];
 
     /**
      * @var array<int, array{result: mixed, recorded_at: CarbonInterface|null}>
@@ -390,8 +396,42 @@ final class WorkflowFiberRunner
                 continue;
             }
 
+            if ($current instanceof LocalActivityCall) {
+                $historySequence = $this->historySequenceForCurrentPosition();
+                if ($historySequence !== null) {
+                    $this->assertActivityExecutionMode($historySequence, true);
+                }
+                $recorded = $historySequence === null
+                    ? null
+                    : ($this->recordedActivityOutcomes[$historySequence] ?? null);
+
+                if ($recorded !== null) {
+                    ++$this->sequence;
+                    if ($recorded['status'] === 'completed') {
+                        $this->execution->send($recorded['result'] ?? null, $recorded['recorded_at']);
+                    } else {
+                        $this->execution->throw(
+                            $recorded['exception'] ?? new RuntimeException('Local activity failed during replay.'),
+                            $recorded['recorded_at'],
+                        );
+                    }
+
+                    continue;
+                }
+
+                if ($historySequence !== null && isset($this->openActivityWaits[$historySequence])) {
+                    $this->waitingForHistory = true;
+
+                    return WorkflowStep::waiting($current)
+                        ->withPrependedCommands($immediateCommands);
+                }
+            }
+
             if ($current instanceof ActivityCall) {
                 $historySequence = $this->historySequenceForCurrentPosition();
+                if ($historySequence !== null) {
+                    $this->assertActivityExecutionMode($historySequence, false);
+                }
                 $recorded = $historySequence === null
                     ? null
                     : ($this->recordedActivityOutcomes[$historySequence] ?? null);
@@ -579,7 +619,16 @@ final class WorkflowFiberRunner
             return false;
         }
 
+        if ($this->pendingYielded instanceof LocalActivityCall) {
+            $this->assertActivityExecutionMode($historySequence, true);
+        } elseif ($this->pendingYielded instanceof ActivityCall) {
+            $this->assertActivityExecutionMode($historySequence, false);
+        }
+
         return match (true) {
+            $this->pendingYielded instanceof LocalActivityCall => isset(
+                $this->recordedActivityOutcomes[$historySequence]
+            ) || isset($this->openActivityWaits[$historySequence]),
             $this->pendingYielded instanceof ActivityCall => isset($this->recordedActivityOutcomes[$historySequence])
                 || isset($this->openActivityWaits[$historySequence]),
             $this->pendingYielded instanceof TimerCall => isset($this->recordedTimerOutcomes[$historySequence])
@@ -789,6 +838,7 @@ final class WorkflowFiberRunner
             self::indexOpenActivityWaits($this->historyEvents),
             $this->recordedActivityOutcomes,
         );
+        $this->localActivitySequences = self::indexLocalActivitySequences($this->historyEvents);
         $this->recordedTimerOutcomes = self::indexRecordedTimerOutcomes($this->historyEvents);
         $this->openTimerWaits = array_diff_key(
             self::indexOpenTimerWaits($this->historyEvents),
@@ -1151,6 +1201,79 @@ final class WorkflowFiberRunner
         }
 
         return $open;
+    }
+
+    /**
+     * @param list<array<string, mixed>> $historyEvents
+     * @return array<int, true>
+     */
+    private static function indexLocalActivitySequences(array $historyEvents): array
+    {
+        $sequences = [];
+
+        foreach ($historyEvents as $event) {
+            if (! self::isActivityEventType(self::eventType($event))) {
+                continue;
+            }
+
+            $payload = is_array($event['payload'] ?? null) ? $event['payload'] : [];
+            if (($payload['execution_mode'] ?? null) !== LocalActivityRuntime::EXECUTION_MODE
+                && ($payload['local_activity'] ?? null) !== true) {
+                continue;
+            }
+
+            $sequence = self::eventSequence($event, $payload);
+            if ($sequence !== null) {
+                $sequences[$sequence] = true;
+            }
+        }
+
+        return $sequences;
+    }
+
+    private function assertActivityExecutionMode(int $sequence, bool $expectedLocal): void
+    {
+        if (isset($this->localActivitySequences[$sequence]) === $expectedLocal) {
+            return;
+        }
+
+        $recordedEventTypes = [];
+
+        foreach ($this->historyEvents as $event) {
+            $eventType = self::eventType($event);
+            if (! self::isActivityEventType($eventType)) {
+                continue;
+            }
+
+            $payload = is_array($event['payload'] ?? null) ? $event['payload'] : [];
+            if (self::eventSequence($event, $payload) === $sequence && $eventType !== null) {
+                $recordedEventTypes[] = $eventType;
+            }
+        }
+
+        if ($recordedEventTypes === []) {
+            return;
+        }
+
+        throw new HistoryEventShapeMismatchException(
+            $sequence,
+            $expectedLocal ? WorkflowStepHistory::LOCAL_ACTIVITY : WorkflowStepHistory::ACTIVITY,
+            array_values(array_unique($recordedEventTypes)),
+        );
+    }
+
+    private static function isActivityEventType(?string $eventType): bool
+    {
+        return in_array($eventType, [
+            'ActivityScheduled',
+            'ActivityStarted',
+            'ActivityHeartbeatRecorded',
+            'ActivityRetryScheduled',
+            'ActivityCompleted',
+            'ActivityFailed',
+            'ActivityCancelled',
+            'ActivityTimedOut',
+        ], true);
     }
 
     /**

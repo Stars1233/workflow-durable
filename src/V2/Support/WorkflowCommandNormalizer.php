@@ -25,7 +25,8 @@ use Workflow\V2\Models\WorkflowSearchAttribute;
  * durable child workflow retry policy and execution/run timeouts only belong
  * on `start_child_workflow`, Nexus service-call admission settings only belong
  * on `start_service_operation`, and the worker-side `non_retryable` failure
- * marker only belongs on `fail_workflow` / `fail_update`. Structured
+ * marker belongs on workflow/update failures and recorded local-activity
+ * failures. Structured
  * exception payloads belong on `fail_workflow` so terminal worker failures can
  * preserve the original typed failure. Workflow failure itself is non-retryable,
  * and the SDK HTTP transport retry policy is a client concern that does not
@@ -49,11 +50,11 @@ final class WorkflowCommandNormalizer
      */
     private const FIELD_SCOPES = [
         'retry_policy' => [
-            'allowed' => ['schedule_activity', 'start_child_workflow'],
+            'allowed' => ['schedule_activity', 'record_local_activity', 'start_child_workflow'],
             'guidance' => 'Configure activity retries on a schedule_activity command, or child workflow retries on a start_child_workflow command. Workflow failure itself is non-retryable, and SDK HTTP transport retry is a client concern that does not appear in the workflow task command stream.',
         ],
         'start_to_close_timeout' => [
-            'allowed' => ['schedule_activity'],
+            'allowed' => ['schedule_activity', 'record_local_activity'],
             'guidance' => 'start_to_close_timeout limits one activity attempt and only applies to a schedule_activity command.',
         ],
         'schedule_to_start_timeout' => [
@@ -61,11 +62,11 @@ final class WorkflowCommandNormalizer
             'guidance' => 'schedule_to_start_timeout limits queue wait before an activity attempt starts and only applies to a schedule_activity command.',
         ],
         'schedule_to_close_timeout' => [
-            'allowed' => ['schedule_activity'],
+            'allowed' => ['schedule_activity', 'record_local_activity'],
             'guidance' => 'schedule_to_close_timeout limits the entire activity execution including retries and only applies to a schedule_activity command.',
         ],
         'heartbeat_timeout' => [
-            'allowed' => ['schedule_activity'],
+            'allowed' => ['schedule_activity', 'record_local_activity'],
             'guidance' => 'heartbeat_timeout limits the gap between activity heartbeats and only applies to a schedule_activity command.',
         ],
         'worker_session' => [
@@ -81,8 +82,8 @@ final class WorkflowCommandNormalizer
             'guidance' => 'run_timeout_seconds limits one child workflow run and only applies to a start_child_workflow command.',
         ],
         'non_retryable' => [
-            'allowed' => ['fail_workflow', 'fail_update'],
-            'guidance' => 'non_retryable marks a workflow or update failure as non-retryable and only applies to a fail_workflow or fail_update command. Activity non-retryable error types belong inside the schedule_activity retry_policy.non_retryable_error_types list.',
+            'allowed' => ['fail_workflow', 'fail_update', 'record_local_activity'],
+            'guidance' => 'non_retryable marks a workflow, update, or recorded local-activity failure as non-retryable. Durable activity non-retryable error types belong inside the schedule_activity retry_policy.non_retryable_error_types list.',
         ],
         'exception' => [
             'allowed' => ['fail_workflow'],
@@ -108,6 +109,7 @@ final class WorkflowCommandNormalizer
                 'continue_as_new',
                 'complete_update',
                 'record_side_effect',
+                'record_local_activity',
                 'start_service_operation',
             ],
             'guidance' => 'payload_codec identifies the codec used for command payload bytes and only applies to commands that carry result, arguments, or request_payload bytes.',
@@ -135,6 +137,7 @@ final class WorkflowCommandNormalizer
         'continue_as_new' => ['arguments'],
         'complete_update' => ['result'],
         'record_side_effect' => ['result'],
+        'record_local_activity' => ['arguments', 'result'],
         'start_service_operation' => ['request_payload'],
         'upsert_memo' => ['entries'],
     ];
@@ -257,6 +260,77 @@ final class WorkflowCommandNormalizer
                     'heartbeat_timeout' => $heartbeat,
                     'worker_session' => $workerSession,
                     ...$parallelMetadata,
+                ], static fn (mixed $value): bool => $value !== null);
+
+                continue;
+            }
+
+            if ($type === 'record_local_activity') {
+                if (! is_string($command['activity_type'] ?? null) || trim((string) $command['activity_type']) === '') {
+                    $errors["commands.{$index}.activity_type"] = [
+                        'Local activity records require a non-empty activity_type.',
+                    ];
+
+                    continue;
+                }
+
+                $outcome = self::optionalCommandString($command, 'outcome', $index, $errors);
+                if ($outcome === null || ! in_array(
+                    $outcome,
+                    ['completed', 'failed', 'timed_out', 'cancelled'],
+                    true
+                )) {
+                    $errors["commands.{$index}.outcome"] = [
+                        'Local activity outcome must be completed, failed, timed_out, or cancelled.',
+                    ];
+
+                    continue;
+                }
+
+                $retryPolicy = self::optionalRetryPolicy($command, $index, $errors, 'Local activity');
+                $startToClose = self::optionalPositiveInt($command, 'start_to_close_timeout', $index, $errors);
+                $scheduleToClose = self::optionalPositiveInt($command, 'schedule_to_close_timeout', $index, $errors);
+                $heartbeat = self::optionalPositiveInt($command, 'heartbeat_timeout', $index, $errors);
+                self::assertActivityTimeoutOrdering($startToClose, $scheduleToClose, $heartbeat, $index, $errors);
+
+                $arguments = self::resolveCommandArgumentsWithCodec($command, $index, $errors);
+                $result = self::resolveCommandPayloadWithCodec($command, 'result', $index, $errors);
+                $payloadCodec = self::payloadCodecForResolvedPayload(
+                    $command,
+                    $arguments['payload'] !== null ? $arguments : $result,
+                    $arguments['payload'] !== null ? 'arguments' : 'result',
+                    $index,
+                    $errors,
+                );
+                if ($outcome === 'completed' && $result['payload'] === null) {
+                    $errors["commands.{$index}.result"] = [
+                        'Completed local activities require a result payload envelope.',
+                    ];
+                }
+                if ($outcome !== 'completed' && (! is_string($command['message'] ?? null) || trim(
+                    $command['message']
+                ) === '')) {
+                    $errors["commands.{$index}.message"] = [
+                        'Failed, timed out, and cancelled local activities require a message.',
+                    ];
+                }
+
+                $normalized[] = array_filter([
+                    'type' => $type,
+                    'activity_type' => trim($command['activity_type']),
+                    'arguments' => $arguments['payload'],
+                    'result' => $result['payload'],
+                    'payload_codec' => $payloadCodec,
+                    'outcome' => $outcome,
+                    'message' => is_string($command['message'] ?? null) ? trim($command['message']) : null,
+                    'exception_type' => self::optionalCommandString($command, 'exception_type', $index, $errors),
+                    'non_retryable' => is_bool($command['non_retryable'] ?? null) ? $command['non_retryable'] : null,
+                    'attempts' => self::optionalCommandArray($command, 'attempts', $index, $errors),
+                    'retry_policy' => $retryPolicy,
+                    'start_to_close_timeout' => $startToClose,
+                    'schedule_to_close_timeout' => $scheduleToClose,
+                    'heartbeat_timeout' => $heartbeat,
+                    'execution_mode' => 'local',
                 ], static fn (mixed $value): bool => $value !== null);
 
                 continue;

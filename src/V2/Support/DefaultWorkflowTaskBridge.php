@@ -122,6 +122,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         'complete_update',
         'fail_update',
         'record_side_effect',
+        'record_local_activity',
         'record_version_marker',
         'upsert_memo',
         'upsert_search_attributes',
@@ -1534,6 +1535,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'complete_update' => $this->applyCompleteUpdate($run, $task, $command, $sequence),
             'fail_update' => $this->applyFailUpdate($run, $task, $command, $sequence),
             'record_side_effect' => $this->applyRecordSideEffect($run, $task, $command, $sequence),
+            'record_local_activity' => $this->applyRecordLocalActivity($run, $task, $command, $sequence),
             'record_version_marker' => $this->applyRecordVersionMarker($run, $task, $command, $sequence),
             'upsert_memo' => $this->applyUpsertMemo($run, $task, $command, $sequence),
             'upsert_search_attributes' => $this->applyUpsertSearchAttributes($run, $task, $command, $sequence),
@@ -3057,6 +3059,198 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         return $sequence + 1;
     }
 
+    /**
+     * Persist a local activity that was executed by the workflow worker.
+     *
+     * The worker reports every in-process attempt in the same workflow-task
+     * completion that carries the terminal outcome. The database transaction
+     * therefore records one atomic, replayable activity history sequence; a
+     * retried or redelivered workflow task sees the terminal event and never
+     * repeats the already-recorded side effect.
+     *
+     * @param array<string, mixed> $command
+     */
+    private function applyRecordLocalActivity(
+        WorkflowRun $run,
+        WorkflowTask $task,
+        array $command,
+        int $sequence,
+    ): int {
+        $fallbackCodec = is_string($run->payload_codec) && $run->payload_codec !== ''
+            ? $run->payload_codec
+            : CodecRegistry::defaultCodec();
+        $payloadCodec = self::payloadCodecForCommand($command) ?? $fallbackCodec;
+        $namespace = is_string($run->namespace) ? $run->namespace : null;
+        $arguments = isset($command['arguments']) && is_string($command['arguments'])
+            ? ExternalPayloads::externalizeForNamespace($command['arguments'], $payloadCodec, $namespace)
+            : null;
+        $result = isset($command['result']) && is_string($command['result'])
+            ? ExternalPayloads::externalizeForNamespace($command['result'], $payloadCodec, $namespace)
+            : null;
+        $outcome = (string) ($command['outcome'] ?? 'failed');
+        $status = match ($outcome) {
+            'completed' => ActivityStatus::Completed,
+            'cancelled' => ActivityStatus::Cancelled,
+            'timed_out' => ActivityStatus::Failed,
+            default => ActivityStatus::Failed,
+        };
+        $attempts = is_array($command['attempts'] ?? null) && $command['attempts'] !== []
+            ? array_values($command['attempts'])
+            : [[
+                'attempt_number' => 1,
+                'outcome' => $outcome,
+            ]];
+        $now = now();
+
+        /** @var ActivityExecution $execution */
+        $execution = ActivityExecution::query()->create([
+            'workflow_run_id' => $run->id,
+            'sequence' => $sequence,
+            'activity_class' => $command['activity_type'],
+            'activity_type' => $command['activity_type'],
+            'status' => $status->value,
+            'attempt_count' => count($attempts),
+            'payload_codec' => $payloadCodec,
+            'arguments' => $arguments,
+            'result' => $result,
+            'connection' => $run->connection,
+            'queue' => $run->queue,
+            'retry_policy' => is_array($command['retry_policy'] ?? null) ? $command['retry_policy'] : null,
+            'activity_options' => array_filter([
+                'execution_mode' => LocalActivityRuntime::EXECUTION_MODE,
+                'queue_bypassed' => true,
+                'routing' => 'same_process_workflow_task',
+                'start_to_close_timeout' => $command['start_to_close_timeout'] ?? null,
+                'schedule_to_close_timeout' => $command['schedule_to_close_timeout'] ?? null,
+                'heartbeat_timeout' => $command['heartbeat_timeout'] ?? null,
+            ], static fn (mixed $value): bool => $value !== null),
+            'exception' => $outcome === 'completed' ? null : ($command['message'] ?? 'Local activity failed.'),
+            'started_at' => $now,
+            'closed_at' => $now,
+        ]);
+
+        $basePayload = LocalActivityRuntime::eventPayload([
+            'activity_execution_id' => $execution->id,
+            'activity_class' => $execution->activity_class,
+            'activity_type' => $execution->activity_type,
+            'sequence' => $sequence,
+            'workflow_task_id' => $task->id,
+            'activity' => ActivitySnapshot::fromExecution($execution),
+        ]);
+        WorkflowHistoryEvent::record($run, HistoryEventType::ActivityScheduled, $basePayload, $task);
+
+        foreach ($attempts as $index => $attempt) {
+            $attempt = is_array($attempt) ? $attempt : [];
+            $attemptNumber = is_int($attempt['attempt_number'] ?? null)
+                ? max(1, $attempt['attempt_number'])
+                : $index + 1;
+            $attemptId = is_string($attempt['attempt_id'] ?? null) && trim($attempt['attempt_id']) !== ''
+                ? trim($attempt['attempt_id'])
+                : (string) Str::ulid();
+            $attempts[$index] = $attempt + [
+                'attempt_id' => $attemptId,
+                'attempt_number' => $attemptNumber,
+            ];
+            $attemptPayload = $basePayload + [
+                'activity_attempt_id' => $attemptId,
+                'attempt_number' => $attemptNumber,
+            ];
+            WorkflowHistoryEvent::record($run, HistoryEventType::ActivityStarted, $attemptPayload, $task);
+
+            $heartbeats = is_array($attempt['heartbeats'] ?? null) ? $attempt['heartbeats'] : [];
+            foreach ($heartbeats as $heartbeat) {
+                if (! is_array($heartbeat)) {
+                    continue;
+                }
+
+                $elapsedMs = is_int($heartbeat['elapsed_ms'] ?? null)
+                    ? max(0, $heartbeat['elapsed_ms'])
+                    : 0;
+                $heartbeatPayload = $attemptPayload + [
+                    'heartbeat_at' => $now->copy()
+                        ->addMilliseconds($elapsedMs)
+                        ->toJSON(),
+                    'lease_expires_at' => null,
+                ];
+                if (is_array($heartbeat['details'] ?? null)) {
+                    $heartbeatPayload['progress'] = $heartbeat['details'];
+                }
+
+                WorkflowHistoryEvent::record(
+                    $run,
+                    HistoryEventType::ActivityHeartbeatRecorded,
+                    $heartbeatPayload,
+                    $task,
+                );
+            }
+
+            if ($index < count($attempts) - 1) {
+                WorkflowHistoryEvent::record($run, HistoryEventType::ActivityRetryScheduled, $basePayload + [
+                    'activity_attempt_id' => $attemptId,
+                    'retry_after_attempt_id' => $attemptId,
+                    'retry_after_attempt' => $attemptNumber,
+                    'message' => is_string(
+                        $attempt['message'] ?? null
+                    ) ? $attempt['message'] : 'Local activity attempt failed.',
+                    'exception_type' => is_string(
+                        $attempt['exception_type'] ?? null
+                    ) ? $attempt['exception_type'] : null,
+                    'retry_reason' => is_string(
+                        $attempt['retry_reason'] ?? null
+                    ) ? $attempt['retry_reason'] : 'failure',
+                    'retry_backoff_seconds' => is_int(
+                        $attempt['backoff_seconds'] ?? null
+                    ) ? $attempt['backoff_seconds'] : 0,
+                ], $task);
+            }
+        }
+
+        $lastAttempt = is_array($attempts[array_key_last($attempts)] ?? null)
+            ? $attempts[array_key_last($attempts)]
+            : [];
+        $terminalPayload = $basePayload + [
+            'activity_attempt_id' => is_string($lastAttempt['attempt_id'] ?? null)
+                ? $lastAttempt['attempt_id']
+                : (string) Str::ulid(),
+            'attempt_number' => is_int($lastAttempt['attempt_number'] ?? null)
+                ? $lastAttempt['attempt_number']
+                : count($attempts),
+        ];
+
+        $terminalEvent = match ($outcome) {
+            'completed' => HistoryEventType::ActivityCompleted,
+            'cancelled' => HistoryEventType::ActivityCancelled,
+            'timed_out' => HistoryEventType::ActivityTimedOut,
+            default => HistoryEventType::ActivityFailed,
+        };
+        $terminalPayload += match ($outcome) {
+            'completed' => [
+                'result' => self::historyPayloadValue($result, $payloadCodec, $namespace, $fallbackCodec),
+                'payload_codec' => $payloadCodec,
+            ],
+            'cancelled' => [
+                'cancelled_at' => $now->toJSON(),
+            ],
+            'timed_out' => [
+                'failure_category' => 'timeout',
+                'timeout_kind' => is_string($command['timeout_kind'] ?? null)
+                    ? $command['timeout_kind']
+                    : 'start_to_close',
+                'message' => $command['message'] ?? 'Local activity timed out.',
+                'exception_class' => $command['exception_type'] ?? null,
+            ],
+            default => [
+                'failure_category' => 'application',
+                'message' => $command['message'] ?? 'Local activity failed.',
+                'exception_type' => $command['exception_type'] ?? null,
+                'non_retryable' => (bool) ($command['non_retryable'] ?? false),
+            ],
+        };
+        WorkflowHistoryEvent::record($run, $terminalEvent, $terminalPayload, $task);
+
+        return $sequence + 1;
+    }
+
     private static function payloadCodecForUpdate(WorkflowUpdate $update, WorkflowRun $run): string
     {
         if (is_string($update->payload_codec) && $update->payload_codec !== '') {
@@ -4000,6 +4194,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'complete_update' => self::normalizeCompleteUpdateCommand($command),
             'fail_update' => self::normalizeFailUpdateCommand($command),
             'record_side_effect' => self::normalizeRecordSideEffectCommand($command),
+            'record_local_activity' => self::normalizeRecordLocalActivityCommand($command),
             'record_version_marker' => self::normalizeRecordVersionMarkerCommand($command),
             'upsert_memo' => self::normalizeUpsertMemoCommand($command),
             'upsert_search_attributes' => self::normalizeUpsertSearchAttributesCommand($command),
@@ -4776,6 +4971,19 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'result' => $result['payload'],
             'payload_codec' => $result['payload_codec'],
         ], static fn (mixed $value): bool => $value !== null);
+    }
+
+    /**
+     * @param array<string, mixed> $command
+     * @return array{type: string, ...}|null
+     */
+    private static function normalizeRecordLocalActivityCommand(array $command): ?array
+    {
+        try {
+            return WorkflowCommandNormalizer::normalize([$command])[0] ?? null;
+        } catch (ValidationException) {
+            return null;
+        }
     }
 
     /**

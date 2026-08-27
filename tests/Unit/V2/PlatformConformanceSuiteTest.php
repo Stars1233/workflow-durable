@@ -160,7 +160,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $authority = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
 
         $this->assertSame($authority, PlatformConformanceSuite::manifest());
-        $this->assertSame(45, $authority['version']);
+        $this->assertSame(46, $authority['version']);
         $this->assertSame(PlatformConformanceSuite::VERSION, $authority['version']);
         $this->assertSame(PlatformConformanceSuite::SCHEMA, $authority['schema']);
         $this->assertSame(SurfaceStabilityContract::SCHEMA, $authority['surface_stability_authority']);
@@ -243,10 +243,10 @@ final class PlatformConformanceSuiteTest extends TestCase
                     );
                 } elseif (str_starts_with(
                     $source['resolver_url'],
-                    'https://durable-workflow.github.io/platform-protocol-specs/v1.17/',
+                    'https://durable-workflow.github.io/platform-protocol-specs/v1.18/',
                 )) {
                     $this->assertMatchesRegularExpression(
-                        '#^https://durable-workflow\.github\.io/platform-protocol-specs/v1\.17/'
+                        '#^https://durable-workflow\.github\.io/platform-protocol-specs/v1\.18/'
                             . 'worker-protocol-(?:api\.openapi|stream\.asyncapi)\.yaml$#',
                         $source['resolver_url'],
                     );
@@ -269,11 +269,13 @@ final class PlatformConformanceSuiteTest extends TestCase
         $protocol113Api = $apiHistory['bindings'][1];
         $protocol115Api = $apiHistory['bindings'][2];
         $protocol116Api = $apiHistory['bindings'][3];
-        $currentApi = $apiHistory['bindings'][4];
+        $protocol117Api = $apiHistory['bindings'][4];
+        $currentApi = $apiHistory['bindings'][5];
         $protocol113Stream = $streamHistory['bindings'][0];
         $protocol115Stream = $streamHistory['bindings'][1];
         $protocol116Stream = $streamHistory['bindings'][2];
-        $currentStream = $streamHistory['bindings'][3];
+        $protocol117Stream = $streamHistory['bindings'][3];
+        $currentStream = $streamHistory['bindings'][4];
         $activeSources = $manifest['fixture_catalog']['worker_task_lifecycle']['sources'];
 
         $this->assertSame('immutable_lifecycle_bindings', $apiHistory['history_mode']);
@@ -286,6 +288,8 @@ final class PlatformConformanceSuiteTest extends TestCase
         $this->assertSame('historical', $protocol115Stream['status']);
         $this->assertSame('historical', $protocol116Api['status']);
         $this->assertSame('historical', $protocol116Stream['status']);
+        $this->assertSame('historical', $protocol117Api['status']);
+        $this->assertSame('historical', $protocol117Stream['status']);
         $this->assertSame('current', $currentApi['status']);
         $this->assertSame('current', $currentStream['status']);
         $this->assertSame('lifecycle_neutral', $currentApi['lifecycle']);
@@ -350,17 +354,31 @@ final class PlatformConformanceSuiteTest extends TestCase
             ),
         );
         $this->assertSame(
-            $currentApi['sha256'],
+            $protocol117Api['sha256'],
             'sha256:' . hash_file(
                 'sha256',
                 $root . '/resources/conformance/suite-v45/platform-protocol-specs/worker-protocol-api.openapi.yaml',
             ),
         );
         $this->assertSame(
-            $currentStream['sha256'],
+            $protocol117Stream['sha256'],
             'sha256:' . hash_file(
                 'sha256',
                 $root . '/resources/conformance/suite-v45/platform-protocol-specs/worker-protocol-stream.asyncapi.yaml',
+            ),
+        );
+        $this->assertSame(
+            $currentApi['sha256'],
+            'sha256:' . hash_file(
+                'sha256',
+                $root . '/resources/conformance/suite-v46/platform-protocol-specs/worker-protocol-api.openapi.yaml',
+            ),
+        );
+        $this->assertSame(
+            $currentStream['sha256'],
+            'sha256:' . hash_file(
+                'sha256',
+                $root . '/resources/conformance/suite-v46/platform-protocol-specs/worker-protocol-stream.asyncapi.yaml',
             ),
         );
     }
@@ -564,7 +582,7 @@ final class PlatformConformanceSuiteTest extends TestCase
         $identity = PlatformArtifactSourceIdentity::fromManifest(PlatformConformanceSuite::manifest());
 
         $this->assertSame(
-            'resources/conformance/suite-v45/platform-protocol-specs/history-export-bundle.schema.json',
+            'resources/conformance/suite-v46/platform-protocol-specs/history-export-bundle.schema.json',
             $identity['carrier_path'],
         );
         $this->assertSame(
@@ -664,8 +682,8 @@ final class PlatformConformanceSuiteTest extends TestCase
             'packaged carrier path drift' => static function (array &$manifest): void {
                 $manifest['source_dependencies']['history-export-bundle.schema.json']['source_path'] =
                     str_replace(
+                        'suite-v46',
                         'suite-v45',
-                        'suite-v44',
                         $manifest['source_dependencies']['history-export-bundle.schema.json']['source_path'],
                     );
             },

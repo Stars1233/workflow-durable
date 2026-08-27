@@ -19,7 +19,7 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
 
     public function testVersionTracksServiceOperationCommandShape(): void
     {
-        $this->assertSame('1.17', WorkerProtocolVersion::VERSION);
+        $this->assertSame('1.18', WorkerProtocolVersion::VERSION);
         $this->assertContains('start_service_operation', WorkerProtocolVersion::nonTerminalCommandTypes());
         $this->assertSame(0, WorkerProtocolVersion::longPollSemantics()['min_timeout_seconds']);
     }
@@ -77,6 +77,9 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
                 'message_streams',
                 'typed_search_attributes',
                 'condition_wait_occurrence_identity',
+                'local_activities',
+                'worker_sessions',
+                'sticky_execution',
             ],
             WorkerProtocolVersion::workerCapabilities(),
         );
@@ -103,6 +106,19 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
             ],
             WorkerProtocolVersion::workerCapabilitiesForVersion('1.17'),
         );
+        $this->assertSame(
+            [
+                'query_tasks',
+                'memo_upserts',
+                'message_streams',
+                'typed_search_attributes',
+                'condition_wait_occurrence_identity',
+                'local_activities',
+                'worker_sessions',
+                'sticky_execution',
+            ],
+            WorkerProtocolVersion::workerCapabilitiesForVersion('1.18'),
+        );
     }
 
     public function testNonTerminalCommandTypesAreFrozen(): void
@@ -115,6 +131,7 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
             'complete_update',
             'fail_update',
             'record_side_effect',
+            'record_local_activity',
             'record_version_marker',
             'upsert_memo',
             'upsert_search_attributes',
@@ -548,6 +565,7 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
         $this->assertSame('durable-workflow.v2.local-activity.contract', $summary['local_activities']['schema']);
         $this->assertSame(1, $summary['local_activities']['version']);
         $this->assertSame('local', $summary['local_activities']['execution']['mode']);
+        $this->assertSame('record_local_activity', $summary['local_activities']['command_type']);
         $this->assertFalse($summary['local_activities']['execution']['ordinary_activity_task_created']);
         $this->assertSame(
             ['connection', 'queue', 'worker_session', 'schedule_to_start_timeout'],

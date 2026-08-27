@@ -2,8 +2,14 @@
 
 ## Unreleased
 
-- Workflow `2.0.0-rc.46` defines the host-facing workflow control plane around
-  ordinary workflow operations. Reserved message-stream delivery uses a
+- Workflow `2.0.0-rc.47` defines the host-facing workflow control plane around
+  ordinary workflow operations. Protocol 1.18 adds authoritative local-activity
+  command normalization and atomic attempt, heartbeat, retry, failure, timeout,
+  cancellation, and result history so replay never repeats a recorded local
+  side effect. Platform conformance suite 46 publishes the retained protocol
+  1.18 OpenAPI and AsyncAPI authorities for local activities, worker sessions,
+  and sticky execution while preserving the immutable 1.17 artifacts.
+  Reserved message-stream delivery uses a
   separate runtime-only interface implemented by the default control plane,
   while public signals remain unable to inject the reserved transport name.
   The release audit also dereferences every advertised current and retained

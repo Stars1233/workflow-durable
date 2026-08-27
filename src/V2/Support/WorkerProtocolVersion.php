@@ -30,7 +30,7 @@ final class WorkerProtocolVersion
      * pagination semantics). Bump the minor for additive changes (new
      * optional fields, new non-terminal command types).
      */
-    public const VERSION = '1.17';
+    public const VERSION = '1.18';
 
     /**
      * Worker registration capability for server-routed workflow query
@@ -64,6 +64,21 @@ final class WorkerProtocolVersion
      * occurrence identity across commands, history, and replay.
      */
     public const CAPABILITY_CONDITION_WAIT_OCCURRENCE_IDENTITY = 'condition_wait_occurrence_identity';
+
+    /**
+     * Worker can execute and durably report local activities in workflow tasks.
+     */
+    public const CAPABILITY_LOCAL_ACTIVITIES = 'local_activities';
+
+    /**
+     * Worker can manage typed worker-session lifecycle and affinity options.
+     */
+    public const CAPABILITY_WORKER_SESSIONS = 'worker_sessions';
+
+    /**
+     * Worker owns a bounded exact-identity sticky workflow cache.
+     */
+    public const CAPABILITY_STICKY_EXECUTION = 'sticky_execution';
 
     /**
      * Stable fail-closed reason a worker or server must return when it
@@ -134,6 +149,8 @@ final class WorkerProtocolVersion
      * drains so public queries do not block heartbeat or workflow progress.
      */
     public const MIN_LONG_POLL_TIMEOUT = 0;
+
+    public const PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION = '1.18';
 
     private const QUERY_TASKS_MINIMUM_PROTOCOL_VERSION = '1.8';
 
@@ -243,6 +260,12 @@ final class WorkerProtocolVersion
             $capabilities[] = self::CAPABILITY_CONDITION_WAIT_OCCURRENCE_IDENTITY;
         }
 
+        if (self::supportsFeatureVersion($protocolVersion, self::PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION)) {
+            $capabilities[] = self::CAPABILITY_LOCAL_ACTIVITIES;
+            $capabilities[] = self::CAPABILITY_WORKER_SESSIONS;
+            $capabilities[] = self::CAPABILITY_STICKY_EXECUTION;
+        }
+
         return $capabilities;
     }
 
@@ -292,6 +315,7 @@ final class WorkerProtocolVersion
             'complete_update',
             'fail_update',
             'record_side_effect',
+            'record_local_activity',
             'record_version_marker',
             'upsert_memo',
             'upsert_search_attributes',

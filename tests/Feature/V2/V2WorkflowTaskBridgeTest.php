@@ -6352,6 +6352,81 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertSame($execution->id, $scheduledEvent->payload['activity_execution_id']);
     }
 
+    public function testCompleteAtomicallyRecordsLocalActivityAttemptsWithoutAnActivityTask(): void
+    {
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+
+        $result = $this->bridge->complete($task->id, [[
+            'type' => 'record_local_activity',
+            'activity_type' => 'test-local-activity',
+            'arguments' => Serializer::serialize(['Taylor']),
+            'result' => Serializer::serialize('Hello, Taylor'),
+            'outcome' => 'completed',
+            'attempts' => [
+                [
+                    'attempt_number' => 1,
+                    'outcome' => 'failed',
+                    'message' => 'retry once',
+                    'retry_reason' => 'failure',
+                    'backoff_seconds' => 1,
+                    'heartbeats' => [[
+                        'details' => [
+                            'stage' => 'first-attempt',
+                        ],
+                        'elapsed_ms' => 10,
+                    ]],
+                ],
+                [
+                    'attempt_number' => 2,
+                    'outcome' => 'completed',
+                ],
+            ],
+            'retry_policy' => [
+                'max_attempts' => 2,
+                'backoff_seconds' => [1],
+            ],
+            'start_to_close_timeout' => 10,
+            'schedule_to_close_timeout' => 30,
+            'heartbeat_timeout' => 5,
+            'execution_mode' => 'local',
+        ]]);
+
+        $this->assertTrue($result['completed'], json_encode($result, JSON_THROW_ON_ERROR));
+        $this->assertSame(RunStatus::Waiting->value, $result['run_status']);
+        $this->assertSame(0, WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Activity->value)
+            ->count());
+
+        $execution = ActivityExecution::query()
+            ->where('workflow_run_id', $run->id)
+            ->sole();
+        $this->assertSame(ActivityStatus::Completed, $execution->status);
+        $this->assertSame(2, $execution->attempt_count);
+        $this->assertSame('local', $execution->activity_options['execution_mode']);
+        $this->assertSame('Hello, Taylor', $execution->activityResult());
+
+        $events = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->orderBy('sequence')
+            ->get();
+        $this->assertSame([
+            HistoryEventType::ActivityScheduled,
+            HistoryEventType::ActivityStarted,
+            HistoryEventType::ActivityHeartbeatRecorded,
+            HistoryEventType::ActivityRetryScheduled,
+            HistoryEventType::ActivityStarted,
+            HistoryEventType::ActivityCompleted,
+        ], $events->pluck('event_type')
+            ->all());
+        foreach ($events as $event) {
+            $this->assertSame('local', $event->payload['execution_mode']);
+            $this->assertTrue($event->payload['local_activity']);
+            $this->assertSame($task->id, $event->payload['workflow_task_id']);
+        }
+    }
+
     public function testCompleteSchedulesActivityPreservesExternalArgumentsPayloadCodec(): void
     {
         $driver = new LocalFilesystemExternalPayloadStorage($this->makeStorageRoot());

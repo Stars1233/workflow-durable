@@ -208,11 +208,11 @@ final class PlatformProtocolSpecsTest extends TestCase
     {
         $root = dirname(__DIR__, 3);
         $workerSpecPath = $root
-            . '/resources/conformance/suite-v45/platform-protocol-specs/worker-protocol-api.openapi.yaml';
+            . '/resources/conformance/suite-v46/platform-protocol-specs/worker-protocol-api.openapi.yaml';
         $workerSpec = Yaml::parseFile($workerSpecPath);
 
         $this->assertIsArray($workerSpec);
-        $this->assertSame('13', $workerSpec['info']['version']);
+        $this->assertSame('14', $workerSpec['info']['version']);
         $this->assertSame(16, $workerSpec['x-durable-workflow-catalog-version']);
 
         $route = $workerSpec['paths']['/worker/registrations/{workerId}'];
@@ -285,7 +285,7 @@ final class PlatformProtocolSpecsTest extends TestCase
         $this->assertCount(1, $workerApiSources);
         $this->assertSame('durable-workflow.v2.worker-protocol-api@catalog-16', $workerApiSources[0]['artifact_id']);
         $this->assertSame(
-            'https://durable-workflow.github.io/platform-protocol-specs/v1.17/'
+            'https://durable-workflow.github.io/platform-protocol-specs/v1.18/'
                 . 'worker-protocol-api.openapi.yaml',
             $workerApiSources[0]['resolver_url'],
         );
@@ -299,7 +299,7 @@ final class PlatformProtocolSpecsTest extends TestCase
         $this->assertArrayNotHasKey('/workers/{workerId}', $workerSpec['paths']);
     }
 
-    public function testCurrentWorkerProtocolAddsConditionWaitOccurrenceIdentityWithoutChangingHistoricalBundles(): void
+    public function testCurrentWorkerProtocolAddsPortableWorkerAffinityWithoutChangingHistoricalBundles(): void
     {
         $root = dirname(__DIR__, 3) . '/resources/conformance';
         $beta = Yaml::parseFile($root . '/suite-v38/platform-protocol-specs/worker-protocol-api.openapi.yaml');
@@ -312,12 +312,16 @@ final class PlatformProtocolSpecsTest extends TestCase
         $protocol116 = Yaml::parseFile(
             $root . '/suite-v44/platform-protocol-specs/worker-protocol-api.openapi.yaml',
         );
-        $current = Yaml::parseFile($root . '/suite-v45/platform-protocol-specs/worker-protocol-api.openapi.yaml');
+        $protocol117 = Yaml::parseFile(
+            $root . '/suite-v45/platform-protocol-specs/worker-protocol-api.openapi.yaml',
+        );
+        $current = Yaml::parseFile($root . '/suite-v46/platform-protocol-specs/worker-protocol-api.openapi.yaml');
 
         $this->assertIsArray($beta);
         $this->assertIsArray($protocol113);
         $this->assertIsArray($protocol115);
         $this->assertIsArray($protocol116);
+        $this->assertIsArray($protocol117);
         $this->assertIsArray($current);
         $this->assertSame('1.13', $protocol113['components']['schemas']['AdvertisedWorkerProtocolVersion']['const']);
         $this->assertSame(
@@ -331,7 +335,8 @@ final class PlatformProtocolSpecsTest extends TestCase
         );
         $this->assertSame('1.15', $protocol115['components']['schemas']['AdvertisedWorkerProtocolVersion']['const']);
         $this->assertSame('1.16', $protocol116['components']['schemas']['AdvertisedWorkerProtocolVersion']['const']);
-        $this->assertSame('1.17', $current['components']['schemas']['AdvertisedWorkerProtocolVersion']['const']);
+        $this->assertSame('1.17', $protocol117['components']['schemas']['AdvertisedWorkerProtocolVersion']['const']);
+        $this->assertSame('1.18', $current['components']['schemas']['AdvertisedWorkerProtocolVersion']['const']);
         $this->assertArrayHasKey(
             'message_stream_cursors',
             $current['components']['schemas']['WorkflowTaskCompleteRequest']['properties'],
@@ -365,11 +370,20 @@ final class PlatformProtocolSpecsTest extends TestCase
         );
         $this->assertArrayNotHasKey('ConditionWaitHistoryPayload', $protocol116['components']['schemas']);
         $this->assertArrayHasKey('ConditionWaitHistoryPayload', $current['components']['schemas']);
+        $this->assertArrayNotHasKey('x-durable-workflow-portable-worker-affinity-contract', $protocol117);
+        $this->assertArrayHasKey('x-durable-workflow-portable-worker-affinity-contract', $current);
+        $localActivityCommand = $current['components']['schemas']['WorkflowCommand']['allOf'][2];
+        $this->assertSame('record_local_activity', $localActivityCommand['if']['properties']['type']['const']);
+        $this->assertSame('1.18', $localActivityCommand['then']['x-durable-workflow-minimum-protocol-version']);
+        $this->assertSame(
+            'local_activities',
+            $localActivityCommand['then']['x-durable-workflow-worker-capability'],
+        );
     }
 
     public function testRuntimeAndCurrentWorkerSpecsCannotDriftOnMessageStreamContract(): void
     {
-        $root = dirname(__DIR__, 3) . '/resources/conformance/suite-v45/platform-protocol-specs';
+        $root = dirname(__DIR__, 3) . '/resources/conformance/suite-v46/platform-protocol-specs';
         $openApi = Yaml::parseFile($root . '/worker-protocol-api.openapi.yaml');
         $asyncApi = Yaml::parseFile($root . '/worker-protocol-stream.asyncapi.yaml');
 
@@ -378,7 +392,7 @@ final class PlatformProtocolSpecsTest extends TestCase
 
         $runtime = WorkerProtocolVersion::describe();
         $negotiation = SurfaceStabilityContract::manifest()['surface_families']['worker_protocol']['negotiation'];
-        $expectedVersions = array_map(static fn (int $minor): string => "1.{$minor}", range(0, 17));
+        $expectedVersions = array_map(static fn (int $minor): string => "1.{$minor}", range(0, 18));
 
         foreach ([$openApi, $asyncApi] as $spec) {
             $this->assertSame(
@@ -437,6 +451,40 @@ final class PlatformProtocolSpecsTest extends TestCase
                 $runtime['condition_wait_command']['version_gate']['rejection_status'],
                 $spec['x-durable-workflow-condition-wait-occurrence-identity-contract']['version_gate']['rejection_status'],
             );
+
+            $portableAffinity = $spec['x-durable-workflow-portable-worker-affinity-contract'];
+            $this->assertSame(
+                $runtime['local_activities']['minimum_worker_protocol_version'],
+                $portableAffinity['minimum_protocol_version'],
+            );
+            $this->assertSame(
+                [
+                    WorkerProtocolVersion::CAPABILITY_LOCAL_ACTIVITIES,
+                    WorkerProtocolVersion::CAPABILITY_WORKER_SESSIONS,
+                    WorkerProtocolVersion::CAPABILITY_STICKY_EXECUTION,
+                ],
+                $portableAffinity['worker_capabilities'],
+            );
+            $this->assertSame(
+                $runtime['local_activities']['command_type'],
+                $portableAffinity['local_activities']['command_type'],
+            );
+            $this->assertSame(
+                $runtime['local_activities']['execution']['mode'],
+                $portableAffinity['local_activities']['execution_mode'],
+            );
+            $this->assertSame(
+                $runtime['worker_session_verbs'],
+                $portableAffinity['worker_sessions']['lifecycle_verbs'],
+            );
+            $this->assertSame(
+                $runtime['sticky_execution']['cache_key_fields'],
+                $portableAffinity['sticky_execution']['cache_key_fields'],
+            );
+            $this->assertSame(
+                $runtime['sticky_execution']['correctness_fallback'],
+                $portableAffinity['sticky_execution']['correctness_fallback'],
+            );
         }
 
         $this->assertSame(WorkerProtocolVersion::VERSION, $negotiation['default_advertised_version']);
@@ -492,6 +540,41 @@ final class PlatformProtocolSpecsTest extends TestCase
             $runtime['condition_wait_command']['condition_wait_occurrence_id']['minimum_protocol_version'],
             $openApi['components']['schemas']['WorkerRegistrationRequest']['properties']['capabilities']['x-durable-workflow-version-gated-values'][WorkerProtocolVersion::CAPABILITY_CONDITION_WAIT_OCCURRENCE_IDENTITY],
         );
+        foreach ([
+            WorkerProtocolVersion::CAPABILITY_LOCAL_ACTIVITIES,
+            WorkerProtocolVersion::CAPABILITY_WORKER_SESSIONS,
+            WorkerProtocolVersion::CAPABILITY_STICKY_EXECUTION,
+        ] as $capability) {
+            $this->assertSame(
+                WorkerProtocolVersion::PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION,
+                $openApi['components']['schemas']['WorkerRegistrationRequest']['properties']['capabilities']['x-durable-workflow-version-gated-values'][$capability],
+            );
+        }
+
+        foreach ([$openApi, $asyncApi] as $spec) {
+            $localActivityCommands = array_values(array_filter(
+                $spec['components']['schemas']['WorkflowCommand']['allOf'],
+                static fn (array $shape): bool => ($shape['if']['properties']['type']['const'] ?? null)
+                    === 'record_local_activity',
+            ));
+            $this->assertCount(1, $localActivityCommands);
+            $localActivityCommand = $localActivityCommands[0];
+            $this->assertSame('record_local_activity', $localActivityCommand['if']['properties']['type']['const']);
+            $this->assertSame(['activity_type', 'outcome'], $localActivityCommand['then']['required']);
+            $this->assertSame(
+                WorkerProtocolVersion::PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION,
+                $localActivityCommand['then']['x-durable-workflow-minimum-protocol-version'],
+            );
+            $this->assertSame(
+                WorkerProtocolVersion::CAPABILITY_LOCAL_ACTIVITIES,
+                $localActivityCommand['then']['x-durable-workflow-worker-capability'],
+            );
+            $this->assertSame(
+                ['completed', 'failed', 'timed_out', 'cancelled'],
+                $localActivityCommand['then']['properties']['outcome']['enum'],
+            );
+            $this->assertSame('local', $localActivityCommand['then']['properties']['execution_mode']['const']);
+        }
     }
 
     public function testFrozenBundlesUseTheParallelPrimitiveRule(): void

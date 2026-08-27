@@ -29,13 +29,18 @@ final class StickyExecution
     {
         return [
             'feature' => 'sticky_execution',
+            'supported' => true,
+            'worker_capability' => WorkerProtocolVersion::CAPABILITY_STICKY_EXECUTION,
+            'minimum_worker_protocol_version' => WorkerProtocolVersion::PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION,
             'kind' => 'v2_replay_optimization',
             'correctness_fallback' => 'cold_replay',
             'routing_identity' => 'worker_id',
             'cache_owner' => 'worker_process',
+            'cache_key_fields' => ['workflow_id', 'run_id', 'build_id'],
             'durable_affinity_fields' => ['sticky_worker_id', 'sticky_until'],
             'task_diagnostic_fields' => ['sticky_replay_mode', 'sticky_claimed_at'],
             'replay_modes' => self::replayModes(),
+            'metrics' => ['hit', 'miss', 'eviction', 'forced_cold_replay'],
             'default_ttl_seconds' => self::DEFAULT_TTL_SECONDS,
             'default_cache_capacity' => self::DEFAULT_CACHE_CAPACITY,
             'default_capacity_pressure_ratio' => self::DEFAULT_CAPACITY_PRESSURE_RATIO,

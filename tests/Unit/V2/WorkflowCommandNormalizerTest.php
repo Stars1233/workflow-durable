@@ -23,6 +23,7 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
             'continue_as_new' => ['arguments'],
             'complete_update' => ['result'],
             'record_side_effect' => ['result'],
+            'record_local_activity' => ['arguments', 'result'],
             'start_service_operation' => ['request_payload'],
             'upsert_memo' => ['entries'],
         ], WorkflowCommandNormalizer::payloadEnvelopeFields());
@@ -266,6 +267,55 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
             'schedule_to_close_timeout' => 300,
             'heartbeat_timeout' => 15,
         ]], $out);
+    }
+
+    public function testRecordLocalActivityPreservesAtomicOutcomeAttemptsAndTimeouts(): void
+    {
+        $argument = Serializer::serializeWithCodec('avro', [
+            'order' => 42,
+        ]);
+        $result = Serializer::serializeWithCodec('avro', [
+            'charged' => true,
+        ]);
+
+        $normalized = WorkflowCommandNormalizer::normalize([[
+            'type' => 'record_local_activity',
+            'activity_type' => 'charge-card',
+            'arguments' => [
+                'codec' => 'avro',
+                'blob' => $argument,
+            ],
+            'result' => [
+                'codec' => 'avro',
+                'blob' => $result,
+            ],
+            'outcome' => 'completed',
+            'attempts' => [[
+                'attempt_number' => 1,
+                'outcome' => 'completed',
+                'heartbeats' => [[
+                    'details' => [
+                        'stage' => 'charged',
+                    ],
+                    'elapsed_ms' => 10,
+                ]],
+            ]],
+            'retry_policy' => [
+                'max_attempts' => 3,
+                'backoff_seconds' => [1, 2],
+            ],
+            'start_to_close_timeout' => 10,
+            'schedule_to_close_timeout' => 30,
+            'heartbeat_timeout' => 5,
+        ]]);
+
+        $this->assertSame('record_local_activity', $normalized[0]['type']);
+        $this->assertSame('local', $normalized[0]['execution_mode']);
+        $this->assertSame($argument, $normalized[0]['arguments']);
+        $this->assertSame($result, $normalized[0]['result']);
+        $this->assertSame('avro', $normalized[0]['payload_codec']);
+        $this->assertSame(3, $normalized[0]['retry_policy']['max_attempts']);
+        $this->assertSame('completed', $normalized[0]['attempts'][0]['outcome']);
     }
 
     public function testScheduleActivityRejectsInvalidRetryPolicy(): void
