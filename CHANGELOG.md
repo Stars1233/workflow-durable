@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.49` finalizes the portable local-activity command as an
+  ordered `record_local_activity.attempts` report. Worker attempt identity is
+  preserved independently of durable server attempt identity across every
+  attempt-scoped history event, cold persistence, export/import, and replay.
+  Reported heartbeat elapsed time now determines persisted heartbeat time
+  instead of workflow-task completion time. Negotiated protocol 1.18
+  completions that predate attempt reports remain accepted as one terminal
+  attempt, while protocol 1.19 selects the strict ordered report grammar.
 - Workflow `2.0.0-rc.48` makes SDK-reported local-activity attempt sequences
   authoritative. The command grammar rejects unordered, contradictory, or
   over-limit attempts and heartbeats, while service-mode completion projects

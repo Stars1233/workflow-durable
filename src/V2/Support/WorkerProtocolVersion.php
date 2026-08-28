@@ -158,6 +158,12 @@ final class WorkerProtocolVersion
 
     public const PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION = '1.18';
 
+    /**
+     * Protocol version that makes ordered local-activity attempt reports
+     * mandatory on workflow-task completion.
+     */
+    public const LOCAL_ACTIVITY_ATTEMPT_REPORTS_MINIMUM_PROTOCOL_VERSION = '1.19';
+
     public const DURABLE_SELECTION_MINIMUM_PROTOCOL_VERSION = '1.19';
 
     private const QUERY_TASKS_MINIMUM_PROTOCOL_VERSION = '1.8';
@@ -296,6 +302,22 @@ final class WorkerProtocolVersion
         return self::supportsFeatureVersion(
             $protocolVersion,
             self::CONDITION_WAIT_OCCURRENCE_IDENTITY_MINIMUM_PROTOCOL_VERSION,
+        );
+    }
+
+    public static function supportsLocalActivities(string $protocolVersion): bool
+    {
+        return self::supportsFeatureVersion(
+            $protocolVersion,
+            self::PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION,
+        );
+    }
+
+    public static function supportsLocalActivityAttemptReports(string $protocolVersion): bool
+    {
+        return self::supportsFeatureVersion(
+            $protocolVersion,
+            self::LOCAL_ACTIVITY_ATTEMPT_REPORTS_MINIMUM_PROTOCOL_VERSION,
         );
     }
 

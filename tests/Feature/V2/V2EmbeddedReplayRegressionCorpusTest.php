@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature\V2;
 
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Symfony\Component\Uid\Ulid;
@@ -33,6 +34,7 @@ use Workflow\V2\Support\HistoryExport;
 use Workflow\V2\Support\QueryStateReplayer;
 use Workflow\V2\Support\RunActivityView;
 use Workflow\V2\Support\WorkflowFiberRunner;
+use Workflow\V2\Support\WorkflowReplayer;
 use Workflow\V2\Support\WorkflowStep;
 use Workflow\V2\Workflow;
 use Workflow\V2\WorkflowStub;
@@ -68,6 +70,10 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
 
             if (($fixture['id'] ?? null) === 'portable-local-activity-attempt-identity-cold-reload') {
                 $this->assertPortableLocalActivityAttemptIdentitySurvivesColdReload($fixture);
+            }
+
+            if (($fixture['id'] ?? null) === 'portable-local-activity-mixed-worker-heartbeat-replay') {
+                $this->assertPortableLocalActivityMixedWorkerHeartbeatReplay($fixture);
             }
 
             $consumers = $fixture['consumers'] ?? ['workflow-fiber-runner'];
@@ -386,6 +392,61 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
 
         $roundTrip = HistoryExport::forRun($importedRun->fresh());
         $this->assertPortableExportActivityIdentities($roundTrip, $attemptsByActivity, $workerAttemptId);
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     */
+    private function assertPortableLocalActivityMixedWorkerHeartbeatReplay(array $fixture): void
+    {
+        $expectedWorkerAttemptIds = ['worker-a-attempt-1', 'worker-b-attempt-1'];
+        $expectedHeartbeats = ['2026-08-28T11:59:57.500000Z', '2026-08-28T11:59:58.500000Z'];
+        $run = $this->createRunFromFixture($fixture);
+        $activity = RunActivityView::activitiesForRun($run->fresh())[0];
+
+        $this->assertSame('worker-b-attempt-1', $activity['worker_attempt_id']);
+        $this->assertSame($expectedWorkerAttemptIds, array_column($activity['attempts'], 'worker_attempt_id'));
+        $this->assertSame($expectedHeartbeats, array_map(
+            static fn (Carbon $timestamp): string => $timestamp->toJSON(),
+            array_column($activity['attempts'], 'last_heartbeat_at'),
+        ));
+
+        $bundle = HistoryExport::forRun($run->fresh());
+        $exportedActivity = $bundle['activities'][0];
+        $this->assertSame('worker-b-attempt-1', $exportedActivity['current_worker_attempt_id']);
+        $this->assertSame($expectedWorkerAttemptIds, array_column(
+            $exportedActivity['attempts'],
+            'worker_attempt_id',
+        ));
+        $this->assertSame($expectedHeartbeats, array_column($exportedActivity['attempts'], 'last_heartbeat_at'));
+
+        $replayed = (new WorkflowReplayer())->runFromHistoryExport($bundle);
+        $replayedActivity = RunActivityView::activitiesForRun($replayed)[0];
+        $this->assertSame($expectedWorkerAttemptIds, array_column(
+            $replayedActivity['attempts'],
+            'worker_attempt_id',
+        ));
+        $this->assertSame($expectedHeartbeats, array_map(
+            static fn (Carbon $timestamp): string => $timestamp->toJSON(),
+            array_column($replayedActivity['attempts'], 'last_heartbeat_at'),
+        ));
+
+        $runId = $bundle['workflow']['run_id'];
+        $this->clearWorkflowState();
+        $report = EmbeddedV2HistoryImport::import($bundle);
+
+        $this->assertSame('imported', $report['status'], json_encode($report, JSON_THROW_ON_ERROR));
+        $this->assertSame(1, $report['rows']['activity_executions']);
+        $this->assertSame(2, $report['rows']['activity_attempts']);
+
+        $importedAttempts = ActivityAttempt::query()
+            ->where('workflow_run_id', $runId)
+            ->orderBy('attempt_number')
+            ->get();
+        $this->assertSame($expectedWorkerAttemptIds, $importedAttempts->pluck('worker_attempt_id')->all());
+        $this->assertSame($expectedHeartbeats, $importedAttempts->pluck('last_heartbeat_at')
+            ->map(static fn (Carbon $timestamp): string => $timestamp->toJSON())
+            ->all());
     }
 
     /**

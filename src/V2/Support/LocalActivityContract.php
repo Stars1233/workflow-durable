@@ -25,6 +25,7 @@ final class LocalActivityContract
             'worker_capability' => WorkerProtocolVersion::CAPABILITY_LOCAL_ACTIVITIES,
             'minimum_worker_protocol_version' => WorkerProtocolVersion::PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION,
             'command_type' => 'record_local_activity',
+            'command' => WorkflowCommandNormalizer::localActivityCommandContract(),
             'api' => [
                 'functions' => ['Workflow\\V2\\localActivity'],
                 'workflow_facade' => [

@@ -629,6 +629,17 @@ final class WorkerProtocolVersionTest extends NonDatabaseTestCase
         $this->assertSame(1, $summary['local_activities']['version']);
         $this->assertSame('local', $summary['local_activities']['execution']['mode']);
         $this->assertSame('record_local_activity', $summary['local_activities']['command_type']);
+        $this->assertSame(
+            \Workflow\V2\Support\WorkflowCommandNormalizer::localActivityCommandContract(),
+            $summary['local_activities']['command'],
+        );
+        $this->assertSame(
+            '1.19',
+            $summary['local_activities']['command']['attempt_reports']['required_from_protocol_version'],
+        );
+        $this->assertTrue(WorkerProtocolVersion::supportsLocalActivities('1.18'));
+        $this->assertFalse(WorkerProtocolVersion::supportsLocalActivityAttemptReports('1.18'));
+        $this->assertTrue(WorkerProtocolVersion::supportsLocalActivityAttemptReports('1.19'));
         $this->assertFalse($summary['local_activities']['execution']['ordinary_activity_task_created']);
         $this->assertSame(
             ['connection', 'queue', 'worker_session', 'schedule_to_start_timeout'],

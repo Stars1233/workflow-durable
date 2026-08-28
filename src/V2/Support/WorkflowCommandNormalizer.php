@@ -244,6 +244,50 @@ final class WorkflowCommandNormalizer
     }
 
     /**
+     * Return the portable local-activity command grammar and identity/timing
+     * mappings consumed by {@see self::normalize()} and the history bridge.
+     *
+     * @return array<string, mixed>
+     */
+    public static function localActivityCommandContract(): array
+    {
+        return [
+            'type' => 'record_local_activity',
+            'minimum_protocol_version' => WorkerProtocolVersion::PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION,
+            'required_fields' => ['activity_type', 'outcome', 'attempts'],
+            'attempt_reports' => [
+                'field' => 'attempts',
+                'shape' => 'ordered_attempt_reports',
+                'required_fields' => ['attempt_number', 'outcome'],
+                'maximum' => self::MAX_LOCAL_ACTIVITY_ATTEMPTS,
+                'required_from_protocol_version' =>
+                    WorkerProtocolVersion::LOCAL_ACTIVITY_ATTEMPT_REPORTS_MINIMUM_PROTOCOL_VERSION,
+                'worker_attempt_identity' => [
+                    'report_field' => 'attempt_id',
+                    'persistence_field' => 'worker_attempt_id',
+                    'history_field' => 'worker_attempt_id',
+                    'durable_field' => 'activity_attempt_id',
+                ],
+            ],
+            'heartbeat_reports' => [
+                'field' => 'heartbeats',
+                'shape' => 'ordered_heartbeat_reports',
+                'required_fields' => ['elapsed_ms'],
+                'maximum_per_attempt' => self::MAX_LOCAL_ACTIVITY_HEARTBEATS_PER_ATTEMPT,
+                'maximum_per_command' => self::MAX_LOCAL_ACTIVITY_HEARTBEATS,
+                'elapsed_ms_origin' => 'attempt_started_at',
+                'persisted_last_heartbeat_at' => 'attempt_started_at_plus_last_elapsed_ms',
+            ],
+            'rolling_upgrade' => [
+                'retained_protocol_version' =>
+                    WorkerProtocolVersion::PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION,
+                'missing_attempts' => 'normalize_to_one_terminal_attempt_without_worker_identity_or_heartbeats',
+                'strict_shape_selected_by' => 'negotiated_worker_protocol_version',
+            ],
+        ];
+    }
+
+    /**
      * Return transport-level rules for retaining and type-checking every
      * parallel metadata field before semantic preflight. The semantic grammar
      * remains in {@see self::preflightParallelMetadata()} and
@@ -324,8 +368,9 @@ final class WorkflowCommandNormalizer
      * @param  list<array<string, mixed>>  $commands
      * @return list<array<string, mixed>>
      */
-    public static function normalize(array $commands): array
+    public static function normalize(array $commands, ?string $protocolVersion = null): array
     {
+        $protocolVersion ??= WorkerProtocolVersion::VERSION;
         $normalized = [];
         $errors = [];
 
@@ -524,6 +569,7 @@ final class WorkflowCommandNormalizer
                     $outcome,
                     $nonRetryable,
                     $retryPolicy,
+                    $protocolVersion,
                     $index,
                     $errors,
                 );
@@ -1121,10 +1167,33 @@ final class WorkflowCommandNormalizer
         string $terminalOutcome,
         ?bool $terminalNonRetryable,
         ?array $retryPolicy,
+        string $protocolVersion,
         int $index,
         array &$errors,
     ): ?array {
         $rawAttempts = $command['attempts'] ?? null;
+
+        if (! array_key_exists('attempts', $command)
+            && WorkerProtocolVersion::supportsLocalActivities($protocolVersion)
+            && ! WorkerProtocolVersion::supportsLocalActivityAttemptReports($protocolVersion)
+        ) {
+            $rawAttempts = [array_filter([
+                'attempt_number' => 1,
+                'outcome' => $terminalOutcome,
+                'message' => is_string($command['message'] ?? null) ? trim($command['message']) : null,
+                'exception_type' => self::optionalNestedString(
+                    $command,
+                    'exception_type',
+                    "commands.{$index}",
+                    $errors,
+                ),
+                'non_retryable' => $terminalNonRetryable,
+                'timeout_kind' => is_string($command['timeout_kind'] ?? null)
+                    ? trim($command['timeout_kind'])
+                    : null,
+                'heartbeats' => [],
+            ], static fn (mixed $value): bool => $value !== null)];
+        }
 
         if (! is_array($rawAttempts) || ! array_is_list($rawAttempts) || $rawAttempts === []) {
             $errors["commands.{$index}.attempts"] = ['Local activity attempts must be a non-empty ordered list.'];

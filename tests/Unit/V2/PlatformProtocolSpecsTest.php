@@ -619,6 +619,7 @@ final class PlatformProtocolSpecsTest extends TestCase
             $openApi['components']['schemas']['WorkerRegistrationRequest']['properties']['capabilities']['x-durable-workflow-version-gated-values'][WorkerProtocolVersion::CAPABILITY_DURABLE_SELECTION],
         );
 
+        $normalizerContract = \Workflow\V2\Support\WorkflowCommandNormalizer::localActivityCommandContract();
         foreach ([$openApi, $asyncApi] as $spec) {
             $localActivityCommands = array_values(array_filter(
                 $spec['components']['schemas']['WorkflowCommand']['allOf'],
@@ -627,8 +628,8 @@ final class PlatformProtocolSpecsTest extends TestCase
             ));
             $this->assertCount(1, $localActivityCommands);
             $localActivityCommand = $localActivityCommands[0];
-            $this->assertSame('record_local_activity', $localActivityCommand['if']['properties']['type']['const']);
-            $this->assertSame(['activity_type', 'outcome', 'attempts'], $localActivityCommand['then']['required']);
+            $this->assertSame($normalizerContract['type'], $localActivityCommand['if']['properties']['type']['const']);
+            $this->assertSame($normalizerContract['required_fields'], $localActivityCommand['then']['required']);
             $this->assertSame(
                 WorkerProtocolVersion::PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION,
                 $localActivityCommand['then']['x-durable-workflow-minimum-protocol-version'],
@@ -665,11 +666,18 @@ final class PlatformProtocolSpecsTest extends TestCase
             $this->assertSame(100, $retryPolicy['properties']['max_attempts']['maximum']);
             $attempt = $spec['components']['schemas']['LocalActivityAttemptReport'];
             $this->assertFalse($attempt['additionalProperties']);
-            $this->assertSame(['attempt_number', 'outcome'], $attempt['required']);
-            $this->assertSame(1000, $attempt['properties']['heartbeats']['maxItems']);
+            $this->assertSame($normalizerContract['attempt_reports']['required_fields'], $attempt['required']);
+            $this->assertArrayHasKey(
+                $normalizerContract['attempt_reports']['worker_attempt_identity']['report_field'],
+                $attempt['properties'],
+            );
+            $this->assertSame(
+                $normalizerContract['heartbeat_reports']['maximum_per_attempt'],
+                $attempt['properties']['heartbeats']['maxItems'],
+            );
             $heartbeat = $spec['components']['schemas']['LocalActivityHeartbeatReport'];
             $this->assertFalse($heartbeat['additionalProperties']);
-            $this->assertSame(['elapsed_ms'], $heartbeat['required']);
+            $this->assertSame($normalizerContract['heartbeat_reports']['required_fields'], $heartbeat['required']);
         }
     }
 

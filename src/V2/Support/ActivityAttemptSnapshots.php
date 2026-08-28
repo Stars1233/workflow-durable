@@ -157,11 +157,9 @@ final class ActivityAttemptSnapshots
             'lease_owner' => self::stringValue($attempt['lease_owner'] ?? null)
                 ?? self::stringValue($task['lease_owner'] ?? null),
             'started_at' => self::timestamp($attempt['started_at'] ?? null)
-                ?? self::timestamp($activity['started_at'] ?? null)
                 ?? ($event->event_type === HistoryEventType::ActivityStarted ? $eventTime : null),
             'last_heartbeat_at' => self::timestamp($payload['heartbeat_at'] ?? null)
-                ?? self::timestamp($attempt['last_heartbeat_at'] ?? null)
-                ?? self::timestamp($activity['last_heartbeat_at'] ?? null),
+                ?? self::timestamp($attempt['last_heartbeat_at'] ?? null),
             'last_heartbeat_progress' => HeartbeatProgress::fromStored($payload['progress'] ?? null)
                 ?? HeartbeatProgress::fromStored($attempt['last_heartbeat_progress'] ?? null),
             'lease_expires_at' => $terminalEvent
@@ -170,7 +168,6 @@ final class ActivityAttemptSnapshots
                     ?? self::timestamp($attempt['lease_expires_at'] ?? null)
                     ?? self::timestamp($task['lease_expires_at'] ?? null)),
             'closed_at' => self::timestamp($attempt['closed_at'] ?? null)
-                ?? self::timestamp($activity['closed_at'] ?? null)
                 ?? ($terminalEvent ? $eventTime : null),
         ], static fn (mixed $value): bool => $value !== null);
 

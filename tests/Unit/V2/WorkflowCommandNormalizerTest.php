@@ -10,6 +10,7 @@ use Workflow\Serializers\Serializer;
 use Workflow\V2\Models\WorkflowMemo;
 use Workflow\V2\Models\WorkflowSearchAttribute;
 use Workflow\V2\Support\MemoPayload;
+use Workflow\V2\Support\WorkerProtocolVersion;
 use Workflow\V2\Support\WorkflowCommandNormalizer;
 
 final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
@@ -373,8 +374,62 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
         $this->assertSame($result, $normalized[0]['result']);
         $this->assertSame('avro', $normalized[0]['payload_codec']);
         $this->assertSame(3, $normalized[0]['retry_policy']['max_attempts']);
+        $this->assertSame('attempt-1', $normalized[0]['attempts'][0]['attempt_id']);
         $this->assertSame('completed', $normalized[0]['attempts'][0]['outcome']);
         $this->assertSame(12, $normalized[0]['attempts'][0]['duration_ms']);
+    }
+
+    public function testPortableLocalActivityContractPublishesOneCommandIdentityAndHeartbeatShape(): void
+    {
+        $contract = WorkflowCommandNormalizer::localActivityCommandContract();
+
+        $this->assertSame('record_local_activity', $contract['type']);
+        $this->assertSame('1.18', $contract['minimum_protocol_version']);
+        $this->assertSame(['activity_type', 'outcome', 'attempts'], $contract['required_fields']);
+        $this->assertSame('ordered_attempt_reports', $contract['attempt_reports']['shape']);
+        $this->assertSame('1.19', $contract['attempt_reports']['required_from_protocol_version']);
+        $this->assertSame([
+            'report_field' => 'attempt_id',
+            'persistence_field' => 'worker_attempt_id',
+            'history_field' => 'worker_attempt_id',
+            'durable_field' => 'activity_attempt_id',
+        ], $contract['attempt_reports']['worker_attempt_identity']);
+        $this->assertSame(
+            'attempt_started_at_plus_last_elapsed_ms',
+            $contract['heartbeat_reports']['persisted_last_heartbeat_at'],
+        );
+        $this->assertSame(
+            'negotiated_worker_protocol_version',
+            $contract['rolling_upgrade']['strict_shape_selected_by'],
+        );
+    }
+
+    public function testRecordLocalActivityAttemptReportsAreSelectedByNegotiatedProtocolVersion(): void
+    {
+        $legacy = WorkflowCommandNormalizer::normalize([[
+            'type' => 'record_local_activity',
+            'activity_type' => 'charge-card',
+            'result' => Serializer::serialize('charged'),
+            'outcome' => 'completed',
+        ]], '1.18');
+
+        $this->assertSame([[
+            'attempt_number' => 1,
+            'outcome' => 'completed',
+            'heartbeats' => [],
+        ]], $legacy[0]['attempts']);
+
+        $errors = $this->normalizeAndCaptureErrors([[
+            'type' => 'record_local_activity',
+            'activity_type' => 'charge-card',
+            'result' => Serializer::serialize('charged'),
+            'outcome' => 'completed',
+        ]], '1.19');
+
+        $this->assertArrayHasKey('commands.0.attempts', $errors);
+        $this->assertTrue(WorkerProtocolVersion::supportsLocalActivities('1.18'));
+        $this->assertFalse(WorkerProtocolVersion::supportsLocalActivityAttemptReports('1.18'));
+        $this->assertTrue(WorkerProtocolVersion::supportsLocalActivityAttemptReports('1.19'));
     }
 
     public function testRecordLocalActivityRejectsDuplicateOrNonMonotonicAttemptNumbers(): void
@@ -1788,10 +1843,10 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
      * @param  list<array<string, mixed>>  $commands
      * @return array<string, list<string>>
      */
-    private function normalizeAndCaptureErrors(array $commands): array
+    private function normalizeAndCaptureErrors(array $commands, ?string $protocolVersion = null): array
     {
         try {
-            WorkflowCommandNormalizer::normalize($commands);
+            WorkflowCommandNormalizer::normalize($commands, $protocolVersion);
         } catch (ValidationException $e) {
             return $e->errors();
         }

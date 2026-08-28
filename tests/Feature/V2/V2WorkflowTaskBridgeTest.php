@@ -87,6 +87,7 @@ use Workflow\V2\Support\SignalWaits;
 use Workflow\V2\Support\TaskRepair;
 use Workflow\V2\Support\WorkerHistoryPayloadContract;
 use Workflow\V2\Support\WorkerProtocolVersion;
+use Workflow\V2\Support\WorkflowCommandNormalizer;
 use Workflow\V2\Support\WorkflowExecutionGate;
 use Workflow\V2\Support\WorkflowFiberRunner;
 use Workflow\V2\Support\WorkflowReplayer;
@@ -5369,7 +5370,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertJson($exportDocument);
         $export = json_decode($exportDocument, true, flags: JSON_THROW_ON_ERROR);
         $runId = $reloadedRun->id;
-        $this->clearWorkflowStateForPortableMemoImport();
+        $this->clearWorkflowStateForHistoryImport();
 
         $import = EmbeddedV2HistoryImport::import($export, [
             'import_id' => 'portable-memo-export-import',
@@ -6576,11 +6577,53 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertSame(['failed', 'completed'], $attempts->pluck('status')
             ->map(static fn ($status): string => $status->value)
             ->all());
+        $this->assertNotNull($attempts->first()->last_heartbeat_at);
+        $this->assertNull($attempts->last()->last_heartbeat_at);
         $this->assertSame($attempts->last()->id, $execution->current_attempt_id);
         $this->assertSame(0, WorkflowFailure::query()
             ->where('source_kind', 'activity_execution')
             ->where('source_id', $execution->id)
             ->count());
+    }
+
+    public function testLocalActivityWorkflowTaskCompletionSelectsAttemptGrammarByNegotiatedProtocol(): void
+    {
+        $legacyRun = $this->createWaitingRun();
+        $legacyTask = $this->createLeasedTask($legacyRun);
+        $legacyCommand = [
+            'type' => 'record_local_activity',
+            'activity_type' => 'legacy-local-activity',
+            'result' => Serializer::serialize('completed'),
+            'outcome' => 'completed',
+        ];
+
+        $legacyResult = $this->bridge->complete(
+            $legacyTask->id,
+            WorkflowCommandNormalizer::normalize([$legacyCommand], '1.18'),
+        );
+
+        $this->assertTrue($legacyResult['completed'], json_encode($legacyResult, JSON_THROW_ON_ERROR));
+        $legacyExecution = ActivityExecution::query()
+            ->where('workflow_run_id', $legacyRun->id)
+            ->sole();
+        $legacyAttempt = ActivityAttempt::query()
+            ->where('activity_execution_id', $legacyExecution->id)
+            ->sole();
+        $this->assertSame(1, $legacyExecution->attempt_count);
+        $this->assertNull($legacyAttempt->worker_attempt_id);
+        $this->assertNull($legacyAttempt->last_heartbeat_at);
+
+        $currentRun = $this->createWaitingRun();
+        $currentTask = $this->createLeasedTask($currentRun);
+        $currentResult = $this->bridge->complete($currentTask->id, [$legacyCommand]);
+
+        $this->assertFalse($currentResult['completed']);
+        $this->assertSame('invalid_commands', $currentResult['reason']);
+        $this->assertSame(TaskStatus::Leased, $currentTask->fresh()->status);
+        $currentExecutionCount = ActivityExecution::query()
+            ->where('workflow_run_id', $currentRun->id)
+            ->count();
+        $this->assertSame(0, $currentExecutionCount);
     }
 
     public function testCompleteSeparatesPortableWorkerAttemptIdentityFromStrictDatabaseKeys(): void
@@ -6664,6 +6707,173 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             $this->assertSame($workerAttemptId, $activity['current_worker_attempt_id']);
             $this->assertSame($workerAttemptId, $activity['attempts'][0]['worker_attempt_id']);
             $this->assertTrue(Ulid::isValid($activity['current_attempt_id']));
+        }
+    }
+
+    public function testPortableLocalActivityMixedWorkerIdentityAndHeartbeatTimingSurviveColdPersistenceAndReplay(): void
+    {
+        Carbon::setTestNow('2026-08-28T12:00:00.000000Z');
+
+        try {
+            $run = $this->createWaitingRun();
+            $task = $this->createLeasedTask($run);
+            $result = $this->bridge->complete($task->id, [[
+                'type' => 'record_local_activity',
+                'activity_type' => 'mixed-worker-local-activity',
+                'result' => Serializer::serialize('completed'),
+                'outcome' => 'completed',
+                'attempts' => [
+                    [
+                        'attempt_id' => 'worker-a-attempt-1',
+                        'attempt_number' => 1,
+                        'outcome' => 'failed',
+                        'duration_ms' => 4000,
+                        'message' => 'retry on another worker',
+                        'retry_reason' => 'failure',
+                        'backoff_seconds' => 1,
+                        'heartbeats' => [[
+                            'elapsed_ms' => 1500,
+                            'details' => [
+                                'worker' => 'worker-a',
+                            ],
+                        ]],
+                    ],
+                    [
+                        'attempt_id' => 'worker-b-attempt-1',
+                        'attempt_number' => 2,
+                        'outcome' => 'completed',
+                        'duration_ms' => 2000,
+                        'heartbeats' => [[
+                            'elapsed_ms' => 500,
+                            'details' => [
+                                'worker' => 'worker-b',
+                            ],
+                        ]],
+                    ],
+                ],
+                'retry_policy' => [
+                    'max_attempts' => 2,
+                    'backoff_seconds' => [1],
+                ],
+                'execution_mode' => 'local',
+            ]]);
+
+            $this->assertTrue($result['completed'], json_encode($result, JSON_THROW_ON_ERROR));
+            $runId = $run->id;
+
+            DB::purge();
+            DB::reconnect();
+
+            $execution = ActivityExecution::query()
+                ->where('workflow_run_id', $runId)
+                ->sole();
+            $attempts = ActivityAttempt::query()
+                ->where('activity_execution_id', $execution->id)
+                ->orderBy('attempt_number')
+                ->get();
+
+            $this->assertSame('2026-08-28T11:59:56.000000Z', $attempts[0]->started_at?->toJSON());
+            $this->assertSame('2026-08-28T11:59:57.500000Z', $attempts[0]->last_heartbeat_at?->toJSON());
+            $this->assertSame('2026-08-28T11:59:58.000000Z', $attempts[1]->started_at?->toJSON());
+            $this->assertSame('2026-08-28T11:59:58.500000Z', $attempts[1]->last_heartbeat_at?->toJSON());
+            $this->assertSame('2026-08-28T11:59:58.500000Z', $execution->last_heartbeat_at?->toJSON());
+
+            $attemptEvents = WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $runId)
+                ->whereIn('event_type', [
+                    HistoryEventType::ActivityStarted->value,
+                    HistoryEventType::ActivityHeartbeatRecorded->value,
+                    HistoryEventType::ActivityRetryScheduled->value,
+                    HistoryEventType::ActivityCompleted->value,
+                ])
+                ->orderBy('sequence')
+                ->get();
+            $this->assertSame([
+                HistoryEventType::ActivityStarted,
+                HistoryEventType::ActivityHeartbeatRecorded,
+                HistoryEventType::ActivityRetryScheduled,
+                HistoryEventType::ActivityStarted,
+                HistoryEventType::ActivityHeartbeatRecorded,
+                HistoryEventType::ActivityCompleted,
+            ], $attemptEvents->pluck('event_type')
+                ->all());
+            $this->assertSame([
+                'worker-a-attempt-1',
+                'worker-a-attempt-1',
+                'worker-a-attempt-1',
+                'worker-b-attempt-1',
+                'worker-b-attempt-1',
+                'worker-b-attempt-1',
+            ], $attemptEvents->pluck('payload')
+                ->map(static fn (array $payload): mixed => $payload['worker_attempt_id'] ?? null)
+                ->all());
+            $this->assertSame(['2026-08-28T11:59:57.500000Z', '2026-08-28T11:59:58.500000Z'], $attemptEvents
+                ->where('event_type', HistoryEventType::ActivityHeartbeatRecorded)
+                ->pluck('payload')
+                ->map(static fn (array $payload): mixed => $payload['heartbeat_at'] ?? null)
+                ->values()
+                ->all());
+
+            $reloadedRun = WorkflowRun::query()->findOrFail($runId);
+            $export = HistoryExport::forRun($reloadedRun);
+            $activity = $export['activities'][0];
+            $this->assertSame('worker-b-attempt-1', $activity['current_worker_attempt_id']);
+            $this->assertSame('2026-08-28T11:59:58.500000Z', $activity['last_heartbeat_at']);
+            $this->assertSame(
+                ['worker-a-attempt-1', 'worker-b-attempt-1'],
+                array_column($activity['attempts'], 'worker_attempt_id'),
+            );
+            $this->assertSame([
+                '2026-08-28T11:59:57.500000Z',
+                '2026-08-28T11:59:58.500000Z',
+            ], array_column($activity['attempts'], 'last_heartbeat_at'));
+
+            $this->clearWorkflowStateForHistoryImport();
+
+            $replayedRun = (new WorkflowReplayer())->runFromHistoryExport($export);
+            $replayedActivity = RunActivityView::activitiesForRun($replayedRun)[0];
+            $this->assertSame('worker-b-attempt-1', $replayedActivity['worker_attempt_id']);
+            $this->assertSame('2026-08-28T11:59:58.500000Z', $replayedActivity['last_heartbeat_at']);
+            $this->assertSame(
+                ['worker-a-attempt-1', 'worker-b-attempt-1'],
+                array_column($replayedActivity['attempts'], 'worker_attempt_id'),
+            );
+
+            $import = EmbeddedV2HistoryImport::import($export, [
+                'import_id' => 'portable-local-activity-contract-import',
+            ]);
+            $this->assertSame('imported', $import['status']);
+
+            DB::purge();
+            DB::reconnect();
+
+            $importedExecution = ActivityExecution::query()
+                ->where('workflow_run_id', $runId)
+                ->sole();
+            $importedAttempts = ActivityAttempt::query()
+                ->where('activity_execution_id', $importedExecution->id)
+                ->orderBy('attempt_number')
+                ->get();
+            $importedRetry = WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $runId)
+                ->where('event_type', HistoryEventType::ActivityRetryScheduled->value)
+                ->sole();
+
+            $this->assertSame('2026-08-28T11:59:58.500000Z', $importedExecution->last_heartbeat_at?->toJSON());
+            $this->assertSame(
+                ['worker-a-attempt-1', 'worker-b-attempt-1'],
+                $importedAttempts->pluck('worker_attempt_id')
+                    ->all(),
+            );
+            $this->assertSame([
+                '2026-08-28T11:59:57.500000Z',
+                '2026-08-28T11:59:58.500000Z',
+            ], $importedAttempts->pluck('last_heartbeat_at')
+                ->map(static fn (Carbon $timestamp): string => $timestamp->toJSON())
+                ->all());
+            $this->assertSame('worker-a-attempt-1', $importedRetry->payload['worker_attempt_id']);
+        } finally {
+            Carbon::setTestNow();
         }
     }
 
@@ -11480,7 +11690,7 @@ SQL);
         ], $task);
     }
 
-    private function clearWorkflowStateForPortableMemoImport(): void
+    private function clearWorkflowStateForHistoryImport(): void
     {
         foreach ([
             'workflow_run_summaries',
