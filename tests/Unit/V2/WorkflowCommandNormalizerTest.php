@@ -347,8 +347,10 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
             ],
             'outcome' => 'completed',
             'attempts' => [[
+                'attempt_id' => 'attempt-1',
                 'attempt_number' => 1,
                 'outcome' => 'completed',
+                'duration_ms' => 12,
                 'heartbeats' => [[
                     'details' => [
                         'stage' => 'charged',
@@ -372,6 +374,166 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
         $this->assertSame('avro', $normalized[0]['payload_codec']);
         $this->assertSame(3, $normalized[0]['retry_policy']['max_attempts']);
         $this->assertSame('completed', $normalized[0]['attempts'][0]['outcome']);
+        $this->assertSame(12, $normalized[0]['attempts'][0]['duration_ms']);
+    }
+
+    public function testRecordLocalActivityRejectsDuplicateOrNonMonotonicAttemptNumbers(): void
+    {
+        $errors = $this->normalizeAndCaptureErrors([[
+            'type' => 'record_local_activity',
+            'activity_type' => 'charge-card',
+            'result' => Serializer::serialize('charged'),
+            'outcome' => 'completed',
+            'attempts' => [
+                [
+                    'attempt_number' => 1,
+                    'outcome' => 'failed',
+                    'message' => 'retry',
+                    'retry_reason' => 'failure',
+                    'backoff_seconds' => 1,
+                ],
+                [
+                    'attempt_number' => 1,
+                    'outcome' => 'completed',
+                ],
+            ],
+            'retry_policy' => [
+                'max_attempts' => 2,
+                'backoff_seconds' => [1],
+            ],
+        ]]);
+
+        $this->assertArrayHasKey('commands.0.attempts.1.attempt_number', $errors);
+    }
+
+    public function testRecordLocalActivityRejectsRetryAndTerminalOutcomeContradictions(): void
+    {
+        $errors = $this->normalizeAndCaptureErrors([[
+            'type' => 'record_local_activity',
+            'activity_type' => 'charge-card',
+            'message' => 'cancelled',
+            'outcome' => 'cancelled',
+            'attempts' => [
+                [
+                    'attempt_number' => 1,
+                    'outcome' => 'completed',
+                    'retry_reason' => 'failure',
+                    'backoff_seconds' => 0,
+                ],
+                [
+                    'attempt_number' => 2,
+                    'outcome' => 'failed',
+                    'message' => 'failed instead',
+                ],
+            ],
+            'retry_policy' => [
+                'max_attempts' => 2,
+                'backoff_seconds' => [0],
+            ],
+        ]]);
+
+        $this->assertArrayHasKey('commands.0.attempts.0.outcome', $errors);
+        $this->assertArrayHasKey('commands.0.attempts.1.outcome', $errors);
+    }
+
+    public function testRecordLocalActivityRejectsAttemptsAboveRetryPolicyMaximum(): void
+    {
+        $errors = $this->normalizeAndCaptureErrors([[
+            'type' => 'record_local_activity',
+            'activity_type' => 'charge-card',
+            'result' => Serializer::serialize('charged'),
+            'outcome' => 'completed',
+            'attempts' => [
+                [
+                    'attempt_number' => 1,
+                    'outcome' => 'failed',
+                    'message' => 'retry',
+                    'retry_reason' => 'failure',
+                    'backoff_seconds' => 0,
+                ],
+                [
+                    'attempt_number' => 2,
+                    'outcome' => 'completed',
+                ],
+            ],
+            'retry_policy' => [
+                'max_attempts' => 1,
+            ],
+        ]]);
+
+        $this->assertArrayHasKey('commands.0.attempts', $errors);
+        $this->assertStringContainsString('max_attempts is 1', $errors['commands.0.attempts'][0]);
+    }
+
+    public function testRecordLocalActivityRejectsMalformedAndOutOfOrderHeartbeats(): void
+    {
+        $errors = $this->normalizeAndCaptureErrors([[
+            'type' => 'record_local_activity',
+            'activity_type' => 'charge-card',
+            'result' => Serializer::serialize('charged'),
+            'outcome' => 'completed',
+            'attempts' => [[
+                'attempt_number' => 1,
+                'outcome' => 'completed',
+                'heartbeats' => [
+                    [
+                        'elapsed_ms' => 10,
+                        'details' => [
+                            'stage' => 'one',
+                        ],
+                    ],
+                    [
+                        'elapsed_ms' => 5,
+                        'details' => 'invalid',
+                    ],
+                ],
+            ]],
+        ]]);
+
+        $this->assertArrayHasKey('commands.0.attempts.0.heartbeats.1.elapsed_ms', $errors);
+        $this->assertArrayHasKey('commands.0.attempts.0.heartbeats.1.details', $errors);
+    }
+
+    public function testRecordLocalActivityRejectsUnknownFieldsAndDuplicateAttemptIds(): void
+    {
+        $errors = $this->normalizeAndCaptureErrors([[
+            'type' => 'record_local_activity',
+            'activity_type' => 'charge-card',
+            'result' => Serializer::serialize('charged'),
+            'outcome' => 'completed',
+            'non_retryable' => 'yes',
+            'attempts' => [
+                [
+                    'attempt_id' => 'duplicate-id',
+                    'attempt_number' => 1,
+                    'outcome' => 'failed',
+                    'message' => 'retry',
+                    'retry_reason' => 'failure',
+                    'backoff_seconds' => 0,
+                    'unexpected' => true,
+                ],
+                [
+                    'attempt_id' => 'duplicate-id',
+                    'attempt_number' => 2,
+                    'outcome' => 'completed',
+                    'heartbeats' => [[
+                        'elapsed_ms' => 1,
+                        'unexpected' => true,
+                    ]],
+                ],
+            ],
+            'retry_policy' => [
+                'max_attempts' => 2,
+                'backoff_seconds' => [0],
+                'unexpected' => true,
+            ],
+        ]]);
+
+        $this->assertArrayHasKey('commands.0.retry_policy.unexpected', $errors);
+        $this->assertArrayHasKey('commands.0.non_retryable', $errors);
+        $this->assertArrayHasKey('commands.0.attempts.0.unexpected', $errors);
+        $this->assertArrayHasKey('commands.0.attempts.1.attempt_id', $errors);
+        $this->assertArrayHasKey('commands.0.attempts.1.heartbeats.0.unexpected', $errors);
     }
 
     public function testScheduleActivityRejectsInvalidRetryPolicy(): void

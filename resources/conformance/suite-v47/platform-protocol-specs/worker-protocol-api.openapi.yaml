@@ -1286,27 +1286,54 @@ components:
               type: { const: record_local_activity }
             required: [type]
           then:
-            required: [activity_type, outcome]
+            required: [activity_type, outcome, attempts]
             x-durable-workflow-minimum-protocol-version: "1.18"
             x-durable-workflow-worker-capability: local_activities
+            x-durable-workflow-attempt-sequence: contiguous_one_based
+            x-durable-workflow-attempt-count-limit: retry_policy.max_attempts_default_1
+            x-durable-workflow-final-attempt-outcome: matches_command_outcome
+            x-durable-workflow-final-attempt-non-retryable: matches_command_non_retryable_default_false
+            x-durable-workflow-retry-prefix-outcomes: [failed, timed_out]
             properties:
               activity_type: { type: string, minLength: 1 }
               arguments: true
               result: true
               payload_codec: { type: string, minLength: 1 }
               outcome: { type: string, enum: [completed, failed, timed_out, cancelled] }
-              message: { type: [string, "null"] }
+              message: { type: string, minLength: 1 }
               exception_type: { type: [string, "null"] }
               non_retryable: { type: boolean }
+              timeout_kind: { type: string, enum: [start_to_close, schedule_to_close, heartbeat] }
               attempts:
                 type: array
                 minItems: 1
-                items: { type: object, additionalProperties: true }
-              retry_policy: { type: object, additionalProperties: true }
+                maxItems: 100
+                x-durable-workflow-max-total-heartbeats: 1000
+                items: { $ref: "#/components/schemas/LocalActivityAttemptReport" }
+              retry_policy: { $ref: "#/components/schemas/LocalActivityRetryPolicy" }
               start_to_close_timeout: { type: integer, minimum: 1 }
               schedule_to_close_timeout: { type: integer, minimum: 1 }
               heartbeat_timeout: { type: integer, minimum: 1 }
               execution_mode: { type: string, const: local }
+            allOf:
+              - if:
+                  required: [outcome]
+                  properties:
+                    outcome: { const: completed }
+                then:
+                  required: [result]
+              - if:
+                  required: [outcome]
+                  properties:
+                    outcome: { enum: [failed, timed_out, cancelled] }
+                then:
+                  required: [message]
+              - if:
+                  required: [outcome]
+                  properties:
+                    outcome: { const: timed_out }
+                then:
+                  required: [timeout_kind]
         - if:
             required: [parallel_group_mode]
             properties:
@@ -1329,6 +1356,59 @@ components:
               selection_member_base_sequence: { type: integer, minimum: 1 }
               selection_member_size: { type: integer, minimum: 1 }
               selection_member_kind: { type: string, enum: [activity, child, timer, signal, condition, group] }
+    LocalActivityRetryPolicy:
+      type: object
+      additionalProperties: false
+      properties:
+        max_attempts: { type: integer, minimum: 1, maximum: 100, default: 1 }
+        backoff_seconds:
+          type: array
+          maxItems: 99
+          items: { type: integer, minimum: 0 }
+        non_retryable_error_types:
+          type: array
+          uniqueItems: true
+          items: { type: string, minLength: 1 }
+    LocalActivityAttemptReport:
+      type: object
+      additionalProperties: false
+      required: [attempt_number, outcome]
+      properties:
+        attempt_id: { type: string, minLength: 1, maxLength: 255 }
+        attempt_number: { type: integer, minimum: 1, maximum: 100 }
+        outcome: { type: string, enum: [completed, failed, timed_out, cancelled] }
+        duration_ms: { type: integer, minimum: 0 }
+        message: { type: string, minLength: 1 }
+        exception_type: { type: string, minLength: 1 }
+        non_retryable: { type: boolean }
+        timeout_kind: { type: string, enum: [start_to_close, schedule_to_close, heartbeat] }
+        retry_reason: { type: string, enum: [failure, timeout, cold_replay] }
+        backoff_seconds: { type: integer, minimum: 0 }
+        heartbeats:
+          type: array
+          maxItems: 1000
+          x-durable-workflow-order: elapsed_ms_monotonic_non_decreasing
+          items: { $ref: "#/components/schemas/LocalActivityHeartbeatReport" }
+      allOf:
+        - if:
+            required: [outcome]
+            properties:
+              outcome: { enum: [failed, timed_out, cancelled] }
+          then:
+            required: [message]
+        - if:
+            required: [outcome]
+            properties:
+              outcome: { const: timed_out }
+          then:
+            required: [timeout_kind]
+    LocalActivityHeartbeatReport:
+      type: object
+      additionalProperties: false
+      required: [elapsed_ms]
+      properties:
+        elapsed_ms: { type: integer, minimum: 0 }
+        details: { type: object, additionalProperties: true }
     SearchAttributeTypeMap:
       type: object
       additionalProperties: { $ref: "#/components/schemas/SearchAttributeType" }

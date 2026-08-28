@@ -19,6 +19,7 @@ use Workflow\V2\Contracts\HistoryProjectionRole;
 use Workflow\V2\Contracts\ServiceControlPlane;
 use Workflow\V2\Contracts\WorkflowControlPlane;
 use Workflow\V2\Contracts\WorkflowTaskBridge;
+use Workflow\V2\Enums\ActivityAttemptStatus;
 use Workflow\V2\Enums\ActivityStatus;
 use Workflow\V2\Enums\ChildCallStatus;
 use Workflow\V2\Enums\CommandOutcome;
@@ -32,6 +33,7 @@ use Workflow\V2\Enums\TaskType;
 use Workflow\V2\Enums\TimerStatus;
 use Workflow\V2\Enums\UpdateStatus;
 use Workflow\V2\Exceptions\HistoryEventShapeMismatchException;
+use Workflow\V2\Models\ActivityAttempt;
 use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowChildCall;
 use Workflow\V2\Models\WorkflowCommand;
@@ -3515,12 +3517,15 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'timed_out' => ActivityStatus::Failed,
             default => ActivityStatus::Failed,
         };
-        $attempts = is_array($command['attempts'] ?? null) && $command['attempts'] !== []
+        $attempts = is_array($command['attempts'] ?? null)
             ? array_values($command['attempts'])
-            : [[
-                'attempt_number' => 1,
-                'outcome' => $outcome,
-            ]];
+            : [];
+        foreach ($attempts as $index => $attempt) {
+            $attempts[$index] = $attempt + [
+                'internal_attempt_id' => (string) Str::ulid(),
+            ];
+        }
+        $lastAttempt = $attempts[array_key_last($attempts)];
         $now = now();
 
         /** @var ActivityExecution $execution */
@@ -3531,6 +3536,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'activity_type' => $command['activity_type'],
             'status' => $status->value,
             'attempt_count' => count($attempts),
+            'current_attempt_id' => $lastAttempt['internal_attempt_id'],
             'payload_codec' => $payloadCodec,
             'arguments' => $arguments,
             'result' => $result,
@@ -3561,34 +3567,47 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
         WorkflowHistoryEvent::record($run, HistoryEventType::ActivityScheduled, $basePayload, $task);
 
         foreach ($attempts as $index => $attempt) {
-            $attempt = is_array($attempt) ? $attempt : [];
-            $attemptNumber = is_int($attempt['attempt_number'] ?? null)
-                ? max(1, $attempt['attempt_number'])
-                : $index + 1;
-            $attemptId = is_string($attempt['attempt_id'] ?? null) && trim($attempt['attempt_id']) !== ''
-                ? trim($attempt['attempt_id'])
-                : (string) Str::ulid();
-            $attempts[$index] = $attempt + [
-                'attempt_id' => $attemptId,
+            $attemptNumber = $attempt['attempt_number'];
+            $attemptId = $attempt['internal_attempt_id'];
+            $workerAttemptId = $attempt['attempt_id'] ?? null;
+            $heartbeats = $attempt['heartbeats'] ?? [];
+            $lastHeartbeat = $heartbeats[array_key_last($heartbeats)] ?? null;
+            $lastElapsedMs = is_array($lastHeartbeat) ? $lastHeartbeat['elapsed_ms'] : 0;
+            $durationMs = is_int($attempt['duration_ms'] ?? null) ? $attempt['duration_ms'] : 0;
+            $startedAt = $now->copy()
+                ->subMilliseconds(max($lastElapsedMs, $durationMs));
+            $attemptStatus = match ($attempt['outcome']) {
+                'completed' => ActivityAttemptStatus::Completed,
+                'cancelled' => ActivityAttemptStatus::Cancelled,
+                default => ActivityAttemptStatus::Failed,
+            };
+
+            ActivityAttempt::query()->create([
+                'id' => $attemptId,
+                'workflow_run_id' => $run->id,
+                'activity_execution_id' => $execution->id,
+                'workflow_task_id' => $task->id,
+                'worker_attempt_id' => $workerAttemptId,
                 'attempt_number' => $attemptNumber,
-            ];
+                'status' => $attemptStatus->value,
+                'lease_owner' => $task->lease_owner,
+                'started_at' => $startedAt,
+                'last_heartbeat_at' => $heartbeats === [] ? $startedAt : $now,
+                'lease_expires_at' => null,
+                'closed_at' => $now,
+            ]);
+
             $attemptPayload = $basePayload + [
                 'activity_attempt_id' => $attemptId,
+                'worker_attempt_id' => $workerAttemptId,
                 'attempt_number' => $attemptNumber,
             ];
             WorkflowHistoryEvent::record($run, HistoryEventType::ActivityStarted, $attemptPayload, $task);
 
-            $heartbeats = is_array($attempt['heartbeats'] ?? null) ? $attempt['heartbeats'] : [];
             foreach ($heartbeats as $heartbeat) {
-                if (! is_array($heartbeat)) {
-                    continue;
-                }
-
-                $elapsedMs = is_int($heartbeat['elapsed_ms'] ?? null)
-                    ? max(0, $heartbeat['elapsed_ms'])
-                    : 0;
+                $elapsedMs = $heartbeat['elapsed_ms'];
                 $heartbeatPayload = $attemptPayload + [
-                    'heartbeat_at' => $now->copy()
+                    'heartbeat_at' => $startedAt->copy()
                         ->addMilliseconds($elapsedMs)
                         ->toJSON(),
                     'lease_expires_at' => null,
@@ -3626,17 +3645,38 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             }
         }
 
-        $lastAttempt = is_array($attempts[array_key_last($attempts)] ?? null)
-            ? $attempts[array_key_last($attempts)]
-            : [];
         $terminalPayload = $basePayload + [
-            'activity_attempt_id' => is_string($lastAttempt['attempt_id'] ?? null)
-                ? $lastAttempt['attempt_id']
-                : (string) Str::ulid(),
-            'attempt_number' => is_int($lastAttempt['attempt_number'] ?? null)
-                ? $lastAttempt['attempt_number']
-                : count($attempts),
+            'activity_attempt_id' => $lastAttempt['internal_attempt_id'],
+            'worker_attempt_id' => $lastAttempt['attempt_id'] ?? null,
+            'attempt_number' => $lastAttempt['attempt_number'],
         ];
+
+        $failure = null;
+        if (in_array($outcome, ['failed', 'timed_out'], true)) {
+            $failureCategory = $outcome === 'timed_out'
+                ? FailureCategory::Timeout
+                : FailureCategory::Activity;
+            $exceptionClass = is_string($command['exception_type'] ?? null)
+                ? $command['exception_type']
+                : ($outcome === 'timed_out'
+                    ? 'Workflow\\V2\\Exceptions\\ActivityTimeoutException'
+                    : RuntimeException::class);
+
+            $failure = WorkflowFailure::query()->create([
+                'workflow_run_id' => $run->id,
+                'source_kind' => 'activity_execution',
+                'source_id' => $execution->id,
+                'propagation_kind' => $outcome === 'timed_out' ? 'timeout' : 'activity',
+                'failure_category' => $failureCategory->value,
+                'non_retryable' => (bool) ($command['non_retryable'] ?? false),
+                'handled' => false,
+                'exception_class' => $exceptionClass,
+                'message' => $command['message'],
+                'file' => '',
+                'line' => 0,
+                'trace_preview' => '',
+            ]);
+        }
 
         $terminalEvent = match ($outcome) {
             'completed' => HistoryEventType::ActivityCompleted,
@@ -3653,6 +3693,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 'cancelled_at' => $now->toJSON(),
             ],
             'timed_out' => [
+                'failure_id' => $failure?->id,
                 'failure_category' => 'timeout',
                 'timeout_kind' => is_string($command['timeout_kind'] ?? null)
                     ? $command['timeout_kind']
@@ -3661,6 +3702,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 'exception_class' => $command['exception_type'] ?? null,
             ],
             default => [
+                'failure_id' => $failure?->id,
                 'failure_category' => 'application',
                 'message' => $command['message'] ?? 'Local activity failed.',
                 'exception_type' => $command['exception_type'] ?? null,
@@ -3668,6 +3710,27 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             ],
         };
         WorkflowHistoryEvent::record($run, $terminalEvent, $terminalPayload, $task);
+
+        if ($failure instanceof WorkflowFailure) {
+            LifecycleEventDispatcher::activityFailed(
+                $run,
+                (string) $execution->id,
+                (string) $execution->activity_type,
+                (string) $execution->activity_class,
+                (int) $execution->sequence,
+                (int) $lastAttempt['attempt_number'],
+                $failure->exception_class,
+                $failure->message,
+            );
+            LifecycleEventDispatcher::failureRecorded(
+                $run,
+                (string) $failure->id,
+                'activity_execution',
+                (string) $execution->id,
+                $failure->exception_class,
+                $failure->message,
+            );
+        }
 
         return $sequence + 1;
     }

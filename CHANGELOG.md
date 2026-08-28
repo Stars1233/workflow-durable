@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.48` makes SDK-reported local-activity attempt sequences
+  authoritative. The command grammar rejects unordered, contradictory, or
+  over-limit attempts and heartbeats, while service-mode completion projects
+  each attempt and terminal failure into the same operator-facing records used
+  by embedded execution. Worker-reported attempt identities remain scoped to
+  their activity executions while server-owned ULIDs keep durable attempt and
+  history references globally safe. Platform conformance suite 47 publishes
+  this typed grammar without changing the retained protocol 1.18 bytes.
 - Workflow `2.0.0-rc.48` owns method-dependency resolution across supported
   Laravel versions, including contextual attributes, enum defaults, supplied
   class parameters, and `self` and `parent` parameter types. The v2 unit suite

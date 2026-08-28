@@ -28,7 +28,7 @@ final class PlatformConformanceSuite
 
     public const VERSION = 47;
 
-    public const MIRROR_SHA256 = 'e643c098def39b0c3a2e39fc2d220774fca00e27341b0a4512383d51a993cf6f';
+    public const MIRROR_SHA256 = '985f8a657003c7b4f4db0670ae0be4212537bcb4609a9534149704eaee11e83f';
 
     public const RUNTIME_SOURCE_REVISION = '75dfd5c869823409ef3d6c4b009a7882159ae9a2';
 

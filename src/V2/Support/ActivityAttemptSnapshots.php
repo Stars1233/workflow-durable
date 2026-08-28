@@ -141,6 +141,8 @@ final class ActivityAttemptSnapshots
 
         $snapshot = array_filter([
             'id' => $attemptId,
+            'worker_attempt_id' => self::stringValue($attempt['worker_attempt_id'] ?? null)
+                ?? self::stringValue($payload['worker_attempt_id'] ?? null),
             'activity_execution_id' => $activityId,
             'workflow_task_id' => self::stringValue($attempt['task_id'] ?? null)
                 ?? self::stringValue($event->workflow_task_id)
@@ -186,6 +188,7 @@ final class ActivityAttemptSnapshots
     {
         return array_filter([
             'id' => $attempt->id,
+            'worker_attempt_id' => $attempt->worker_attempt_id,
             'activity_execution_id' => $attempt->activity_execution_id,
             'workflow_task_id' => $attempt->workflow_task_id,
             'attempt_number' => $attempt->attempt_number,

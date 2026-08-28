@@ -1488,6 +1488,7 @@ final class HistoryExport
                 ?? self::intValue($state['attempt_count'] ?? null)
                 ?? 0,
             'current_attempt_id' => $activity['attempt_id'] ?? ($state['attempt_id'] ?? null),
+            'current_worker_attempt_id' => $activity['worker_attempt_id'] ?? null,
             'arguments' => self::payloadValue($state['arguments'] ?? null),
             'result' => $unsupportedReason === RunActivityView::UNSUPPORTED_TERMINAL_REASON
                 ? null
@@ -1558,6 +1559,7 @@ final class HistoryExport
 
             $attempts[] = [
                 'id' => $attempt['id'] ?? null,
+                'worker_attempt_id' => $attempt['worker_attempt_id'] ?? null,
                 'activity_execution_id' => $activityId,
                 'workflow_task_id' => $attempt['task_id'] ?? null,
                 'attempt_number' => $attempt['attempt_number'] ?? null,
@@ -1610,6 +1612,7 @@ final class HistoryExport
             'retry_policy' => $activity['retry_policy'] ?? null,
             'attempt_count' => $activity['attempt_count'] ?? 0,
             'current_attempt_id' => $activity['current_attempt_id'] ?? null,
+            'current_worker_attempt_id' => $activity['current_worker_attempt_id'] ?? null,
             'arguments' => $activity['arguments'] ?? null,
             'result' => $activity['result'] ?? null,
             'created_at' => self::timestamp($activity['created_at'] ?? null),

@@ -45,6 +45,43 @@ use Workflow\V2\Models\WorkflowSearchAttribute;
  */
 final class WorkflowCommandNormalizer
 {
+    public const MAX_LOCAL_ACTIVITY_ATTEMPTS = 100;
+
+    public const MAX_LOCAL_ACTIVITY_HEARTBEATS_PER_ATTEMPT = 1000;
+
+    public const MAX_LOCAL_ACTIVITY_HEARTBEATS = 1000;
+
+    /**
+     * @var list<string>
+     */
+    private const LOCAL_ACTIVITY_RETRY_POLICY_FIELDS = [
+        'max_attempts',
+        'backoff_seconds',
+        'non_retryable_error_types',
+    ];
+
+    /**
+     * @var list<string>
+     */
+    private const LOCAL_ACTIVITY_ATTEMPT_FIELDS = [
+        'attempt_id',
+        'attempt_number',
+        'outcome',
+        'duration_ms',
+        'message',
+        'exception_type',
+        'non_retryable',
+        'timeout_kind',
+        'retry_reason',
+        'backoff_seconds',
+        'heartbeats',
+    ];
+
+    /**
+     * @var list<string>
+     */
+    private const LOCAL_ACTIVITY_HEARTBEAT_FIELDS = ['elapsed_ms', 'details'];
+
     /**
      * Scope contract for retry/timeout/failure fields. Each entry lists the
      * command types that legitimately accept the field and a short guidance
@@ -88,6 +125,10 @@ final class WorkflowCommandNormalizer
         'non_retryable' => [
             'allowed' => ['fail_workflow', 'fail_update', 'record_local_activity'],
             'guidance' => 'non_retryable marks a workflow, update, or recorded local-activity failure as non-retryable. Durable activity non-retryable error types belong inside the schedule_activity retry_policy.non_retryable_error_types list.',
+        ],
+        'timeout_kind' => [
+            'allowed' => ['record_local_activity'],
+            'guidance' => 'timeout_kind identifies the bounded timeout that ended a recorded local activity and only applies to a record_local_activity command.',
         ],
         'exception' => [
             'allowed' => ['fail_workflow'],
@@ -463,6 +504,50 @@ final class WorkflowCommandNormalizer
                 $heartbeat = self::optionalPositiveInt($command, 'heartbeat_timeout', $index, $errors);
                 self::assertActivityTimeoutOrdering($startToClose, $scheduleToClose, $heartbeat, $index, $errors);
 
+                $nonRetryable = null;
+                if (array_key_exists('non_retryable', $command)) {
+                    if (! is_bool($command['non_retryable'])) {
+                        $errors["commands.{$index}.non_retryable"] = [
+                            'Local activity non_retryable must be boolean when provided.',
+                        ];
+                    } else {
+                        $nonRetryable = $command['non_retryable'];
+                        if ($outcome === 'completed') {
+                            $errors["commands.{$index}.non_retryable"] = [
+                                'Completed local activities cannot be marked non-retryable.',
+                            ];
+                        }
+                    }
+                }
+                $attempts = self::normalizeLocalActivityAttempts(
+                    $command,
+                    $outcome,
+                    $nonRetryable,
+                    $retryPolicy,
+                    $index,
+                    $errors,
+                );
+                $timeoutKind = self::optionalCommandString($command, 'timeout_kind', $index, $errors);
+                if ($timeoutKind !== null && ! in_array(
+                    $timeoutKind,
+                    ['start_to_close', 'schedule_to_close', 'heartbeat'],
+                    true,
+                )) {
+                    $errors["commands.{$index}.timeout_kind"] = [
+                        'Local activity timeout_kind must be start_to_close, schedule_to_close, or heartbeat.',
+                    ];
+                }
+                if ($outcome === 'timed_out' && $timeoutKind === null) {
+                    $errors["commands.{$index}.timeout_kind"] = [
+                        'Timed out local activities require a timeout_kind.',
+                    ];
+                }
+                if ($outcome !== 'timed_out' && $timeoutKind !== null) {
+                    $errors["commands.{$index}.timeout_kind"] = [
+                        'Only timed out local activities may declare timeout_kind.',
+                    ];
+                }
+
                 $arguments = self::resolveCommandArgumentsWithCodec($command, $index, $errors);
                 $result = self::resolveCommandPayloadWithCodec($command, 'result', $index, $errors);
                 $payloadCodec = self::payloadCodecForResolvedPayload(
@@ -494,8 +579,9 @@ final class WorkflowCommandNormalizer
                     'outcome' => $outcome,
                     'message' => is_string($command['message'] ?? null) ? trim($command['message']) : null,
                     'exception_type' => self::optionalCommandString($command, 'exception_type', $index, $errors),
-                    'non_retryable' => is_bool($command['non_retryable'] ?? null) ? $command['non_retryable'] : null,
-                    'attempts' => self::optionalCommandArray($command, 'attempts', $index, $errors),
+                    'non_retryable' => $nonRetryable,
+                    'timeout_kind' => $timeoutKind,
+                    'attempts' => $attempts,
                     'retry_policy' => $retryPolicy,
                     'start_to_close_timeout' => $startToClose,
                     'schedule_to_close_timeout' => $scheduleToClose,
@@ -1026,6 +1112,434 @@ final class WorkflowCommandNormalizer
 
     /**
      * @param  array<string, mixed>  $command
+     * @param  array<string, mixed>|null  $retryPolicy
+     * @param  array<string, list<string>>  $errors
+     * @return list<array<string, mixed>>|null
+     */
+    private static function normalizeLocalActivityAttempts(
+        array $command,
+        string $terminalOutcome,
+        ?bool $terminalNonRetryable,
+        ?array $retryPolicy,
+        int $index,
+        array &$errors,
+    ): ?array {
+        $rawAttempts = $command['attempts'] ?? null;
+
+        if (! is_array($rawAttempts) || ! array_is_list($rawAttempts) || $rawAttempts === []) {
+            $errors["commands.{$index}.attempts"] = ['Local activity attempts must be a non-empty ordered list.'];
+
+            return null;
+        }
+
+        $attemptCount = count($rawAttempts);
+        $maxAttempts = is_int($retryPolicy['max_attempts'] ?? null)
+            ? $retryPolicy['max_attempts']
+            : 1;
+
+        self::validateLocalActivityRetryPolicyShape($command, $index, $errors);
+
+        if ($maxAttempts > self::MAX_LOCAL_ACTIVITY_ATTEMPTS) {
+            $errors["commands.{$index}.retry_policy.max_attempts"] = [
+                sprintf(
+                    'Local activity retry policy max_attempts must not exceed %d.',
+                    self::MAX_LOCAL_ACTIVITY_ATTEMPTS,
+                ),
+            ];
+        }
+
+        if ($attemptCount > self::MAX_LOCAL_ACTIVITY_ATTEMPTS) {
+            $errors["commands.{$index}.attempts"] = [
+                sprintf('Local activity reports may contain at most %d attempts.', self::MAX_LOCAL_ACTIVITY_ATTEMPTS),
+            ];
+        } elseif ($attemptCount > $maxAttempts) {
+            $errors["commands.{$index}.attempts"] = [
+                sprintf(
+                    'Local activity report contains %d attempts but retry_policy.max_attempts is %d.',
+                    $attemptCount,
+                    $maxAttempts,
+                ),
+            ];
+        }
+
+        $backoffSchedule = is_array($retryPolicy['backoff_seconds'] ?? null)
+            ? array_values($retryPolicy['backoff_seconds'])
+            : [];
+        if (count($backoffSchedule) > max(0, $maxAttempts - 1)) {
+            $errors["commands.{$index}.retry_policy.backoff_seconds"] = [
+                'Local activity retry backoff entries must not exceed the number of possible retries.',
+            ];
+        }
+
+        $normalized = [];
+        $attemptIds = [];
+        $heartbeatCount = 0;
+        $lastPosition = $attemptCount - 1;
+
+        foreach ($rawAttempts as $position => $rawAttempt) {
+            $path = "commands.{$index}.attempts.{$position}";
+            if (! is_array($rawAttempt) || array_is_list($rawAttempt)) {
+                $errors[$path] = ['Each local activity attempt must be an object.'];
+
+                continue;
+            }
+
+            self::rejectUnknownNestedFields(
+                $rawAttempt,
+                self::LOCAL_ACTIVITY_ATTEMPT_FIELDS,
+                $path,
+                'local activity attempt',
+                $errors,
+            );
+
+            $expectedAttemptNumber = $position + 1;
+            $attemptNumber = $rawAttempt['attempt_number'] ?? null;
+            if (! is_int($attemptNumber) || $attemptNumber !== $expectedAttemptNumber) {
+                $errors["{$path}.attempt_number"] = [
+                    sprintf(
+                        'Local activity attempt_number must be the ordered one-based value %d.',
+                        $expectedAttemptNumber,
+                    ),
+                ];
+            }
+
+            $attemptOutcome = $rawAttempt['outcome'] ?? null;
+            if (! is_string($attemptOutcome) || ! in_array(
+                $attemptOutcome,
+                ['completed', 'failed', 'timed_out', 'cancelled'],
+                true,
+            )) {
+                $errors["{$path}.outcome"] = [
+                    'Local activity attempt outcome must be completed, failed, timed_out, or cancelled.',
+                ];
+
+                continue;
+            }
+
+            $terminal = $position === $lastPosition;
+            if ($terminal && $attemptOutcome !== $terminalOutcome) {
+                $errors["{$path}.outcome"] = [
+                    'The final local activity attempt outcome must match the command outcome.',
+                ];
+            }
+            if (! $terminal && ! in_array($attemptOutcome, ['failed', 'timed_out'], true)) {
+                $errors["{$path}.outcome"] = [
+                    'Only failed or timed_out local activity attempts may be followed by a retry.',
+                ];
+            }
+
+            $attemptId = self::optionalNestedString($rawAttempt, 'attempt_id', $path, $errors);
+            if ($attemptId !== null && strlen($attemptId) > 255) {
+                $errors["{$path}.attempt_id"] = ['Local activity attempt_id must not exceed 255 bytes.'];
+            } elseif ($attemptId !== null && isset($attemptIds[$attemptId])) {
+                $errors["{$path}.attempt_id"] = [
+                    'Local activity attempt_id must be unique within the reported sequence.',
+                ];
+            } elseif ($attemptId !== null) {
+                $attemptIds[$attemptId] = true;
+            }
+
+            $durationMs = null;
+            if (array_key_exists('duration_ms', $rawAttempt)) {
+                if (! is_int($rawAttempt['duration_ms']) || $rawAttempt['duration_ms'] < 0) {
+                    $errors["{$path}.duration_ms"] = [
+                        'Local activity attempt duration_ms must be a non-negative integer.',
+                    ];
+                } else {
+                    $durationMs = $rawAttempt['duration_ms'];
+                }
+            }
+            $message = self::optionalNestedString($rawAttempt, 'message', $path, $errors);
+            $exceptionType = self::optionalNestedString($rawAttempt, 'exception_type', $path, $errors);
+            if ($attemptOutcome !== 'completed' && $message === null) {
+                $errors["{$path}.message"] = [
+                    'Failed, timed out, and cancelled local activity attempts require a message.',
+                ];
+            }
+
+            $nonRetryable = null;
+            if (array_key_exists('non_retryable', $rawAttempt)) {
+                if (! is_bool($rawAttempt['non_retryable'])) {
+                    $errors["{$path}.non_retryable"] = [
+                        'Local activity attempt non_retryable must be boolean when provided.',
+                    ];
+                } else {
+                    $nonRetryable = $rawAttempt['non_retryable'];
+                    if (! $terminal && $nonRetryable) {
+                        $errors["{$path}.non_retryable"] = [
+                            'A non-retryable local activity attempt cannot be followed by a retry.',
+                        ];
+                    }
+                }
+            }
+            if ($terminal
+                && $nonRetryable !== null
+                && $nonRetryable !== ($terminalNonRetryable ?? false)
+            ) {
+                $errors["{$path}.non_retryable"] = [
+                    'The terminal local activity attempt non_retryable value must match the command outcome.',
+                ];
+            }
+
+            $timeoutKind = self::optionalNestedString($rawAttempt, 'timeout_kind', $path, $errors);
+            if ($attemptOutcome === 'timed_out' && ($timeoutKind === null || ! in_array(
+                $timeoutKind,
+                ['start_to_close', 'schedule_to_close', 'heartbeat'],
+                true,
+            ))) {
+                $errors["{$path}.timeout_kind"] = [
+                    'Timed out local activity attempts require start_to_close, schedule_to_close, or heartbeat timeout_kind.',
+                ];
+            }
+            if ($attemptOutcome !== 'timed_out' && $timeoutKind !== null) {
+                $errors["{$path}.timeout_kind"] = [
+                    'Only timed out local activity attempts may declare timeout_kind.',
+                ];
+            }
+
+            $retryReason = self::optionalNestedString($rawAttempt, 'retry_reason', $path, $errors);
+            $backoffSeconds = null;
+            if (array_key_exists('backoff_seconds', $rawAttempt)) {
+                if (! is_int($rawAttempt['backoff_seconds']) || $rawAttempt['backoff_seconds'] < 0) {
+                    $errors["{$path}.backoff_seconds"] = [
+                        'Local activity attempt backoff_seconds must be a non-negative integer.',
+                    ];
+                } else {
+                    $backoffSeconds = $rawAttempt['backoff_seconds'];
+                }
+            }
+
+            if (! $terminal) {
+                $allowedRetryReasons = $attemptOutcome === 'timed_out'
+                    ? ['timeout', 'cold_replay']
+                    : ['failure', 'cold_replay'];
+                if ($retryReason === null || ! in_array($retryReason, $allowedRetryReasons, true)) {
+                    $errors["{$path}.retry_reason"] = [
+                        sprintf(
+                            'A retried %s local activity attempt requires a compatible retry_reason.',
+                            $attemptOutcome,
+                        ),
+                    ];
+                }
+                if ($backoffSeconds === null) {
+                    $errors["{$path}.backoff_seconds"] = [
+                        'A retried local activity attempt requires backoff_seconds.',
+                    ];
+                } elseif (isset($backoffSchedule[$position]) && $backoffSchedule[$position] !== $backoffSeconds) {
+                    $errors["{$path}.backoff_seconds"] = [
+                        'Local activity attempt backoff_seconds must match retry_policy.backoff_seconds.',
+                    ];
+                }
+            } elseif ($retryReason !== null || $backoffSeconds !== null) {
+                $errors[$path] = [
+                    'The terminal local activity attempt cannot declare retry_reason or backoff_seconds.',
+                ];
+            }
+
+            $heartbeats = self::normalizeLocalActivityHeartbeats(
+                $rawAttempt['heartbeats'] ?? null,
+                $path,
+                $errors,
+            );
+            $heartbeatCount += count($heartbeats);
+
+            $normalized[] = array_filter([
+                'attempt_id' => $attemptId,
+                'attempt_number' => is_int($attemptNumber) ? $attemptNumber : $expectedAttemptNumber,
+                'outcome' => $attemptOutcome,
+                'duration_ms' => $durationMs,
+                'message' => $message,
+                'exception_type' => $exceptionType,
+                'non_retryable' => $nonRetryable,
+                'timeout_kind' => $timeoutKind,
+                'retry_reason' => $retryReason,
+                'backoff_seconds' => $backoffSeconds,
+                'heartbeats' => $heartbeats,
+            ], static fn (mixed $value): bool => $value !== null);
+        }
+
+        if ($heartbeatCount > self::MAX_LOCAL_ACTIVITY_HEARTBEATS) {
+            $errors["commands.{$index}.attempts"] = [
+                sprintf(
+                    'Local activity reports may contain at most %d total heartbeats.',
+                    self::MAX_LOCAL_ACTIVITY_HEARTBEATS,
+                ),
+            ];
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * @param array<string, mixed> $command
+     * @param array<string, list<string>> $errors
+     */
+    private static function validateLocalActivityRetryPolicyShape(
+        array $command,
+        int $index,
+        array &$errors,
+    ): void {
+        $raw = $command['retry_policy'] ?? null;
+        if (! is_array($raw)) {
+            return;
+        }
+
+        $path = "commands.{$index}.retry_policy";
+        self::rejectUnknownNestedFields(
+            $raw,
+            self::LOCAL_ACTIVITY_RETRY_POLICY_FIELDS,
+            $path,
+            'local activity retry policy',
+            $errors,
+        );
+
+        foreach (['backoff_seconds', 'non_retryable_error_types'] as $field) {
+            if (isset($raw[$field]) && is_array($raw[$field]) && ! array_is_list($raw[$field])) {
+                $errors["{$path}.{$field}"] = ["Local activity retry policy {$field} must be an ordered list."];
+            }
+        }
+
+        $types = $raw['non_retryable_error_types'] ?? null;
+        if (is_array($types) && array_is_list($types) && count($types) !== count(array_unique($types, SORT_REGULAR))) {
+            $errors["{$path}.non_retryable_error_types"] = [
+                'Local activity retry policy non_retryable_error_types must not contain duplicates.',
+            ];
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $value
+     * @param list<string> $allowed
+     * @param array<string, list<string>> $errors
+     */
+    private static function rejectUnknownNestedFields(
+        array $value,
+        array $allowed,
+        string $path,
+        string $subject,
+        array &$errors,
+    ): void {
+        foreach (array_keys($value) as $field) {
+            if (! is_string($field) || in_array($field, $allowed, true)) {
+                continue;
+            }
+
+            $errors["{$path}.{$field}"] = [
+                sprintf('Field [%s] is not supported in a %s report.', $field, $subject),
+            ];
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $value
+     * @param  array<string, list<string>>  $errors
+     */
+    private static function optionalNestedString(
+        array $value,
+        string $field,
+        string $path,
+        array &$errors,
+    ): ?string {
+        if (! array_key_exists($field, $value) || $value[$field] === null) {
+            return null;
+        }
+
+        if (! is_string($value[$field]) || trim($value[$field]) === '') {
+            $errors["{$path}.{$field}"] = [
+                sprintf('Local activity attempt field [%s] must be a non-empty string.', $field),
+            ];
+
+            return null;
+        }
+
+        return trim($value[$field]);
+    }
+
+    /**
+     * @param  array<string, list<string>>  $errors
+     * @return list<array{elapsed_ms: int, details?: array<string, mixed>}>
+     */
+    private static function normalizeLocalActivityHeartbeats(
+        mixed $value,
+        string $attemptPath,
+        array &$errors,
+    ): array {
+        if ($value === null) {
+            return [];
+        }
+
+        if (! is_array($value) || ! array_is_list($value)) {
+            $errors["{$attemptPath}.heartbeats"] = ['Local activity attempt heartbeats must be an ordered list.'];
+
+            return [];
+        }
+
+        if (count($value) > self::MAX_LOCAL_ACTIVITY_HEARTBEATS_PER_ATTEMPT) {
+            $errors["{$attemptPath}.heartbeats"] = [
+                sprintf(
+                    'A local activity attempt may contain at most %d heartbeats.',
+                    self::MAX_LOCAL_ACTIVITY_HEARTBEATS_PER_ATTEMPT,
+                ),
+            ];
+        }
+
+        $heartbeats = [];
+        $lastElapsedMs = -1;
+        foreach ($value as $position => $heartbeat) {
+            $path = "{$attemptPath}.heartbeats.{$position}";
+            if (! is_array($heartbeat) || array_is_list($heartbeat)) {
+                $errors[$path] = ['Each local activity heartbeat must be an object.'];
+
+                continue;
+            }
+
+            self::rejectUnknownNestedFields(
+                $heartbeat,
+                self::LOCAL_ACTIVITY_HEARTBEAT_FIELDS,
+                $path,
+                'local activity heartbeat',
+                $errors,
+            );
+
+            $elapsedMs = $heartbeat['elapsed_ms'] ?? null;
+            if (! is_int($elapsedMs) || $elapsedMs < 0) {
+                $errors["{$path}.elapsed_ms"] = [
+                    'Local activity heartbeat elapsed_ms must be a non-negative integer.',
+                ];
+
+                continue;
+            }
+            if ($elapsedMs < $lastElapsedMs) {
+                $errors["{$path}.elapsed_ms"] = [
+                    'Local activity heartbeat elapsed_ms values must be ordered monotonically.',
+                ];
+            }
+            $lastElapsedMs = $elapsedMs;
+
+            $details = null;
+            if (array_key_exists('details', $heartbeat) && $heartbeat['details'] !== null) {
+                if (! is_array($heartbeat['details'])
+                    || ($heartbeat['details'] !== [] && array_is_list($heartbeat['details']))
+                ) {
+                    $errors["{$path}.details"] = [
+                        'Local activity heartbeat details must be an object when provided.',
+                    ];
+                } else {
+                    $details = $heartbeat['details'];
+                }
+            }
+
+            $heartbeats[] = array_filter([
+                'elapsed_ms' => $elapsedMs,
+                'details' => $details,
+            ], static fn (mixed $item): bool => $item !== null);
+        }
+
+        return $heartbeats;
+    }
+
+    /**
+     * @param  array<string, mixed>  $command
      * @param  array<string, list<string>>  $errors
      * @return array<string, mixed>
      */
@@ -1116,8 +1630,8 @@ final class WorkflowCommandNormalizer
     }
 
     /**
-     * @param  array<string, mixed>  $command
-     * @param  array<string, list<string>>  $errors
+     * @param array<string, mixed> $command
+     * @param array<string, list<string>> $errors
      * @return array<string, mixed>
      */
     private static function optionalParallelMetadata(

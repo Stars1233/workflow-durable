@@ -116,7 +116,7 @@ final class WorkerProtocolArtifactBindings
                     'lifecycle' => 'lifecycle_neutral',
                     'artifact_id' => 'durable-workflow.v2.worker-protocol-api@catalog-16',
                     'resolver_url' => $currentBase . 'worker-protocol-api.openapi.yaml',
-                    'sha256' => 'sha256:2d5dc5aa3d68816f5ca42f58264020e4060a735e3ace77599f53407e109a0c7e',
+                    'sha256' => 'sha256:2b25103fb2260ee8c97e8cb62ff18dfcb8c8091a79f4cc70bb5e4878375a079c',
                 ],
             ],
         ];
@@ -169,7 +169,7 @@ final class WorkerProtocolArtifactBindings
                     'lifecycle' => 'lifecycle_neutral',
                     'artifact_id' => 'durable-workflow.v2.worker-protocol-stream@catalog-16',
                     'resolver_url' => $currentBase . 'worker-protocol-stream.asyncapi.yaml',
-                    'sha256' => 'sha256:ead97fa4b2ce6efe5b242e1c80596c06a70772a80307b8143cb8cd16fff3d85f',
+                    'sha256' => 'sha256:9b85abd60e1a9c5d41a134691f474e4665726f18f4b51d0851affbb0519582b1',
                 ],
             ],
         ];

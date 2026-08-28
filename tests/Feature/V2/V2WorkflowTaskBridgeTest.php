@@ -42,6 +42,7 @@ use Workflow\V2\Enums\UpdateStatus;
 use Workflow\V2\Exceptions\HistoryEventShapeMismatchException;
 use Workflow\V2\Exceptions\WorkflowOutputCodecUnavailableException;
 use Workflow\V2\Jobs\RunTimerTask;
+use Workflow\V2\Models\ActivityAttempt;
 use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowChildCall;
 use Workflow\V2\Models\WorkflowChildProjectionRepair;
@@ -79,6 +80,7 @@ use Workflow\V2\Support\MemoPayload;
 use Workflow\V2\Support\ParallelChildGroup;
 use Workflow\V2\Support\PendingMessageTask;
 use Workflow\V2\Support\QueryStateReplayer;
+use Workflow\V2\Support\RunActivityView;
 use Workflow\V2\Support\RunDetailView;
 use Workflow\V2\Support\RunUpdateView;
 use Workflow\V2\Support\SignalWaits;
@@ -6564,6 +6566,215 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             $this->assertSame('local', $event->payload['execution_mode']);
             $this->assertTrue($event->payload['local_activity']);
             $this->assertSame($task->id, $event->payload['workflow_task_id']);
+        }
+
+        $attempts = ActivityAttempt::query()
+            ->where('activity_execution_id', $execution->id)
+            ->orderBy('attempt_number')
+            ->get();
+        $this->assertCount(2, $attempts);
+        $this->assertSame(['failed', 'completed'], $attempts->pluck('status')
+            ->map(static fn ($status): string => $status->value)
+            ->all());
+        $this->assertSame($attempts->last()->id, $execution->current_attempt_id);
+        $this->assertSame(0, WorkflowFailure::query()
+            ->where('source_kind', 'activity_execution')
+            ->where('source_id', $execution->id)
+            ->count());
+    }
+
+    public function testCompleteSeparatesPortableWorkerAttemptIdentityFromStrictDatabaseKeys(): void
+    {
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+        $workerAttemptId = str_repeat('w', 255);
+        $commands = [];
+
+        foreach (['first-local-activity', 'second-local-activity'] as $activityType) {
+            $commands[] = [
+                'type' => 'record_local_activity',
+                'activity_type' => $activityType,
+                'result' => Serializer::serialize('completed'),
+                'outcome' => 'completed',
+                'attempts' => [[
+                    'attempt_id' => $workerAttemptId,
+                    'attempt_number' => 1,
+                    'outcome' => 'completed',
+                ]],
+                'execution_mode' => 'local',
+            ];
+        }
+
+        $result = $this->bridge->complete($task->id, $commands);
+
+        $this->assertTrue($result['completed'], json_encode($result, JSON_THROW_ON_ERROR));
+        $executions = ActivityExecution::query()
+            ->where('workflow_run_id', $run->id)
+            ->orderBy('sequence')
+            ->get();
+        $attempts = ActivityAttempt::query()
+            ->where('workflow_run_id', $run->id)
+            ->orderBy('activity_execution_id')
+            ->get();
+
+        $this->assertCount(2, $executions);
+        $this->assertCount(2, $attempts);
+        $this->assertCount(2, $attempts->pluck('id')->unique());
+        $this->assertSame([$workerAttemptId, $workerAttemptId], $attempts->pluck('worker_attempt_id')->all());
+
+        foreach ($executions as $execution) {
+            $attempt = $attempts->firstWhere('activity_execution_id', $execution->id);
+
+            $this->assertInstanceOf(ActivityAttempt::class, $attempt);
+            $this->assertSame(26, strlen($attempt->id));
+            $this->assertTrue(Ulid::isValid($attempt->id));
+            $this->assertSame($attempt->id, $execution->current_attempt_id);
+            $this->assertTrue(Ulid::isValid($execution->current_attempt_id));
+            $this->assertSame($workerAttemptId, $attempt->worker_attempt_id);
+        }
+
+        $attemptEvents = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->whereIn('event_type', [
+                HistoryEventType::ActivityStarted->value,
+                HistoryEventType::ActivityCompleted->value,
+            ])
+            ->orderBy('sequence')
+            ->get();
+        $this->assertCount(4, $attemptEvents);
+        foreach ($attemptEvents as $event) {
+            $attempt = $attempts->firstWhere('id', $event->payload['activity_attempt_id']);
+
+            $this->assertInstanceOf(ActivityAttempt::class, $attempt);
+            $this->assertSame($attempt->activity_execution_id, $event->payload['activity_execution_id']);
+            $this->assertSame($workerAttemptId, $event->payload['worker_attempt_id']);
+            $this->assertTrue(Ulid::isValid($event->payload['activity_attempt_id']));
+        }
+
+        $operatorActivities = RunActivityView::activitiesForRun($run->fresh());
+        $this->assertCount(2, $operatorActivities);
+        foreach ($operatorActivities as $activity) {
+            $this->assertSame($workerAttemptId, $activity['worker_attempt_id']);
+            $this->assertSame($workerAttemptId, $activity['attempts'][0]['worker_attempt_id']);
+            $this->assertTrue(Ulid::isValid($activity['attempt_id']));
+        }
+
+        $bundle = HistoryExport::forRun($run->fresh());
+        foreach ($bundle['activities'] as $activity) {
+            $this->assertSame($workerAttemptId, $activity['current_worker_attempt_id']);
+            $this->assertSame($workerAttemptId, $activity['attempts'][0]['worker_attempt_id']);
+            $this->assertTrue(Ulid::isValid($activity['current_attempt_id']));
+        }
+    }
+
+    public function testCompleteRecordsTerminalLocalActivityFailureProjection(): void
+    {
+        $run = $this->createWaitingRun();
+        $task = $this->createLeasedTask($run);
+
+        $result = $this->bridge->complete($task->id, [[
+            'type' => 'record_local_activity',
+            'activity_type' => 'test-local-activity',
+            'outcome' => 'timed_out',
+            'message' => 'Heartbeat expired.',
+            'exception_type' => 'App\\LocalActivityTimeout',
+            'timeout_kind' => 'heartbeat',
+            'attempts' => [[
+                'attempt_number' => 1,
+                'outcome' => 'timed_out',
+                'message' => 'Heartbeat expired.',
+                'exception_type' => 'App\\LocalActivityTimeout',
+                'timeout_kind' => 'heartbeat',
+                'heartbeats' => [[
+                    'elapsed_ms' => 15,
+                    'details' => [
+                        'stage' => 'waiting',
+                    ],
+                ]],
+            ]],
+            'retry_policy' => [
+                'max_attempts' => 1,
+            ],
+            'execution_mode' => 'local',
+        ]]);
+
+        $this->assertTrue($result['completed'], json_encode($result, JSON_THROW_ON_ERROR));
+        $execution = ActivityExecution::query()
+            ->where('workflow_run_id', $run->id)
+            ->sole();
+        $attempt = ActivityAttempt::query()
+            ->where('activity_execution_id', $execution->id)
+            ->sole();
+        $this->assertSame('failed', $attempt->status->value);
+
+        $failure = WorkflowFailure::query()
+            ->where('source_kind', 'activity_execution')
+            ->where('source_id', $execution->id)
+            ->sole();
+        $this->assertSame(FailureCategory::Timeout, $failure->failure_category);
+        $this->assertSame('App\\LocalActivityTimeout', $failure->exception_class);
+
+        $terminal = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::ActivityTimedOut->value)
+            ->sole();
+        $this->assertSame($failure->id, $terminal->payload['failure_id']);
+    }
+
+    public function testCompleteProjectsFailedAndCancelledLocalActivityOutcomes(): void
+    {
+        foreach (['failed', 'cancelled'] as $outcome) {
+            $run = $this->createWaitingRun();
+            $task = $this->createLeasedTask($run);
+            $message = "Local activity {$outcome}.";
+
+            $result = $this->bridge->complete($task->id, [[
+                'type' => 'record_local_activity',
+                'activity_type' => 'test-local-activity',
+                'outcome' => $outcome,
+                'message' => $message,
+                'exception_type' => $outcome === 'failed' ? 'App\\LocalActivityFailure' : null,
+                'non_retryable' => $outcome === 'failed',
+                'attempts' => [[
+                    'attempt_number' => 1,
+                    'outcome' => $outcome,
+                    'message' => $message,
+                    'exception_type' => $outcome === 'failed' ? 'App\\LocalActivityFailure' : null,
+                    'non_retryable' => $outcome === 'failed',
+                ]],
+                'retry_policy' => [
+                    'max_attempts' => 1,
+                ],
+                'execution_mode' => 'local',
+            ]]);
+
+            $this->assertTrue($result['completed'], json_encode($result, JSON_THROW_ON_ERROR));
+            $execution = ActivityExecution::query()
+                ->where('workflow_run_id', $run->id)
+                ->sole();
+            $attempt = ActivityAttempt::query()
+                ->where('activity_execution_id', $execution->id)
+                ->sole();
+            $this->assertSame($outcome, $attempt->status->value);
+
+            $failures = WorkflowFailure::query()
+                ->where('source_kind', 'activity_execution')
+                ->where('source_id', $execution->id)
+                ->get();
+            if ($outcome === 'failed') {
+                $this->assertCount(1, $failures);
+                $this->assertSame(FailureCategory::Activity, $failures->sole()->failure_category);
+            } else {
+                $this->assertCount(0, $failures);
+            }
+
+            $terminal = WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('event_type', $outcome === 'failed'
+                    ? HistoryEventType::ActivityFailed->value
+                    : HistoryEventType::ActivityCancelled->value)
+                ->sole();
+            $this->assertSame($attempt->id, $terminal->payload['activity_attempt_id']);
         }
     }
 

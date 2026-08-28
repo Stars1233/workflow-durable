@@ -146,6 +146,7 @@ OFFICIAL_BINDING_CONSUMER_SUPPORT = {
         "tests/Feature/V2/V2EmbeddedReplayRegressionCorpusTest.php",
         "tests/Fixtures/V2/TestConstructorInjectionActivity.php",
         "tests/Fixtures/V2/TestConstructorInjectionWorkflow.php",
+        "tests/Fixtures/V2/TestPortableLocalActivityIdentityWorkflow.php",
         "tests/Fixtures/V2/TestSequentialChildReplayWorkflow.php",
         "tests/Fixtures/V2/TestServiceResponseReplayWorkflow.php",
         "tests/Unit/V2/ReplayRegressionCorpusTest.php",

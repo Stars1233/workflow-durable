@@ -628,6 +628,7 @@ final class EmbeddedV2HistoryImport
                     'activity_execution_id' => $activityId,
                     'workflow_task_id' => self::stringValue($attempt['workflow_task_id'] ?? null)
                         ?? self::stringValue($attempt['task_id'] ?? null),
+                    'worker_attempt_id' => self::stringValue($attempt['worker_attempt_id'] ?? null),
                     'attempt_number' => self::intValue($attempt['attempt_number'] ?? null) ?? 1,
                     'status' => $status,
                     'lease_owner' => self::stringValue($attempt['lease_owner'] ?? null),

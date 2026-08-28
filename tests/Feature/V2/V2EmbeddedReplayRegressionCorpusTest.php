@@ -6,6 +6,7 @@ namespace Tests\Feature\V2;
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
+use Symfony\Component\Uid\Ulid;
 use Tests\TestCase;
 use Throwable;
 use Workflow\Serializers\Serializer;
@@ -30,6 +31,7 @@ use Workflow\V2\Support\ConditionWaits;
 use Workflow\V2\Support\EmbeddedV2HistoryImport;
 use Workflow\V2\Support\HistoryExport;
 use Workflow\V2\Support\QueryStateReplayer;
+use Workflow\V2\Support\RunActivityView;
 use Workflow\V2\Support\WorkflowFiberRunner;
 use Workflow\V2\Support\WorkflowStep;
 use Workflow\V2\Workflow;
@@ -62,6 +64,10 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
 
             if (($fixture['id'] ?? null) === 'parallel-child-group-final-sibling-release') {
                 $this->assertStandaloneParallelChildBarrierFixture($fixture);
+            }
+
+            if (($fixture['id'] ?? null) === 'portable-local-activity-attempt-identity-cold-reload') {
+                $this->assertPortableLocalActivityAttemptIdentitySurvivesColdReload($fixture);
             }
 
             $consumers = $fixture['consumers'] ?? ['workflow-fiber-runner'];
@@ -324,6 +330,176 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
 
         $this->assertEquals($metadata['memo'], $roundTrip['workflow']['memo']);
         $this->assertEquals($metadata['search_attributes'], $roundTrip['workflow']['search_attributes']);
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     */
+    private function assertPortableLocalActivityAttemptIdentitySurvivesColdReload(array $fixture): void
+    {
+        $attemptsByActivity = [];
+        $workerAttemptId = null;
+
+        foreach ($fixture['history'] as $event) {
+            if (($event['event_type'] ?? null) !== HistoryEventType::ActivityStarted->value) {
+                continue;
+            }
+
+            $payload = $event['payload'];
+            $activityExecutionId = $payload['activity_execution_id'] ?? null;
+            $activityAttemptId = $payload['activity_attempt_id'] ?? null;
+            $reportedAttemptId = $payload['worker_attempt_id'] ?? null;
+
+            $this->assertIsString($activityExecutionId);
+            $this->assertIsString($activityAttemptId);
+            $this->assertIsString($reportedAttemptId);
+            $this->assertTrue(Ulid::isValid($activityAttemptId));
+            $this->assertSame(255, strlen($reportedAttemptId));
+
+            $workerAttemptId ??= $reportedAttemptId;
+            $this->assertSame($workerAttemptId, $reportedAttemptId);
+            $attemptsByActivity[$activityExecutionId] = $activityAttemptId;
+        }
+
+        $this->assertIsString($workerAttemptId);
+        $this->assertCount(2, $attemptsByActivity);
+        $this->assertCount(2, array_unique(array_values($attemptsByActivity)));
+
+        $run = $this->createRunFromFixture($fixture);
+        $this->assertPortableOperatorActivityIdentities($run, $attemptsByActivity, $workerAttemptId);
+
+        $bundle = HistoryExport::forRun($run->fresh());
+        $this->assertPortableExportActivityIdentities($bundle, $attemptsByActivity, $workerAttemptId);
+
+        $runId = $bundle['workflow']['run_id'];
+        $this->clearWorkflowState();
+
+        $report = EmbeddedV2HistoryImport::import($bundle);
+        $this->assertSame('imported', $report['status'], json_encode($report, JSON_THROW_ON_ERROR));
+        $this->assertSame(2, $report['rows']['activity_executions']);
+        $this->assertSame(2, $report['rows']['activity_attempts']);
+
+        /** @var WorkflowRun $importedRun */
+        $importedRun = WorkflowRun::query()->findOrFail($runId);
+        $this->assertPortableStoredActivityIdentities($importedRun, $attemptsByActivity, $workerAttemptId);
+        $this->assertPortableOperatorActivityIdentities($importedRun, $attemptsByActivity, $workerAttemptId);
+
+        $roundTrip = HistoryExport::forRun($importedRun->fresh());
+        $this->assertPortableExportActivityIdentities($roundTrip, $attemptsByActivity, $workerAttemptId);
+    }
+
+    /**
+     * @param array<string, string> $attemptsByActivity
+     */
+    private function assertPortableStoredActivityIdentities(
+        WorkflowRun $run,
+        array $attemptsByActivity,
+        string $workerAttemptId,
+    ): void {
+        $executions = ActivityExecution::query()
+            ->where('workflow_run_id', $run->id)
+            ->get()
+            ->keyBy('id');
+        $attempts = ActivityAttempt::query()
+            ->where('workflow_run_id', $run->id)
+            ->get()
+            ->keyBy('activity_execution_id');
+
+        $this->assertCount(2, $executions);
+        $this->assertCount(2, $attempts);
+
+        foreach ($attemptsByActivity as $activityExecutionId => $activityAttemptId) {
+            /** @var ActivityExecution $execution */
+            $execution = $executions->get($activityExecutionId);
+            /** @var ActivityAttempt $attempt */
+            $attempt = $attempts->get($activityExecutionId);
+
+            $this->assertInstanceOf(ActivityExecution::class, $execution);
+            $this->assertInstanceOf(ActivityAttempt::class, $attempt);
+            $this->assertSame($activityAttemptId, $execution->current_attempt_id);
+            $this->assertSame($activityAttemptId, $attempt->id);
+            $this->assertSame($workerAttemptId, $attempt->worker_attempt_id);
+            $this->assertTrue(Ulid::isValid($execution->current_attempt_id));
+        }
+    }
+
+    /**
+     * @param array<string, string> $attemptsByActivity
+     */
+    private function assertPortableOperatorActivityIdentities(
+        WorkflowRun $run,
+        array $attemptsByActivity,
+        string $workerAttemptId,
+    ): void {
+        $activities = RunActivityView::activitiesForRun($run->fresh());
+        $this->assertCount(2, $activities);
+
+        foreach ($activities as $activity) {
+            $activityExecutionId = $activity['id'] ?? null;
+            $this->assertIsString($activityExecutionId);
+            $this->assertArrayHasKey($activityExecutionId, $attemptsByActivity);
+
+            $activityAttemptId = $attemptsByActivity[$activityExecutionId];
+            $this->assertSame($activityAttemptId, $activity['attempt_id']);
+            $this->assertSame($workerAttemptId, $activity['worker_attempt_id']);
+            $this->assertTrue(Ulid::isValid($activity['attempt_id']));
+            $this->assertCount(1, $activity['attempts']);
+            $this->assertSame($activityAttemptId, $activity['attempts'][0]['id']);
+            $this->assertSame($workerAttemptId, $activity['attempts'][0]['worker_attempt_id']);
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $bundle
+     * @param array<string, string> $attemptsByActivity
+     */
+    private function assertPortableExportActivityIdentities(
+        array $bundle,
+        array $attemptsByActivity,
+        string $workerAttemptId,
+    ): void {
+        $activities = $bundle['activities'] ?? null;
+        $this->assertIsArray($activities);
+        $this->assertCount(2, $activities);
+
+        foreach ($activities as $activity) {
+            $activityExecutionId = $activity['id'] ?? null;
+            $this->assertIsString($activityExecutionId);
+            $this->assertArrayHasKey($activityExecutionId, $attemptsByActivity);
+
+            $activityAttemptId = $attemptsByActivity[$activityExecutionId];
+            $this->assertSame($activityAttemptId, $activity['current_attempt_id']);
+            $this->assertSame($workerAttemptId, $activity['current_worker_attempt_id']);
+            $this->assertTrue(Ulid::isValid($activity['current_attempt_id']));
+            $this->assertCount(1, $activity['attempts']);
+            $this->assertSame($activityAttemptId, $activity['attempts'][0]['id']);
+            $this->assertSame($workerAttemptId, $activity['attempts'][0]['worker_attempt_id']);
+        }
+
+        $attemptEventsByActivity = [];
+        foreach ($bundle['history_events'] as $event) {
+            if (! in_array($event['type'] ?? null, [
+                HistoryEventType::ActivityStarted->value,
+                HistoryEventType::ActivityCompleted->value,
+            ], true)) {
+                continue;
+            }
+
+            $payload = $event['payload'];
+            $activityExecutionId = $payload['activity_execution_id'] ?? null;
+            $this->assertIsString($activityExecutionId);
+            $this->assertArrayHasKey($activityExecutionId, $attemptsByActivity);
+            $this->assertSame($attemptsByActivity[$activityExecutionId], $payload['activity_attempt_id']);
+            $this->assertSame($workerAttemptId, $payload['worker_attempt_id']);
+            $attemptEventsByActivity[$activityExecutionId][] = $event['type'];
+        }
+
+        foreach (array_keys($attemptsByActivity) as $activityExecutionId) {
+            $this->assertSame([
+                HistoryEventType::ActivityStarted->value,
+                HistoryEventType::ActivityCompleted->value,
+            ], $attemptEventsByActivity[$activityExecutionId] ?? []);
+        }
     }
 
     private function clearWorkflowState(): void

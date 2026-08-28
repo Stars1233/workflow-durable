@@ -421,6 +421,16 @@ final class PlatformProtocolSpecsTest extends TestCase
         $selectionKey = $selectionCommand['then']['properties']['selection_member_key']['oneOf'];
         $this->assertSame(0, $selectionKey[0]['minimum']);
         $this->assertSame(1, $selectionKey[1]['minLength']);
+        $historicalLocalActivityCommand = $protocol118['components']['schemas']['WorkflowCommand']['allOf'][2];
+        $this->assertSame(['activity_type', 'outcome'], $historicalLocalActivityCommand['then']['required']);
+        $this->assertTrue(
+            $historicalLocalActivityCommand['then']['properties']['attempts']['items']['additionalProperties']
+        );
+        $this->assertSame(['activity_type', 'outcome', 'attempts'], $localActivityCommand['then']['required']);
+        $this->assertSame(
+            '#/components/schemas/LocalActivityAttemptReport',
+            $localActivityCommand['then']['properties']['attempts']['items']['$ref'],
+        );
     }
 
     public function testRuntimeAndCurrentWorkerSpecsCannotDriftOnMessageStreamContract(): void
@@ -618,7 +628,7 @@ final class PlatformProtocolSpecsTest extends TestCase
             $this->assertCount(1, $localActivityCommands);
             $localActivityCommand = $localActivityCommands[0];
             $this->assertSame('record_local_activity', $localActivityCommand['if']['properties']['type']['const']);
-            $this->assertSame(['activity_type', 'outcome'], $localActivityCommand['then']['required']);
+            $this->assertSame(['activity_type', 'outcome', 'attempts'], $localActivityCommand['then']['required']);
             $this->assertSame(
                 WorkerProtocolVersion::PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION,
                 $localActivityCommand['then']['x-durable-workflow-minimum-protocol-version'],
@@ -632,7 +642,6 @@ final class PlatformProtocolSpecsTest extends TestCase
                 $localActivityCommand['then']['properties']['outcome']['enum'],
             );
             $this->assertSame('local', $localActivityCommand['then']['properties']['execution_mode']['const']);
-
             $selectionCommands = array_values(array_filter(
                 $spec['components']['schemas']['WorkflowCommand']['allOf'],
                 static fn (array $shape): bool => ($shape['if']['properties']['parallel_group_mode']['const'] ?? null)
@@ -643,6 +652,24 @@ final class PlatformProtocolSpecsTest extends TestCase
                 WorkerProtocolVersion::CAPABILITY_DURABLE_SELECTION,
                 $selectionCommands[0]['then']['x-durable-workflow-worker-capability'],
             );
+            $this->assertSame(
+                \Workflow\V2\Support\WorkflowCommandNormalizer::MAX_LOCAL_ACTIVITY_ATTEMPTS,
+                $localActivityCommand['then']['properties']['attempts']['maxItems'],
+            );
+            $this->assertSame(
+                '#/components/schemas/LocalActivityAttemptReport',
+                $localActivityCommand['then']['properties']['attempts']['items']['$ref'],
+            );
+            $retryPolicy = $spec['components']['schemas']['LocalActivityRetryPolicy'];
+            $this->assertFalse($retryPolicy['additionalProperties']);
+            $this->assertSame(100, $retryPolicy['properties']['max_attempts']['maximum']);
+            $attempt = $spec['components']['schemas']['LocalActivityAttemptReport'];
+            $this->assertFalse($attempt['additionalProperties']);
+            $this->assertSame(['attempt_number', 'outcome'], $attempt['required']);
+            $this->assertSame(1000, $attempt['properties']['heartbeats']['maxItems']);
+            $heartbeat = $spec['components']['schemas']['LocalActivityHeartbeatReport'];
+            $this->assertFalse($heartbeat['additionalProperties']);
+            $this->assertSame(['elapsed_ms'], $heartbeat['required']);
         }
     }
 

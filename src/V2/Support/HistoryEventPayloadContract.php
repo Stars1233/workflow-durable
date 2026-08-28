@@ -112,6 +112,7 @@ final class HistoryEventPayloadContract
         'ActivityStarted' => [
             'activity_execution_id',
             'activity_attempt_id',
+            'worker_attempt_id',
             'activity_class',
             'activity_type',
             'sequence',
@@ -132,6 +133,7 @@ final class HistoryEventPayloadContract
         'ActivityHeartbeatRecorded' => [
             'activity_execution_id',
             'activity_attempt_id',
+            'worker_attempt_id',
             'activity_class',
             'activity_type',
             'sequence',
@@ -148,6 +150,7 @@ final class HistoryEventPayloadContract
         'ActivityRetryScheduled' => [
             'activity_execution_id',
             'activity_attempt_id',
+            'worker_attempt_id',
             'activity_class',
             'activity_type',
             'sequence',
@@ -180,6 +183,7 @@ final class HistoryEventPayloadContract
         'ActivityCompleted' => [
             'activity_execution_id',
             'activity_attempt_id',
+            'worker_attempt_id',
             'activity_class',
             'activity_type',
             'sequence',
@@ -201,6 +205,7 @@ final class HistoryEventPayloadContract
         'ActivityFailed' => [
             'activity_execution_id',
             'activity_attempt_id',
+            'worker_attempt_id',
             'activity_class',
             'activity_type',
             'sequence',
@@ -232,6 +237,7 @@ final class HistoryEventPayloadContract
             'workflow_command_id',
             'activity_execution_id',
             'activity_attempt_id',
+            'worker_attempt_id',
             'activity_class',
             'activity_type',
             'sequence',
@@ -246,6 +252,7 @@ final class HistoryEventPayloadContract
         'ActivityTimedOut' => [
             'activity_execution_id',
             'activity_attempt_id',
+            'worker_attempt_id',
             'activity_class',
             'activity_type',
             'sequence',

@@ -278,6 +278,7 @@ final class RunActivityView
             'parallel_group_index' => $state['parallel_group_index'] ?? null,
             'parallel_group_path' => $state['parallel_group_path'] ?? [],
             'attempt_id' => $state['attempt_id'] ?? ($latestAttempt['id'] ?? null),
+            'worker_attempt_id' => $latestAttempt['worker_attempt_id'] ?? null,
             'status' => $status,
             'attempt_count' => $attemptCount,
             'retry_policy' => $state['retry_policy'] ?? ($execution?->retry_policy ?? null),
@@ -372,6 +373,7 @@ final class RunActivityView
     {
         return [
             'id' => $attempt['id'] ?? null,
+            'worker_attempt_id' => $attempt['worker_attempt_id'] ?? null,
             'attempt_number' => $attempt['attempt_number'] ?? null,
             'status' => $attempt['status'] ?? null,
             'task_id' => $attempt['workflow_task_id'] ?? null,
