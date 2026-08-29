@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.50` reconstructs portable local-activity attempts as a
+  non-overlapping timeline using reported durations and retry backoff. Each
+  heartbeat timestamp is derived from its attempt start, aggregate heartbeat
+  state retains the chronologically latest report, and history snapshots now
+  expose lifecycle-correct running, retry, and terminal states through cold
+  persistence, export/import, and replay.
 - Workflow `2.0.0-rc.49` finalizes the portable local-activity command as an
   ordered `record_local_activity.attempts` report. Worker attempt identity is
   preserved independently of durable server attempt identity across every

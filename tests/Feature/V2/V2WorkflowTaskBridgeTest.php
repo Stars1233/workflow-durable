@@ -6772,11 +6772,22 @@ final class V2WorkflowTaskBridgeTest extends TestCase
                 ->orderBy('attempt_number')
                 ->get();
 
-            $this->assertSame('2026-08-28T11:59:56.000000Z', $attempts[0]->started_at?->toJSON());
-            $this->assertSame('2026-08-28T11:59:57.500000Z', $attempts[0]->last_heartbeat_at?->toJSON());
-            $this->assertSame('2026-08-28T11:59:58.000000Z', $attempts[1]->started_at?->toJSON());
-            $this->assertSame('2026-08-28T11:59:58.500000Z', $attempts[1]->last_heartbeat_at?->toJSON());
-            $this->assertSame('2026-08-28T11:59:58.500000Z', $execution->last_heartbeat_at?->toJSON());
+            $expectedStartedAt = ['2026-08-28T11:59:53.000000Z', '2026-08-28T11:59:58.000000Z'];
+            $expectedHeartbeatAt = ['2026-08-28T11:59:54.500000Z', '2026-08-28T11:59:58.500000Z'];
+            $expectedClosedAt = ['2026-08-28T11:59:57.000000Z', '2026-08-28T12:00:00.000000Z'];
+
+            $this->assertSame($expectedStartedAt[0], $attempts[0]->started_at?->toJSON());
+            $this->assertSame($expectedHeartbeatAt[0], $attempts[0]->last_heartbeat_at?->toJSON());
+            $this->assertSame($expectedClosedAt[0], $attempts[0]->closed_at?->toJSON());
+            $this->assertSame($expectedStartedAt[1], $attempts[1]->started_at?->toJSON());
+            $this->assertSame($expectedHeartbeatAt[1], $attempts[1]->last_heartbeat_at?->toJSON());
+            $this->assertSame($expectedClosedAt[1], $attempts[1]->closed_at?->toJSON());
+            $this->assertSame($expectedStartedAt[0], $execution->started_at?->toJSON());
+            $this->assertSame($expectedHeartbeatAt[1], $execution->last_heartbeat_at?->toJSON());
+            $this->assertTrue(
+                $attempts[0]->closed_at?->copy()->addSecond()->equalTo($attempts[1]->started_at),
+                'The next attempt must start only after the reported retry backoff.',
+            );
 
             $attemptEvents = WorkflowHistoryEvent::query()
                 ->where('workflow_run_id', $runId)
@@ -6807,7 +6818,27 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             ], $attemptEvents->pluck('payload')
                 ->map(static fn (array $payload): mixed => $payload['worker_attempt_id'] ?? null)
                 ->all());
-            $this->assertSame(['2026-08-28T11:59:57.500000Z', '2026-08-28T11:59:58.500000Z'], $attemptEvents
+            $this->assertSame([
+                'running',
+                'running',
+                'pending',
+                'running',
+                'running',
+                'completed',
+            ], $attemptEvents->pluck('payload')
+                ->map(static fn (array $payload): mixed => $payload['activity']['status'] ?? null)
+                ->all());
+            $this->assertSame([
+                'running',
+                'running',
+                'failed',
+                'running',
+                'running',
+                'completed',
+            ], $attemptEvents->pluck('payload')
+                ->map(static fn (array $payload): mixed => $payload['activity_attempt']['status'] ?? null)
+                ->all());
+            $this->assertSame($expectedHeartbeatAt, $attemptEvents
                 ->where('event_type', HistoryEventType::ActivityHeartbeatRecorded)
                 ->pluck('payload')
                 ->map(static fn (array $payload): mixed => $payload['heartbeat_at'] ?? null)
@@ -6818,26 +6849,38 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             $export = HistoryExport::forRun($reloadedRun);
             $activity = $export['activities'][0];
             $this->assertSame('worker-b-attempt-1', $activity['current_worker_attempt_id']);
-            $this->assertSame('2026-08-28T11:59:58.500000Z', $activity['last_heartbeat_at']);
+            $this->assertSame($expectedStartedAt[0], $activity['started_at']);
+            $this->assertSame($expectedHeartbeatAt[1], $activity['last_heartbeat_at']);
             $this->assertSame(
                 ['worker-a-attempt-1', 'worker-b-attempt-1'],
                 array_column($activity['attempts'], 'worker_attempt_id'),
             );
-            $this->assertSame([
-                '2026-08-28T11:59:57.500000Z',
-                '2026-08-28T11:59:58.500000Z',
-            ], array_column($activity['attempts'], 'last_heartbeat_at'));
+            $this->assertSame($expectedStartedAt, array_column($activity['attempts'], 'started_at'));
+            $this->assertSame($expectedHeartbeatAt, array_column($activity['attempts'], 'last_heartbeat_at'));
+            $this->assertSame($expectedClosedAt, array_column($activity['attempts'], 'closed_at'));
 
             $this->clearWorkflowStateForHistoryImport();
 
             $replayedRun = (new WorkflowReplayer())->runFromHistoryExport($export);
             $replayedActivity = RunActivityView::activitiesForRun($replayedRun)[0];
             $this->assertSame('worker-b-attempt-1', $replayedActivity['worker_attempt_id']);
-            $this->assertSame('2026-08-28T11:59:58.500000Z', $replayedActivity['last_heartbeat_at']);
+            $this->assertSame($expectedHeartbeatAt[1], $replayedActivity['last_heartbeat_at']);
             $this->assertSame(
                 ['worker-a-attempt-1', 'worker-b-attempt-1'],
                 array_column($replayedActivity['attempts'], 'worker_attempt_id'),
             );
+            $this->assertSame($expectedStartedAt, array_map(
+                static fn (Carbon $timestamp): string => $timestamp->toJSON(),
+                array_column($replayedActivity['attempts'], 'started_at'),
+            ));
+            $this->assertSame($expectedHeartbeatAt, array_map(
+                static fn (Carbon $timestamp): string => $timestamp->toJSON(),
+                array_column($replayedActivity['attempts'], 'last_heartbeat_at'),
+            ));
+            $this->assertSame($expectedClosedAt, array_map(
+                static fn (Carbon $timestamp): string => $timestamp->toJSON(),
+                array_column($replayedActivity['attempts'], 'closed_at'),
+            ));
 
             $import = EmbeddedV2HistoryImport::import($export, [
                 'import_id' => 'portable-local-activity-contract-import',
@@ -6859,16 +6902,20 @@ final class V2WorkflowTaskBridgeTest extends TestCase
                 ->where('event_type', HistoryEventType::ActivityRetryScheduled->value)
                 ->sole();
 
-            $this->assertSame('2026-08-28T11:59:58.500000Z', $importedExecution->last_heartbeat_at?->toJSON());
+            $this->assertSame($expectedStartedAt[0], $importedExecution->started_at?->toJSON());
+            $this->assertSame($expectedHeartbeatAt[1], $importedExecution->last_heartbeat_at?->toJSON());
             $this->assertSame(
                 ['worker-a-attempt-1', 'worker-b-attempt-1'],
                 $importedAttempts->pluck('worker_attempt_id')
                     ->all(),
             );
-            $this->assertSame([
-                '2026-08-28T11:59:57.500000Z',
-                '2026-08-28T11:59:58.500000Z',
-            ], $importedAttempts->pluck('last_heartbeat_at')
+            $this->assertSame($expectedStartedAt, $importedAttempts->pluck('started_at')
+                ->map(static fn (Carbon $timestamp): string => $timestamp->toJSON())
+                ->all());
+            $this->assertSame($expectedHeartbeatAt, $importedAttempts->pluck('last_heartbeat_at')
+                ->map(static fn (Carbon $timestamp): string => $timestamp->toJSON())
+                ->all());
+            $this->assertSame($expectedClosedAt, $importedAttempts->pluck('closed_at')
                 ->map(static fn (Carbon $timestamp): string => $timestamp->toJSON())
                 ->all());
             $this->assertSame('worker-a-attempt-1', $importedRetry->payload['worker_attempt_id']);

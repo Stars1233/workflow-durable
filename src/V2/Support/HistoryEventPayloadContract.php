@@ -173,6 +173,7 @@ final class HistoryEventPayloadContract
             'code',
             'exception',
             'activity',
+            'activity_attempt',
             'parallel_group_id',
             'parallel_group_kind',
             'parallel_group_base_sequence',

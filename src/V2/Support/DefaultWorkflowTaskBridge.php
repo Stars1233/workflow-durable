@@ -3521,13 +3521,18 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             ? array_values($command['attempts'])
             : [];
         $now = now();
+        // Attempt reports carry elapsed durations rather than wall-clock
+        // timestamps. Walk backward from completion so each attempt ends
+        // before the following attempt's declared retry backoff.
+        $attemptClosedAt = $now->copy();
         $latestHeartbeatAt = null;
-        foreach ($attempts as $index => $attempt) {
+        for ($index = count($attempts) - 1; $index >= 0; $index--) {
+            $attempt = $attempts[$index];
             $heartbeats = is_array($attempt['heartbeats'] ?? null) ? $attempt['heartbeats'] : [];
             $lastHeartbeat = $heartbeats[array_key_last($heartbeats)] ?? null;
             $lastElapsedMs = is_array($lastHeartbeat) ? $lastHeartbeat['elapsed_ms'] : 0;
             $durationMs = is_int($attempt['duration_ms'] ?? null) ? $attempt['duration_ms'] : 0;
-            $startedAt = $now->copy()
+            $startedAt = $attemptClosedAt->copy()
                 ->subMilliseconds(max($lastElapsedMs, $durationMs));
             $lastHeartbeatAt = $heartbeats === []
                 ? null
@@ -3538,9 +3543,20 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 'internal_attempt_id' => (string) Str::ulid(),
                 'started_at' => $startedAt,
                 'last_heartbeat_at' => $lastHeartbeatAt,
+                'closed_at' => $attemptClosedAt,
             ];
-            if ($lastHeartbeatAt !== null) {
+            if ($lastHeartbeatAt !== null && (
+                $latestHeartbeatAt === null || $lastHeartbeatAt->greaterThan($latestHeartbeatAt)
+            )) {
                 $latestHeartbeatAt = $lastHeartbeatAt;
+            }
+
+            if ($index > 0) {
+                $backoffSeconds = is_int($attempts[$index - 1]['backoff_seconds'] ?? null)
+                    ? $attempts[$index - 1]['backoff_seconds']
+                    : 0;
+                $attemptClosedAt = $startedAt->copy()
+                    ->subSeconds($backoffSeconds);
             }
         }
         $lastAttempt = $attempts[array_key_last($attempts)];
@@ -3574,16 +3590,29 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'closed_at' => $now,
         ]);
 
+        $terminalActivitySnapshot = ActivitySnapshot::fromExecution($execution);
+        $scheduledActivitySnapshot = $terminalActivitySnapshot;
+        $scheduledActivitySnapshot['status'] = ActivityStatus::Pending->value;
+        $scheduledActivitySnapshot['attempt_count'] = 0;
+        unset(
+            $scheduledActivitySnapshot['attempt_id'],
+            $scheduledActivitySnapshot['started_at'],
+            $scheduledActivitySnapshot['last_heartbeat_at'],
+            $scheduledActivitySnapshot['closed_at'],
+            $scheduledActivitySnapshot['result'],
+            $scheduledActivitySnapshot['exception'],
+        );
         $basePayload = LocalActivityRuntime::eventPayload([
             'activity_execution_id' => $execution->id,
             'activity_class' => $execution->activity_class,
             'activity_type' => $execution->activity_type,
             'sequence' => $sequence,
             'workflow_task_id' => $task->id,
-            'activity' => ActivitySnapshot::fromExecution($execution),
+            'activity' => $scheduledActivitySnapshot,
         ]);
         WorkflowHistoryEvent::record($run, HistoryEventType::ActivityScheduled, $basePayload, $task);
 
+        $latestEmittedHeartbeatAt = null;
         foreach ($attempts as $index => $attempt) {
             $attemptNumber = $attempt['attempt_number'];
             $attemptId = $attempt['internal_attempt_id'];
@@ -3608,10 +3637,10 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 'started_at' => $startedAt,
                 'last_heartbeat_at' => $attempt['last_heartbeat_at'],
                 'lease_expires_at' => null,
-                'closed_at' => $now,
+                'closed_at' => $attempt['closed_at'],
             ]);
 
-            $attemptSnapshot = array_filter([
+            $terminalAttemptSnapshot = array_filter([
                 'id' => $attemptRecord->id,
                 'worker_attempt_id' => $attemptRecord->worker_attempt_id,
                 'attempt_number' => $attemptRecord->attempt_number,
@@ -3619,26 +3648,54 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 'task_id' => $attemptRecord->workflow_task_id,
                 'lease_owner' => $attemptRecord->lease_owner,
                 'started_at' => $attemptRecord->started_at?->toJSON(),
+                'last_heartbeat_at' => $attemptRecord->last_heartbeat_at?->toJSON(),
+                'closed_at' => $attemptRecord->closed_at?->toJSON(),
             ], static fn (mixed $value): bool => $value !== null);
-            $attemptPayload = $basePayload + [
+            $runningAttemptSnapshot = $terminalAttemptSnapshot;
+            $runningAttemptSnapshot['status'] = ActivityAttemptStatus::Running->value;
+            unset($runningAttemptSnapshot['last_heartbeat_at'], $runningAttemptSnapshot['closed_at']);
+
+            $runningActivitySnapshot = $terminalActivitySnapshot;
+            $runningActivitySnapshot['attempt_id'] = $attemptId;
+            $runningActivitySnapshot['attempt_count'] = $attemptNumber;
+            $runningActivitySnapshot['status'] = ActivityStatus::Running->value;
+            unset(
+                $runningActivitySnapshot['closed_at'],
+                $runningActivitySnapshot['result'],
+                $runningActivitySnapshot['exception'],
+            );
+            if ($latestEmittedHeartbeatAt === null) {
+                unset($runningActivitySnapshot['last_heartbeat_at']);
+            } else {
+                $runningActivitySnapshot['last_heartbeat_at'] = $latestEmittedHeartbeatAt->toJSON();
+            }
+
+            $attemptPayload = $basePayload;
+            $attemptPayload['activity'] = $runningActivitySnapshot;
+            $attemptPayload += [
                 'activity_attempt_id' => $attemptId,
                 'worker_attempt_id' => $workerAttemptId,
                 'attempt_number' => $attemptNumber,
-                'activity_attempt' => $attemptSnapshot,
+                'activity_attempt' => $runningAttemptSnapshot,
             ];
             WorkflowHistoryEvent::record($run, HistoryEventType::ActivityStarted, $attemptPayload, $task);
 
             foreach ($heartbeats as $heartbeat) {
                 $elapsedMs = $heartbeat['elapsed_ms'];
                 $heartbeatAt = $startedAt->copy()
-                    ->addMilliseconds($elapsedMs)
-                    ->toJSON();
+                    ->addMilliseconds($elapsedMs);
                 $heartbeatPayload = $attemptPayload + [
-                    'heartbeat_at' => $heartbeatAt,
+                    'heartbeat_at' => $heartbeatAt->toJSON(),
                     'lease_expires_at' => null,
                 ];
-                $heartbeatPayload['activity_attempt'] = $attemptSnapshot + [
-                    'last_heartbeat_at' => $heartbeatAt,
+                if ($latestEmittedHeartbeatAt === null || $heartbeatAt->greaterThan($latestEmittedHeartbeatAt)) {
+                    $latestEmittedHeartbeatAt = $heartbeatAt;
+                }
+                $heartbeatActivitySnapshot = $runningActivitySnapshot;
+                $heartbeatActivitySnapshot['last_heartbeat_at'] = $latestEmittedHeartbeatAt->toJSON();
+                $heartbeatPayload['activity'] = $heartbeatActivitySnapshot;
+                $heartbeatPayload['activity_attempt'] = $runningAttemptSnapshot + [
+                    'last_heartbeat_at' => $heartbeatAt->toJSON(),
                 ];
                 if (is_array($heartbeat['details'] ?? null)) {
                     $heartbeatPayload['progress'] = $heartbeat['details'];
@@ -3653,9 +3710,19 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             }
 
             if ($index < count($attempts) - 1) {
-                WorkflowHistoryEvent::record($run, HistoryEventType::ActivityRetryScheduled, $basePayload + [
+                $retryActivitySnapshot = $runningActivitySnapshot;
+                $retryActivitySnapshot['status'] = ActivityStatus::Pending->value;
+                if ($latestEmittedHeartbeatAt === null) {
+                    unset($retryActivitySnapshot['last_heartbeat_at']);
+                } else {
+                    $retryActivitySnapshot['last_heartbeat_at'] = $latestEmittedHeartbeatAt->toJSON();
+                }
+                $retryPayload = $basePayload;
+                $retryPayload['activity'] = $retryActivitySnapshot;
+                $retryPayload += [
                     'activity_attempt_id' => $attemptId,
                     'worker_attempt_id' => $workerAttemptId,
+                    'activity_attempt' => $terminalAttemptSnapshot,
                     'retry_after_attempt_id' => $attemptId,
                     'retry_after_attempt' => $attemptNumber,
                     'message' => is_string(
@@ -3670,11 +3737,14 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                     'retry_backoff_seconds' => is_int(
                         $attempt['backoff_seconds'] ?? null
                     ) ? $attempt['backoff_seconds'] : 0,
-                ], $task);
+                ];
+                WorkflowHistoryEvent::record($run, HistoryEventType::ActivityRetryScheduled, $retryPayload, $task);
             }
         }
 
-        $terminalPayload = $basePayload + [
+        $terminalPayload = $basePayload;
+        $terminalPayload['activity'] = $terminalActivitySnapshot;
+        $terminalPayload += [
             'activity_attempt_id' => $lastAttempt['internal_attempt_id'],
             'worker_attempt_id' => $lastAttempt['attempt_id'] ?? null,
             'attempt_number' => $lastAttempt['attempt_number'],
@@ -3691,7 +3761,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 'lease_owner' => $task->lease_owner,
                 'started_at' => $lastAttempt['started_at']->toJSON(),
                 'last_heartbeat_at' => $lastAttempt['last_heartbeat_at']?->toJSON(),
-                'closed_at' => $now->toJSON(),
+                'closed_at' => $lastAttempt['closed_at']->toJSON(),
             ], static fn (mixed $value): bool => $value !== null),
         ];
 
