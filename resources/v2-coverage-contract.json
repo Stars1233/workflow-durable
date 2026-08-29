@@ -11,11 +11,11 @@
         }
     },
     "ratchet": {
-        "accepted_baseline_basis_points": 5751,
+        "accepted_baseline_basis_points": 6000,
         "target_basis_points": 10000
     },
     "provenance": {
-        "observed_at": "2026-08-27",
-        "evidence": "The v2 coverage job measured 32,895 of 57,191 executable lines at commit f622bd2d4793790748f5b3ef8539bc51c7557f40."
+        "observed_at": "2026-08-29",
+        "evidence": "The prior v2 coverage job measured 32,895 of 57,191 executable lines at commit f622bd2d4793790748f5b3ef8539bc51c7557f40. The 60.00% floor requires the branch-bound job to publish exact covered and executable line totals across the complete current source inventory."
     }
 }
