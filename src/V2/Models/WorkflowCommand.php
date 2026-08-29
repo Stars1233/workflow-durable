@@ -443,6 +443,12 @@ class WorkflowCommand extends Model
 
     public function commandReason(): ?string
     {
+        if ($this->status === CommandStatus::Rejected) {
+            return is_string($this->rejection_reason) && $this->rejection_reason !== ''
+                ? $this->rejection_reason
+                : null;
+        }
+
         $payload = $this->payloadData();
 
         if (! is_array($payload)) {

@@ -24,6 +24,7 @@ use Tests\Fixtures\V2\TestSignalOrderingWorkflow;
 use Tests\Fixtures\V2\TestSignalWorkflow;
 use Tests\Fixtures\V2\TestTimerWorkflow;
 use Tests\Fixtures\V2\TestUnsafeDeterminismWorkflow;
+use Tests\Fixtures\V2\TestUpdateWorkflow;
 use Tests\TestCase;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Contracts\OperatorObservabilityRepository;
@@ -1373,6 +1374,168 @@ final class V2RunDetailViewTest extends TestCase
         $this->assertSame(\Tests\Fixtures\V2\TestGreetingActivity::class, $detail['chartData'][1]['x']);
         $this->assertSame('typed_history', $detail['chartData'][1]['history_authority']);
         $this->assertFalse($detail['chartData'][1]['diagnostic_only']);
+    }
+
+    public function testRejectedSignalAuditRowsPreserveDurableReasonsAfterFreshRead(): void
+    {
+        Queue::fake();
+
+        $fixtureJson = file_get_contents(
+            dirname(__DIR__, 3)
+                . '/resources/conformance/suite-v47/fixtures/rejected-signal-audit-rows.json',
+        );
+
+        $this->assertIsString($fixtureJson);
+
+        /** @var array<string, mixed> $fixture */
+        $fixture = json_decode($fixtureJson, true, 512, JSON_THROW_ON_ERROR);
+        $requests = $fixture['requests'];
+
+        $this->assertIsArray($requests);
+        $this->assertCount(2, $requests);
+
+        $invalidFixture = $requests[0];
+        $unknownFixture = $requests[1];
+
+        $this->assertIsArray($invalidFixture);
+        $this->assertIsArray($unknownFixture);
+
+        $workflow = WorkflowStub::make(TestUpdateWorkflow::class, (string) $fixture['workflow_instance_id']);
+        $workflow->start();
+        $runId = $workflow->runId();
+
+        $this->assertNotNull($runId);
+
+        $this->drainReadyTasks();
+        $this->waitFor(static fn (): bool => $workflow->refresh()->summary()?->wait_kind === 'signal');
+
+        $stateBefore = $workflow->currentState();
+        $historyCountBefore = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $runId)
+            ->count();
+        $taskCountBefore = WorkflowTask::query()
+            ->where('workflow_run_id', $runId)
+            ->count();
+
+        $invalid = $workflow->attemptSignalWithArguments(
+            (string) $invalidFixture['signal_name'],
+            (array) $invalidFixture['arguments'],
+        );
+        $unknown = $workflow->attemptSignalWithArguments(
+            (string) $unknownFixture['signal_name'],
+            (array) $unknownFixture['arguments'],
+        );
+
+        $this->assertTrue($invalid->rejectedInvalidArguments());
+        $this->assertTrue($unknown->rejected());
+        $this->assertFalse($fixture['invariants']['workflow_state_mutated']);
+        $this->assertSame($stateBefore, $workflow->currentState());
+        $this->assertSame('waiting', $workflow->refresh()->status());
+        $this->assertSame(
+            $historyCountBefore + $fixture['invariants']['history_events_appended'],
+            WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $runId)
+                ->count()
+        );
+        $this->assertSame($taskCountBefore, WorkflowTask::query() ->where('workflow_run_id', $runId) ->count());
+        $this->assertSame($fixture['invariants']['executable_or_ready_commands'], WorkflowTask::query()
+            ->where('workflow_run_id', $runId)
+            ->whereIn('status', [TaskStatus::Ready->value, TaskStatus::Leased->value])
+            ->count());
+        $this->assertSame($fixture['invariants']['handler_invocations'], WorkflowCommand::query()
+            ->where('workflow_run_id', $runId)
+            ->where('command_type', CommandType::Signal->value)
+            ->where('status', CommandStatus::Accepted->value)
+            ->count());
+        $this->assertSame(2, WorkflowSignal::query()
+            ->where('workflow_run_id', $runId)
+            ->where('status', 'rejected')
+            ->count());
+
+        $commandIds = [$invalid->commandId(), $unknown->commandId()];
+        $persisted = WorkflowCommand::query()
+            ->whereIn('id', $commandIds)
+            ->get()
+            ->keyBy('id');
+        $detail = RunDetailView::forRun(WorkflowRun::query()->with('summary')->findOrFail($runId));
+        $auditRows = collect($detail['commands'])
+            ->whereIn('id', $commandIds)
+            ->values()
+            ->map(static fn (array $row): array => [
+                'id' => $row['id'],
+                'type' => $row['type'],
+                'target_scope' => $row['target_scope'],
+                'requested_run_id' => $row['requested_run_id'],
+                'resolved_run_id' => $row['resolved_run_id'],
+                'target_name' => $row['target_name'],
+                'workflow_type' => $row['workflow_type'],
+                'workflow_class' => $row['workflow_class'],
+                'status' => $row['status'],
+                'outcome' => $row['outcome'],
+                'reason' => $row['reason'],
+                'rejection_reason' => $row['rejection_reason'],
+                'validation_errors' => $row['validation_errors'],
+                'accepted_at' => $row['accepted_at']?->toJSON(),
+                'applied_at' => $row['applied_at']?->toJSON(),
+                'rejected_at' => $row['rejected_at']?->toJSON(),
+                'signal_status' => $row['signal_status'],
+            ])
+            ->all();
+
+        $invalidCommand = $persisted->get($invalid->commandId());
+        $unknownCommand = $persisted->get($unknown->commandId());
+
+        $this->assertInstanceOf(WorkflowCommand::class, $invalidCommand);
+        $this->assertInstanceOf(WorkflowCommand::class, $unknownCommand);
+        $this->assertNotNull($invalidCommand->rejected_at);
+        $this->assertNotNull($unknownCommand->rejected_at);
+        $this->assertSame([
+            [
+                'id' => $invalid->commandId(),
+                'type' => $invalidFixture['expected']['type'],
+                'target_scope' => $invalidFixture['expected']['target_scope'],
+                'requested_run_id' => null,
+                'resolved_run_id' => $runId,
+                'target_name' => $invalidFixture['expected']['target_name'],
+                'workflow_type' => 'test-update-workflow',
+                'workflow_class' => TestUpdateWorkflow::class,
+                'status' => $invalidFixture['expected']['status'],
+                'outcome' => $invalidFixture['expected']['outcome'],
+                'reason' => $invalidFixture['expected']['reason'],
+                'rejection_reason' => $invalidFixture['expected']['rejection_reason'],
+                'validation_errors' => $invalidFixture['expected']['validation_errors'],
+                'accepted_at' => $invalidFixture['expected']['accepted_at'],
+                'applied_at' => $invalidFixture['expected']['applied_at'],
+                'rejected_at' => $invalidCommand->rejected_at->toJSON(),
+                'signal_status' => $invalidFixture['expected']['signal_status'],
+            ],
+            [
+                'id' => $unknown->commandId(),
+                'type' => $unknownFixture['expected']['type'],
+                'target_scope' => $unknownFixture['expected']['target_scope'],
+                'requested_run_id' => null,
+                'resolved_run_id' => $runId,
+                'target_name' => $unknownFixture['expected']['target_name'],
+                'workflow_type' => 'test-update-workflow',
+                'workflow_class' => TestUpdateWorkflow::class,
+                'status' => $unknownFixture['expected']['status'],
+                'outcome' => $unknownFixture['expected']['outcome'],
+                'reason' => $unknownFixture['expected']['reason'],
+                'rejection_reason' => $unknownFixture['expected']['rejection_reason'],
+                'validation_errors' => $unknownFixture['expected']['validation_errors'],
+                'accepted_at' => $unknownFixture['expected']['accepted_at'],
+                'applied_at' => $unknownFixture['expected']['applied_at'],
+                'rejected_at' => $unknownCommand->rejected_at->toJSON(),
+                'signal_status' => $unknownFixture['expected']['signal_status'],
+            ],
+        ], $auditRows);
+
+        $acceptedStart = collect($detail['commands'])->firstWhere('type', 'start');
+
+        $this->assertIsArray($acceptedStart);
+        $this->assertSame('accepted', $acceptedStart['status']);
+        $this->assertNull($acceptedStart['reason']);
+        $this->assertNull($acceptedStart['rejection_reason']);
     }
 
     public function testRunDetailViewKeepsSignalWaitCommandMetadataWhenCommandRowsDrift(): void

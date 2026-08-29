@@ -6,6 +6,7 @@ namespace Workflow\V2\Support;
 
 use Throwable;
 use Workflow\Serializers\AvroValueJsonProjection;
+use Workflow\V2\Enums\CommandStatus;
 use Workflow\V2\Enums\RunStatus;
 use Workflow\V2\Models\WorkflowCommand;
 use Workflow\V2\Models\WorkflowRun;
@@ -458,6 +459,10 @@ final class RunDetailView
 
     private static function commandReason(WorkflowCommand $command): ?string
     {
+        if ($command->status === CommandStatus::Rejected) {
+            return $command->commandReason();
+        }
+
         return self::commandPayloadStoredExternally($command) ? null : $command->commandReason();
     }
 
