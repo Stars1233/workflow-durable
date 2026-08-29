@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.52` preserves the durable rejection reason on rejected
+  signal command audit rows after a fresh read, including when the request
+  payload is stored externally. Platform conformance suite 47 now pins the
+  invalid-argument and unknown-signal audit shapes and their no-mutation
+  invariants.
 - Workflow `2.0.0-rc.51` keeps retained protocol 1.18 local-activity attempt,
   heartbeat, and retry-policy objects open to additive worker fields while
   protocol 1.19 preserves the final closed report grammar. The package-owned
