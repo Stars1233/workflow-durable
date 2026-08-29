@@ -283,6 +283,9 @@ final class WorkflowCommandNormalizer
                     WorkerProtocolVersion::PORTABLE_WORKER_AFFINITY_MINIMUM_PROTOCOL_VERSION,
                 'missing_attempts' => 'normalize_to_one_terminal_attempt_without_worker_identity_or_heartbeats',
                 'strict_shape_selected_by' => 'negotiated_worker_protocol_version',
+                'retained_nested_object_unknown_fields' => 'ignore',
+                'strict_nested_object_shape_from_protocol_version' =>
+                    WorkerProtocolVersion::LOCAL_ACTIVITY_ATTEMPT_REPORTS_MINIMUM_PROTOCOL_VERSION,
             ],
         ];
     }
@@ -1202,11 +1205,12 @@ final class WorkflowCommandNormalizer
         }
 
         $attemptCount = count($rawAttempts);
+        $strictReportShape = WorkerProtocolVersion::supportsLocalActivityAttemptReports($protocolVersion);
         $maxAttempts = is_int($retryPolicy['max_attempts'] ?? null)
             ? $retryPolicy['max_attempts']
             : 1;
 
-        self::validateLocalActivityRetryPolicyShape($command, $index, $errors);
+        self::validateLocalActivityRetryPolicyShape($command, $strictReportShape, $index, $errors);
 
         if ($maxAttempts > self::MAX_LOCAL_ACTIVITY_ATTEMPTS) {
             $errors["commands.{$index}.retry_policy.max_attempts"] = [
@@ -1253,13 +1257,15 @@ final class WorkflowCommandNormalizer
                 continue;
             }
 
-            self::rejectUnknownNestedFields(
-                $rawAttempt,
-                self::LOCAL_ACTIVITY_ATTEMPT_FIELDS,
-                $path,
-                'local activity attempt',
-                $errors,
-            );
+            if ($strictReportShape) {
+                self::rejectUnknownNestedFields(
+                    $rawAttempt,
+                    self::LOCAL_ACTIVITY_ATTEMPT_FIELDS,
+                    $path,
+                    'local activity attempt',
+                    $errors,
+                );
+            }
 
             $expectedAttemptNumber = $position + 1;
             $attemptNumber = $rawAttempt['attempt_number'] ?? null;
@@ -1408,6 +1414,7 @@ final class WorkflowCommandNormalizer
             $heartbeats = self::normalizeLocalActivityHeartbeats(
                 $rawAttempt['heartbeats'] ?? null,
                 $path,
+                $strictReportShape,
                 $errors,
             );
             $heartbeatCount += count($heartbeats);
@@ -1445,6 +1452,7 @@ final class WorkflowCommandNormalizer
      */
     private static function validateLocalActivityRetryPolicyShape(
         array $command,
+        bool $strictReportShape,
         int $index,
         array &$errors,
     ): void {
@@ -1454,13 +1462,15 @@ final class WorkflowCommandNormalizer
         }
 
         $path = "commands.{$index}.retry_policy";
-        self::rejectUnknownNestedFields(
-            $raw,
-            self::LOCAL_ACTIVITY_RETRY_POLICY_FIELDS,
-            $path,
-            'local activity retry policy',
-            $errors,
-        );
+        if ($strictReportShape) {
+            self::rejectUnknownNestedFields(
+                $raw,
+                self::LOCAL_ACTIVITY_RETRY_POLICY_FIELDS,
+                $path,
+                'local activity retry policy',
+                $errors,
+            );
+        }
 
         foreach (['backoff_seconds', 'non_retryable_error_types'] as $field) {
             if (isset($raw[$field]) && is_array($raw[$field]) && ! array_is_list($raw[$field])) {
@@ -1531,6 +1541,7 @@ final class WorkflowCommandNormalizer
     private static function normalizeLocalActivityHeartbeats(
         mixed $value,
         string $attemptPath,
+        bool $strictReportShape,
         array &$errors,
     ): array {
         if ($value === null) {
@@ -1562,13 +1573,15 @@ final class WorkflowCommandNormalizer
                 continue;
             }
 
-            self::rejectUnknownNestedFields(
-                $heartbeat,
-                self::LOCAL_ACTIVITY_HEARTBEAT_FIELDS,
-                $path,
-                'local activity heartbeat',
-                $errors,
-            );
+            if ($strictReportShape) {
+                self::rejectUnknownNestedFields(
+                    $heartbeat,
+                    self::LOCAL_ACTIVITY_HEARTBEAT_FIELDS,
+                    $path,
+                    'local activity heartbeat',
+                    $errors,
+                );
+            }
 
             $elapsedMs = $heartbeat['elapsed_ms'] ?? null;
             if (! is_int($elapsedMs) || $elapsedMs < 0) {

@@ -426,6 +426,9 @@ final class PlatformProtocolSpecsTest extends TestCase
         $this->assertTrue(
             $historicalLocalActivityCommand['then']['properties']['attempts']['items']['additionalProperties']
         );
+        $this->assertTrue(
+            $historicalLocalActivityCommand['then']['properties']['retry_policy']['additionalProperties']
+        );
         $this->assertSame(['activity_type', 'outcome', 'attempts'], $localActivityCommand['then']['required']);
         $this->assertSame(
             '#/components/schemas/LocalActivityAttemptReport',

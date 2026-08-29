@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.51` keeps retained protocol 1.18 local-activity attempt,
+  heartbeat, and retry-policy objects open to additive worker fields while
+  protocol 1.19 preserves the final closed report grammar. The package-owned
+  rolling-upgrade metadata states the 1.19 attempts requirement and nested
+  shape boundary explicitly so dependent current protocol mirrors can select
+  the same negotiated behavior.
 - Workflow `2.0.0-rc.50` reconstructs portable local-activity attempts as a
   non-overlapping timeline using reported durations and retry backoff. Each
   heartbeat timestamp is derived from its attempt start, aggregate heartbeat

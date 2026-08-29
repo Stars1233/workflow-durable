@@ -6626,6 +6626,62 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertSame(0, $currentExecutionCount);
     }
 
+    public function testLocalActivityWorkflowTaskCompletionSelectsNestedObjectStrictnessByNegotiatedProtocol(): void
+    {
+        $command = [
+            'type' => 'record_local_activity',
+            'activity_type' => 'forward-compatible-local-activity',
+            'result' => Serializer::serialize('completed'),
+            'outcome' => 'completed',
+            'attempts' => [[
+                'attempt_id' => 'worker-attempt-1',
+                'attempt_number' => 1,
+                'outcome' => 'completed',
+                'duration_ms' => 10,
+                'worker_extension' => [
+                    'build' => 'next',
+                ],
+                'heartbeats' => [[
+                    'elapsed_ms' => 5,
+                    'heartbeat_extension' => true,
+                ]],
+            ]],
+            'retry_policy' => [
+                'max_attempts' => 1,
+                'retry_extension' => 'future-policy',
+            ],
+        ];
+
+        $retainedRun = $this->createWaitingRun();
+        $retainedTask = $this->createLeasedTask($retainedRun);
+        $retainedResult = $this->bridge->complete(
+            $retainedTask->id,
+            WorkflowCommandNormalizer::normalize([$command], '1.18'),
+        );
+
+        $this->assertTrue($retainedResult['completed'], json_encode($retainedResult, JSON_THROW_ON_ERROR));
+        $retainedExecution = ActivityExecution::query()
+            ->where('workflow_run_id', $retainedRun->id)
+            ->sole();
+        $retainedAttempt = ActivityAttempt::query()
+            ->where('activity_execution_id', $retainedExecution->id)
+            ->sole();
+        $this->assertSame('worker-attempt-1', $retainedAttempt->worker_attempt_id);
+        $this->assertNotNull($retainedAttempt->last_heartbeat_at);
+
+        $currentRun = $this->createWaitingRun();
+        $currentTask = $this->createLeasedTask($currentRun);
+        $currentResult = $this->bridge->complete($currentTask->id, [$command]);
+
+        $this->assertFalse($currentResult['completed']);
+        $this->assertSame('invalid_commands', $currentResult['reason']);
+        $this->assertSame(TaskStatus::Leased, $currentTask->fresh()->status);
+        $currentExecutionCount = ActivityExecution::query()
+            ->where('workflow_run_id', $currentRun->id)
+            ->count();
+        $this->assertSame(0, $currentExecutionCount);
+    }
+
     public function testCompleteSeparatesPortableWorkerAttemptIdentityFromStrictDatabaseKeys(): void
     {
         $run = $this->createWaitingRun();

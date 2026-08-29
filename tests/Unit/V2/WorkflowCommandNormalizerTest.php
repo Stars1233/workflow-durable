@@ -402,6 +402,11 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
             'negotiated_worker_protocol_version',
             $contract['rolling_upgrade']['strict_shape_selected_by'],
         );
+        $this->assertSame('ignore', $contract['rolling_upgrade']['retained_nested_object_unknown_fields']);
+        $this->assertSame(
+            '1.19',
+            $contract['rolling_upgrade']['strict_nested_object_shape_from_protocol_version'],
+        );
     }
 
     public function testRecordLocalActivityAttemptReportsAreSelectedByNegotiatedProtocolVersion(): void
@@ -582,13 +587,46 @@ final class WorkflowCommandNormalizerTest extends NonDatabaseTestCase
                 'backoff_seconds' => [0],
                 'unexpected' => true,
             ],
-        ]]);
+        ]], '1.19');
 
         $this->assertArrayHasKey('commands.0.retry_policy.unexpected', $errors);
         $this->assertArrayHasKey('commands.0.non_retryable', $errors);
         $this->assertArrayHasKey('commands.0.attempts.0.unexpected', $errors);
         $this->assertArrayHasKey('commands.0.attempts.1.attempt_id', $errors);
         $this->assertArrayHasKey('commands.0.attempts.1.heartbeats.0.unexpected', $errors);
+    }
+
+    public function testProtocol118IgnoresUnknownNestedLocalActivityExtensions(): void
+    {
+        $normalized = WorkflowCommandNormalizer::normalize([[
+            'type' => 'record_local_activity',
+            'activity_type' => 'charge-card',
+            'result' => Serializer::serialize('charged'),
+            'outcome' => 'completed',
+            'attempts' => [[
+                'attempt_id' => 'attempt-1',
+                'attempt_number' => 1,
+                'outcome' => 'completed',
+                'worker_extension' => [
+                    'build' => 'next',
+                ],
+                'heartbeats' => [[
+                    'elapsed_ms' => 5,
+                    'heartbeat_extension' => true,
+                ]],
+            ]],
+            'retry_policy' => [
+                'max_attempts' => 1,
+                'retry_extension' => 'future-policy',
+            ],
+        ]], '1.18');
+
+        $this->assertSame('attempt-1', $normalized[0]['attempts'][0]['attempt_id']);
+        $this->assertSame(5, $normalized[0]['attempts'][0]['heartbeats'][0]['elapsed_ms']);
+        $this->assertSame(1, $normalized[0]['retry_policy']['max_attempts']);
+        $this->assertArrayNotHasKey('worker_extension', $normalized[0]['attempts'][0]);
+        $this->assertArrayNotHasKey('heartbeat_extension', $normalized[0]['attempts'][0]['heartbeats'][0]);
+        $this->assertArrayNotHasKey('retry_extension', $normalized[0]['retry_policy']);
     }
 
     public function testScheduleActivityRejectsInvalidRetryPolicy(): void
