@@ -7,10 +7,27 @@ namespace Workflow\V2\Support;
 use Carbon\CarbonInterface;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Support\Facades\Cache;
+use Workflow\Serializers\Base64;
 use Workflow\Serializers\CodecRegistry;
+use Workflow\Serializers\Y;
 
 final class BackendCapabilities
 {
+    /**
+     * Stable-v1 serializer settings that may remain while v1 runs drain.
+     *
+     * These values are diagnostic inputs only. They are intentionally absent
+     * from CodecRegistry so they cannot select a codec for a v2 payload.
+     *
+     * @var list<string>
+     */
+    private const LEGACY_V1_SERIALIZERS = [
+        Y::class,
+        Base64::class,
+        'workflow-serializer-y',
+        'workflow-serializer-base64',
+    ];
+
     /**
      * @return array<string, mixed>
      */
@@ -271,24 +288,39 @@ final class BackendCapabilities
 
         $configuredCanonical = null;
         if (is_string($configured) && $configured !== '') {
-            try {
-                $configuredCanonical = CodecRegistry::canonicalize($configured);
-            } catch (\InvalidArgumentException) {
-                $universalList = implode('", "', CodecRegistry::universal());
+            if (in_array(ltrim($configured, '\\'), self::LEGACY_V1_SERIALIZERS, true)) {
                 $issues[] = self::issue(
                     'codec',
-                    'error',
-                    'codec_unknown',
+                    'warning',
+                    'codec_legacy_v1_drain',
                     sprintf(
-                        'The configured workflows.serializer [%s] is not a known payload codec. '
-                        . 'Durable Workflow 2.0 supports exactly one payload codec ("%s"). '
-                        . 'Set workflows.serializer to "avro" before serving v2 traffic. '
-                        . 'Legacy PHP serializers are available only to the internal v1 import/drain reader; '
-                        . 'JSON remains the HTTP document transport and is not a workflow payload codec.',
+                        'The configured workflows.serializer [%s] is a supported legacy v1 serializer retained for migration. '
+                        . 'Durable Workflow 2.0 ignores this setting and uses "avro" for all new v2 payloads. '
+                        . 'It may remain only while v1 runs are draining; set workflows.serializer to "avro" '
+                        . 'or remove the published setting after the drain completes.',
                         $configured,
-                        $universalList,
                     ),
                 );
+            } else {
+                try {
+                    $configuredCanonical = CodecRegistry::canonicalize($configured);
+                } catch (\InvalidArgumentException) {
+                    $universalList = implode('", "', CodecRegistry::universal());
+                    $issues[] = self::issue(
+                        'codec',
+                        'error',
+                        'codec_unknown',
+                        sprintf(
+                            'The configured workflows.serializer [%s] is not a known payload codec. '
+                            . 'Durable Workflow 2.0 supports exactly one payload codec ("%s"). '
+                            . 'Set workflows.serializer to "avro" before serving v2 traffic. '
+                            . 'Legacy PHP serializers are available only to the internal v1 import/drain reader; '
+                            . 'JSON remains the HTTP document transport and is not a workflow payload codec.',
+                            $configured,
+                            $universalList,
+                        ),
+                    );
+                }
             }
         }
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.55` treats the official stable-v1 Y and Base64 serializer
+  settings as nonblocking migration diagnostics while v1 runs drain, without
+  changing the Avro-only codec used for all new v2 payloads.
 - Workflow `2.0.0-rc.54` validates service-mode parallel groups in the durable
   yielded-command sequence domain, so signal-resumed condition waits retain
   flat and nested mixed-group identity across cold replay and worker replacement.

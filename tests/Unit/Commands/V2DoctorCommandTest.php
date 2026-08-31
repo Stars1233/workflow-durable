@@ -7,6 +7,8 @@ namespace Tests\Unit\Commands;
 use Illuminate\Cache\Repository;
 use Tests\Support\NonLockingCacheStore;
 use Tests\TestCase;
+use Workflow\Serializers\Base64;
+use Workflow\Serializers\Y;
 
 final class V2DoctorCommandTest extends TestCase
 {
@@ -163,6 +165,58 @@ final class V2DoctorCommandTest extends TestCase
             ->assertSuccessful();
     }
 
+    #[\PHPUnit\Framework\Attributes\DataProvider('legacyV1SerializerProvider')]
+    public function testStrictModeAllowsLegacyV1SerializerWhileRunsDrain(string $serializer): void
+    {
+        $this->configureSupportedBackend();
+        config()
+            ->set('workflows.serializer', $serializer);
+
+        $this->artisan('workflow:v2:doctor', [
+            '--strict' => true,
+        ])
+            ->expectsOutputToContain('[OK] codec: avro')
+            ->expectsOutputToContain('[WARNING] [codec_legacy_v1_drain]')
+            ->doesntExpectOutputToContain('[ERROR] [codec_unknown]')
+            ->assertSuccessful();
+    }
+
+    public function testStrictModeRejectsUnknownCustomSerializer(): void
+    {
+        $this->configureSupportedBackend();
+        config()
+            ->set('workflows.serializer', 'App\\Custom\\V1Serializer');
+
+        $this->artisan('workflow:v2:doctor', [
+            '--strict' => true,
+        ])
+            ->expectsOutputToContain('[FAIL] codec: avro')
+            ->expectsOutputToContain('[ERROR] [codec_unknown]')
+            ->assertFailed();
+    }
+
+    public function testStrictModeRejectsJsonAsPayloadCodec(): void
+    {
+        $this->configureSupportedBackend();
+        config()
+            ->set('workflows.serializer', 'json');
+
+        $this->artisan('workflow:v2:doctor', [
+            '--strict' => true,
+        ])
+            ->expectsOutputToContain('[FAIL] codec: avro')
+            ->expectsOutputToContain('[ERROR] [codec_unknown]')
+            ->assertFailed();
+    }
+
+    public static function legacyV1SerializerProvider(): array
+    {
+        return [
+            'Y' => [Y::class],
+            'Base64' => [Base64::class],
+        ];
+    }
+
     private function configureNonLockingCacheStore(): void
     {
         $driver = 'test-non-locking';
@@ -179,5 +233,20 @@ final class V2DoctorCommandTest extends TestCase
             ->set("cache.stores.{$store}.driver", $driver);
         config()
             ->set('cache.default', $store);
+    }
+
+    private function configureSupportedBackend(): void
+    {
+        config()->set('database.default', 'pgsql');
+        config()
+            ->set('database.connections.pgsql.driver', 'pgsql');
+        config()
+            ->set('queue.default', 'redis');
+        config()
+            ->set('queue.connections.redis.driver', 'redis');
+        config()
+            ->set('cache.default', 'array');
+        config()
+            ->set('cache.stores.array.driver', 'array');
     }
 }

@@ -8,7 +8,9 @@ use Illuminate\Cache\Repository;
 use Illuminate\Support\Carbon;
 use Tests\Support\NonLockingCacheStore;
 use Tests\TestCase;
+use Workflow\Serializers\Base64;
 use Workflow\Serializers\CodecRegistry;
+use Workflow\Serializers\Y;
 use Workflow\V2\Support\BackendCapabilities;
 
 final class BackendCapabilitiesTest extends TestCase
@@ -287,25 +289,50 @@ final class BackendCapabilitiesTest extends TestCase
         $this->assertNotNull(collect($snapshot['issues'])->firstWhere('code', 'codec_unknown'));
     }
 
-    public function testLegacyPhpCodecCannotConfigureV2(): void
+    #[\PHPUnit\Framework\Attributes\DataProvider('legacyV1SerializerProvider')]
+    public function testLegacyV1SerializerIsNonBlockingMigrationDiagnostic(string $serializer): void
     {
-        config()->set('workflows.serializer', \Workflow\Serializers\Y::class);
+        $originalDatabaseDefault = config('database.default');
 
-        $snapshot = BackendCapabilities::snapshot();
+        try {
+            $this->configureSupportedBackend();
+            config()
+                ->set('workflows.serializer', $serializer);
 
-        $this->assertSame('avro', $snapshot['codec']['canonical']);
-        $this->assertNull($snapshot['codec']['configured_canonical']);
-        $this->assertTrue($snapshot['codec']['universal']);
-        $this->assertFalse($snapshot['codec']['configured_universal']);
+            $snapshot = BackendCapabilities::snapshot();
 
-        $codecIssue = collect($snapshot['issues'])
-            ->firstWhere('code', 'codec_unknown');
+            $this->assertSame('avro', $snapshot['codec']['canonical']);
+            $this->assertNull($snapshot['codec']['configured_canonical']);
+            $this->assertTrue($snapshot['codec']['universal']);
+            $this->assertFalse($snapshot['codec']['configured_universal']);
 
-        $this->assertNotNull($codecIssue);
-        $this->assertSame('error', $codecIssue['severity']);
-        $this->assertSame('codec', $codecIssue['component']);
-        $this->assertStringContainsString('exactly one payload codec', $codecIssue['message']);
-        $this->assertFalse($snapshot['codec']['supported']);
+            $codecIssue = collect($snapshot['issues'])
+                ->firstWhere('code', 'codec_legacy_v1_drain');
+
+            $this->assertNotNull($codecIssue);
+            $this->assertSame('warning', $codecIssue['severity']);
+            $this->assertSame('codec', $codecIssue['component']);
+            $this->assertStringContainsString('ignores this setting', $codecIssue['message']);
+            $this->assertStringContainsString('uses "avro" for all new v2 payloads', $codecIssue['message']);
+            $this->assertStringContainsString('may remain only while v1 runs are draining', $codecIssue['message']);
+            $this->assertTrue($snapshot['codec']['supported']);
+            $this->assertTrue($snapshot['supported']);
+            $this->assertTrue(BackendCapabilities::isSupported($snapshot));
+            $this->assertSame('warning', $snapshot['severity']);
+            $this->assertCount(1, $snapshot['issues']);
+        } finally {
+            config()->set('database.default', $originalDatabaseDefault);
+        }
+    }
+
+    public static function legacyV1SerializerProvider(): array
+    {
+        return [
+            'Y class from the published v1 config' => [Y::class],
+            'Base64 class' => [Base64::class],
+            'Y legacy id' => ['workflow-serializer-y'],
+            'Base64 legacy id' => ['workflow-serializer-base64'],
+        ];
     }
 
     public function testUnknownCodecStringProducesErrorSeverity(): void
@@ -377,37 +404,6 @@ final class BackendCapabilitiesTest extends TestCase
         }
     }
 
-    public function testSnapshotSeverityRollupReportsErrorForLegacyCodec(): void
-    {
-        // Establish a clean baseline so the legacy codec is the only issue.
-        $originalDatabaseDefault = config('database.default');
-
-        try {
-            config()->set('database.default', 'pgsql');
-            config()
-                ->set('database.connections.pgsql.driver', 'pgsql');
-            config()
-                ->set('queue.default', 'redis');
-            config()
-                ->set('queue.connections.redis.driver', 'redis');
-            config()
-                ->set('cache.default', 'array');
-            config()
-                ->set('cache.stores.array.driver', 'array');
-            config()
-                ->set('workflows.serializer', \Workflow\Serializers\Y::class);
-
-            $snapshot = BackendCapabilities::snapshot();
-
-            $codecIssue = collect($snapshot['issues'])->firstWhere('code', 'codec_unknown');
-            $this->assertNotNull($codecIssue);
-            $this->assertSame('error', $codecIssue['severity']);
-            $this->assertSame('error', $snapshot['severity']);
-        } finally {
-            config()->set('database.default', $originalDatabaseDefault);
-        }
-    }
-
     public function testSnapshotSeverityRollupReportsErrorWhenAnyIssueIsErrorSeverity(): void
     {
         config()->set('queue.default', 'sync');
@@ -465,5 +461,20 @@ final class BackendCapabilitiesTest extends TestCase
             ->set("cache.stores.{$store}.driver", $driver);
         config()
             ->set('cache.default', $store);
+    }
+
+    private function configureSupportedBackend(): void
+    {
+        config()->set('database.default', 'pgsql');
+        config()
+            ->set('database.connections.pgsql.driver', 'pgsql');
+        config()
+            ->set('queue.default', 'redis');
+        config()
+            ->set('queue.connections.redis.driver', 'redis');
+        config()
+            ->set('cache.default', 'array');
+        config()
+            ->set('cache.stores.array.driver', 'array');
     }
 }

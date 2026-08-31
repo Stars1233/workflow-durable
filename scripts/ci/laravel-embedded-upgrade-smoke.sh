@@ -77,15 +77,15 @@ set_env CACHE_STORE file
 set_env DW_V2_QUEUE workflow-v2
 php artisan key:generate --force --no-interaction
 
-composer require durable-workflow/workflow:1.0.80 \
+composer require durable-workflow/workflow:1.0.82 \
   --with-all-dependencies --no-interaction --no-progress --no-blocking --quiet
 
 resolved_v1=$(composer show durable-workflow/workflow --format=json | php -r '
   $package = json_decode(stream_get_contents(STDIN), true, 512, JSON_THROW_ON_ERROR);
   echo ltrim((string) $package["versions"][0], "v");
 ')
-if [ "$resolved_v1" != 1.0.80 ]; then
-  echo "Expected corrected stable 1.0.80, resolved ${resolved_v1}." >&2
+if [ "$resolved_v1" != 1.0.82 ]; then
+  echo "Expected latest stable 1.0.82, resolved ${resolved_v1}." >&2
   exit 1
 fi
 
@@ -95,6 +95,19 @@ fi
 php artisan vendor:publish \
   --provider='Workflow\Providers\WorkflowServiceProvider' \
   --tag=migrations --force --no-interaction
+php artisan vendor:publish \
+  --provider='Workflow\Providers\WorkflowServiceProvider' \
+  --tag=config --force --no-interaction
+php -r '
+  require "vendor/autoload.php";
+  $app = require "bootstrap/app.php";
+  $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+
+  if (config("workflows.serializer") !== Workflow\Serializers\Y::class) {
+      fwrite(STDERR, "The published stable-v1 config no longer retains the official Y serializer.\n");
+      exit(1);
+  }
+'
 php artisan migrate --force --no-interaction
 
 write_v1_sources() {
@@ -367,6 +380,36 @@ if [ "$resolved_v2" != "$expected_v2" ]; then
 fi
 
 php artisan migrate --force --no-interaction
+php artisan queue:restart --no-interaction
+
+artisan_output workflow:v2:doctor --strict >/dev/null
+doctor_json=$(artisan_output workflow:v2:doctor --strict --json)
+printf '%s' "$doctor_json" | php -r '
+  $snapshot = json_decode(stream_get_contents(STDIN), true, 512, JSON_THROW_ON_ERROR);
+  $codec = $snapshot["codec"] ?? [];
+  $issues = array_values(array_filter(
+      $snapshot["issues"] ?? [],
+      static fn (mixed $issue): bool => is_array($issue) && ($issue["component"] ?? null) === "codec",
+  ));
+  $issue = $issues[0] ?? [];
+  $message = (string) ($issue["message"] ?? "");
+
+  if (($snapshot["supported"] ?? false) !== true
+      || ($codec["configured"] ?? null) !== Workflow\Serializers\Y::class
+      || !array_key_exists("configured_canonical", $codec)
+      || $codec["configured_canonical"] !== null
+      || ($codec["canonical"] ?? null) !== "avro"
+      || ($codec["configured_universal"] ?? true) !== false
+      || ($codec["supported"] ?? false) !== true
+      || count($issues) !== 1
+      || ($issue["code"] ?? null) !== "codec_legacy_v1_drain"
+      || ($issue["severity"] ?? null) !== "warning"
+      || !str_contains($message, "ignores this setting and uses \"avro\" for all new v2 payloads")
+      || !str_contains($message, "may remain only while v1 runs are draining")) {
+      fwrite(STDERR, "The retained stable-v1 serializer did not produce the expected nonblocking migration diagnostic.\n");
+      exit(1);
+  }
+'
 
 if php artisan workflow:v2:upgrade-status --strategy=drain --json; then
   echo 'Drain strategy unexpectedly accepted an open v1 run.' >&2
