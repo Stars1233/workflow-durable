@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.53` preserves durable rejection reasons in history-export
+  command rows whose request payload is stored externally, matching run-detail
+  audit output while keeping accepted-command payload reasons private.
 - Workflow `2.0.0-rc.52` preserves the durable rejection reason on rejected
   signal command audit rows after a fresh read, including when the request
   payload is stored externally. Platform conformance suite 47 now pins the

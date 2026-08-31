@@ -27,6 +27,8 @@ use Tests\Fixtures\V2\TestUnsafeDeterminismWorkflow;
 use Tests\Fixtures\V2\TestUpdateWorkflow;
 use Tests\TestCase;
 use Workflow\Serializers\Serializer;
+use Workflow\V2\Contracts\ExternalPayloadStorageDriver;
+use Workflow\V2\Contracts\ExternalPayloadStoragePolicy;
 use Workflow\V2\Contracts\OperatorObservabilityRepository;
 use Workflow\V2\Enums\CommandStatus;
 use Workflow\V2\Enums\CommandType;
@@ -55,6 +57,7 @@ use Workflow\V2\Models\WorkflowTask;
 use Workflow\V2\Models\WorkflowTimer;
 use Workflow\V2\Models\WorkflowUpdate;
 use Workflow\V2\Support\ActivitySnapshot;
+use Workflow\V2\Support\ExternalPayloads;
 use Workflow\V2\Support\HistoryExport;
 use Workflow\V2\Support\RunDetailView;
 use Workflow\V2\Support\RunSummaryProjector;
@@ -1536,6 +1539,205 @@ final class V2RunDetailViewTest extends TestCase
         $this->assertSame('accepted', $acceptedStart['status']);
         $this->assertNull($acceptedStart['reason']);
         $this->assertNull($acceptedStart['rejection_reason']);
+    }
+
+    public function testRejectedExternalCommandKeepsDurableReasonAcrossDetailAndHistoryExport(): void
+    {
+        Queue::fake();
+
+        $payloadStorage = new class() implements ExternalPayloadStorageDriver {
+            /**
+             * @var array<string, string>
+             */
+            private array $payloads = [];
+
+            public function put(string $data, string $sha256, string $codec): string
+            {
+                $uri = 'memory://run-detail/' . $sha256;
+                $this->payloads[$uri] = $data;
+
+                return $uri;
+            }
+
+            public function get(string $uri): string
+            {
+                return $this->payloads[$uri]
+                    ?? throw new \RuntimeException(sprintf('Missing test payload [%s].', $uri));
+            }
+
+            public function delete(string $uri): void
+            {
+                unset($this->payloads[$uri]);
+            }
+        };
+        $this->app->instance(
+            ExternalPayloadStoragePolicy::class,
+            new class($payloadStorage) implements ExternalPayloadStoragePolicy {
+                public function __construct(
+                    private readonly ExternalPayloadStorageDriver $driver,
+                ) {
+                }
+
+                public function driverFor(?string $namespace): ?ExternalPayloadStorageDriver
+                {
+                    return $this->driver;
+                }
+
+                public function thresholdBytesFor(?string $namespace): ?int
+                {
+                    return 1;
+                }
+            },
+        );
+
+        $workflow = WorkflowStub::make(TestUpdateWorkflow::class, 'detail-rejected-external-signal-audit');
+        $workflow->start();
+        $runId = $workflow->runId();
+
+        $this->assertNotNull($runId);
+
+        $this->drainReadyTasks();
+        $this->waitFor(static fn (): bool => $workflow->refresh()->summary()?->wait_kind === 'signal');
+
+        $stateBefore = $workflow->currentState();
+        $historyCountBefore = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $runId)
+            ->count();
+        $taskCountBefore = WorkflowTask::query()
+            ->where('workflow_run_id', $runId)
+            ->count();
+
+        $invalid = $workflow->attemptSignalWithArguments('name-provided', [
+            'nickname' => 'Taylor',
+        ]);
+
+        $this->assertTrue($invalid->rejectedInvalidArguments());
+
+        /** @var WorkflowCommand $rejectedCommand */
+        $rejectedCommand = WorkflowCommand::query()->findOrFail($invalid->commandId());
+        /** @var WorkflowCommand $acceptedCommand */
+        $acceptedCommand = WorkflowCommand::query()
+            ->where('workflow_run_id', $runId)
+            ->where('command_type', CommandType::Start->value)
+            ->firstOrFail();
+
+        $this->assertIsString($rejectedCommand->payload);
+        $rejectedCommand->forceFill([
+            'payload' => ExternalPayloads::externalize(
+                $rejectedCommand->payload,
+                (string) $rejectedCommand->payload_codec,
+                $payloadStorage,
+                1,
+            ),
+        ])->save();
+        $acceptedPayload = Serializer::serializeWithCodec((string) $acceptedCommand->payload_codec, [
+            'reason' => 'private accepted command reason',
+        ]);
+        $acceptedCommand->forceFill([
+            'payload' => ExternalPayloads::externalize(
+                $acceptedPayload,
+                (string) $acceptedCommand->payload_codec,
+                $payloadStorage,
+                1,
+            ),
+        ])->save();
+
+        $persistedRejected = WorkflowCommand::query()->findOrFail($rejectedCommand->id);
+        $persistedAccepted = WorkflowCommand::query()->findOrFail($acceptedCommand->id);
+        $reloadedRun = WorkflowRun::query()->with('summary')->findOrFail($runId);
+        $detail = RunDetailView::forRun($reloadedRun);
+        $export = HistoryExport::forRun(WorkflowRun::query()->with('summary')->findOrFail($runId));
+
+        $this->assertIsString($persistedRejected->payload);
+        $this->assertIsString($persistedAccepted->payload);
+        $this->assertTrue(ExternalPayloads::isStoredReference($persistedRejected->payload));
+        $this->assertTrue(ExternalPayloads::isStoredReference($persistedAccepted->payload));
+        $this->assertSame('private accepted command reason', $persistedAccepted->commandReason());
+
+        $detailRejected = collect($detail['commands'])->firstWhere('id', $persistedRejected->id);
+        $exportRejected = collect($export['commands'])->firstWhere('id', $persistedRejected->id);
+
+        $this->assertIsArray($detailRejected);
+        $this->assertIsArray($exportRejected);
+
+        $projection = static function (array $row): array {
+            $timestamp = static fn (mixed $value): mixed => $value instanceof CarbonInterface
+                ? $value->toJSON()
+                : $value;
+
+            return [
+                'id' => $row['id'],
+                'sequence' => $row['sequence'],
+                'type' => $row['type'],
+                'target_scope' => $row['target_scope'],
+                'requested_run_id' => $row['requested_run_id'],
+                'resolved_run_id' => $row['resolved_run_id'],
+                'target_name' => $row['target_name'],
+                'status' => $row['status'],
+                'outcome' => $row['outcome'],
+                'reason' => $row['reason'],
+                'rejection_reason' => $row['rejection_reason'],
+                'validation_errors' => $row['validation_errors'],
+                'accepted_at' => $timestamp($row['accepted_at']),
+                'applied_at' => $timestamp($row['applied_at']),
+                'rejected_at' => $timestamp($row['rejected_at']),
+            ];
+        };
+
+        $expectedRejected = [
+            'id' => $persistedRejected->id,
+            'sequence' => $persistedRejected->command_sequence,
+            'type' => CommandType::Signal->value,
+            'target_scope' => 'instance',
+            'requested_run_id' => null,
+            'resolved_run_id' => $runId,
+            'target_name' => null,
+            'status' => CommandStatus::Rejected->value,
+            'outcome' => 'rejected_invalid_arguments',
+            'reason' => 'invalid_signal_arguments',
+            'rejection_reason' => 'invalid_signal_arguments',
+            'validation_errors' => [],
+            'accepted_at' => null,
+            'applied_at' => null,
+            'rejected_at' => $persistedRejected->rejected_at?->toJSON(),
+        ];
+
+        $this->assertSame($expectedRejected, $projection($detailRejected));
+        $this->assertSame($expectedRejected, $projection($exportRejected));
+
+        $detailAccepted = collect($detail['commands'])->firstWhere('id', $persistedAccepted->id);
+        $exportAccepted = collect($export['commands'])->firstWhere('id', $persistedAccepted->id);
+
+        $this->assertIsArray($detailAccepted);
+        $this->assertIsArray($exportAccepted);
+        $this->assertSame('accepted', $detailAccepted['status']);
+        $this->assertNull($detailAccepted['reason']);
+        $this->assertNull($detailAccepted['rejection_reason']);
+        $this->assertSame([], $detailAccepted['validation_errors']);
+        $this->assertSame('accepted', $exportAccepted['status']);
+        $this->assertNull($exportAccepted['reason']);
+        $this->assertNull($exportAccepted['rejection_reason']);
+        $this->assertSame([], $exportAccepted['validation_errors']);
+
+        $this->assertSame($stateBefore, $workflow->currentState());
+        $this->assertSame('waiting', $workflow->refresh()->status());
+        $this->assertSame($historyCountBefore, WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $runId)
+            ->count());
+        $this->assertSame($taskCountBefore, WorkflowTask::query() ->where('workflow_run_id', $runId) ->count());
+        $this->assertSame(0, WorkflowTask::query()
+            ->where('workflow_run_id', $runId)
+            ->whereIn('status', [TaskStatus::Ready->value, TaskStatus::Leased->value])
+            ->count());
+        $this->assertSame(0, WorkflowCommand::query()
+            ->where('workflow_run_id', $runId)
+            ->where('command_type', CommandType::Signal->value)
+            ->where('status', CommandStatus::Accepted->value)
+            ->count());
+        $this->assertSame(1, WorkflowSignal::query()
+            ->where('workflow_run_id', $runId)
+            ->where('status', 'rejected')
+            ->count());
     }
 
     public function testRunDetailViewKeepsSignalWaitCommandMetadataWhenCommandRowsDrift(): void

@@ -14,6 +14,7 @@ use Workflow\Serializers\AvroValueJsonProjection;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\V2\Contracts\HistoryExportRedactor;
 use Workflow\V2\Enums\ActivityStatus;
+use Workflow\V2\Enums\CommandStatus;
 use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowCommand;
@@ -1235,7 +1236,7 @@ final class HistoryExport
             'correlation_id' => $command->correlationId(),
             'status' => $command->status->value,
             'outcome' => $command->outcome?->value,
-            'reason' => self::commandPayloadStoredExternally($command) ? null : $command->commandReason(),
+            'reason' => self::commandReason($command),
             'rejection_reason' => $command->rejection_reason,
             'validation_errors' => self::commandPayloadStoredExternally($command) ? [] : $command->validationErrors(),
             'accepted_at' => self::timestamp($command->accepted_at),
@@ -1249,6 +1250,15 @@ final class HistoryExport
         $payload = self::stringValue($command->payload);
 
         return $payload !== null && ExternalPayloads::isStoredReference($payload);
+    }
+
+    private static function commandReason(WorkflowCommand $command): ?string
+    {
+        if ($command->status === CommandStatus::Rejected) {
+            return $command->commandReason();
+        }
+
+        return self::commandPayloadStoredExternally($command) ? null : $command->commandReason();
     }
 
     /**
