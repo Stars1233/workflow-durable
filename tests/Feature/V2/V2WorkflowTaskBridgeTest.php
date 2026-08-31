@@ -12,11 +12,14 @@ use Illuminate\Support\Str;
 use RuntimeException;
 use Symfony\Component\Process\Process;
 use Symfony\Component\Uid\Ulid;
+use Tests\Fixtures\V2\TestGreetingActivity;
 use Tests\Fixtures\V2\TestGreetingWorkflow;
 use Tests\Fixtures\V2\TestPortableMemoBinaryContentDriftWorkflow;
 use Tests\Fixtures\V2\TestPortableMemoDoubleDriftWorkflow;
 use Tests\Fixtures\V2\TestPortableMemoTextDriftWorkflow;
 use Tests\Fixtures\V2\TestPortableMemoWorkflow;
+use Tests\Fixtures\V2\TestSignalResumedParallelWorkflow;
+use Tests\Fixtures\V2\TestTimerWorkflow;
 use Tests\TestCase;
 use Workflow\Serializers\AvroBinaryValue;
 use Workflow\Serializers\AvroMapValue;
@@ -2390,6 +2393,9 @@ final class V2WorkflowTaskBridgeTest extends TestCase
 
     public function testFiberRunnerReplaysHistoryPayloadWithBridgeAssignedCommandSequences(): void
     {
+        self::stopWorkers();
+        Queue::fake();
+
         $run = $this->createWaitingRun();
         $workflowClass = BridgeHistorySequenceWorkflow::class;
         $workflowType = 'bridge-history-sequence-workflow';
@@ -2450,7 +2456,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             ->firstOrFail();
 
         $this->assertSame(3, (int) $scheduledEvent->sequence);
-        $this->assertSame(3, $scheduledEvent->payload['sequence']);
+        $this->assertSame(1, $scheduledEvent->payload['sequence']);
 
         /** @var ActivityTaskBridge $activityBridge */
         $activityBridge = $this->app->make(ActivityTaskBridge::class);
@@ -2478,7 +2484,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             ->firstWhere('event_type', 'ActivityCompleted');
 
         $this->assertIsArray($completedEvent);
-        $this->assertSame(3, $completedEvent['payload']['sequence']);
+        $this->assertSame(1, $completedEvent['payload']['sequence']);
 
         $resumedStep = WorkflowFiberRunner::forClass(
             $workflowClass,
@@ -2546,7 +2552,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             ['schedule_activity', 'schedule_activity', 'start_timer'],
             array_column($authored->commands, 'type'),
         );
-        $this->assertSame([3, 3, 3], array_map(
+        $this->assertSame([1, 1, 1], array_map(
             static fn (array $command): int => $command['parallel_group_path'][0][
                 'parallel_group_base_sequence'
             ],
@@ -8483,6 +8489,16 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertSame('rust:condition-wait:0', $cancelled->payload['condition_wait_occurrence_id'] ?? null);
     }
 
+    public function testSignalResumedFlatMixedGroupUsesDurableCommandSequenceAcrossColdReplay(): void
+    {
+        $this->assertSignalResumedMixedGroupSurvivesColdReplay(false, true);
+    }
+
+    public function testSignalResumedNestedMixedGroupUsesDurableCommandSequenceAcrossColdReplay(): void
+    {
+        $this->assertSignalResumedMixedGroupSurvivesColdReplay(true, false);
+    }
+
     public function testCompleteStartsChildWorkflow(): void
     {
         $run = $this->createWaitingRun();
@@ -10960,6 +10976,70 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         ]);
     }
 
+    public function testCompleteRetainsFailClosedParallelMetadataValidation(): void
+    {
+        $entry = static fn (int $base, int $size, int $index, string $kind = 'activity'): array => [
+            'parallel_group_id' => ($kind === 'activity' ? 'parallel-activities' : 'parallel-calls')
+                . ":{$base}:{$size}",
+            'parallel_group_kind' => $kind,
+            'parallel_group_base_sequence' => $base,
+            'parallel_group_size' => $size,
+            'parallel_group_index' => $index,
+        ];
+        $command = static fn (string $name, array $path): array => [
+            'type' => 'schedule_activity',
+            'activity_type' => $name,
+            ...($path[array_key_last($path)] ?? []),
+            'parallel_group_path' => $path,
+        ];
+
+        $group = [$entry(1, 3, 0), $entry(1, 3, 1), $entry(1, 3, 2)];
+        $overlap = [$entry(2, 3, 0), $entry(2, 3, 1), $entry(2, 3, 2)];
+        $relabelled = $entry(1, 3, 1, 'mixed');
+        $nonContiguous = [$entry(1, 2, 0), $entry(1, 2, 1)];
+        $cases = [
+            'malformed path' => [[
+                'type' => 'schedule_activity',
+                'activity_type' => 'malformed',
+                ...$group[0],
+                'parallel_group_path' => 'not-a-path',
+            ]],
+            'overlapping groups' => [
+                $command('overlap-0', [$group[0]]),
+                $command('overlap-1', [$group[1], $overlap[0]]),
+                $command('overlap-2', [$group[2], $overlap[1]]),
+                $command('overlap-3', [$overlap[2]]),
+            ],
+            'incomplete group' => [$command('incomplete-0', [$group[0]]), $command('incomplete-1', [$group[1]])],
+            'relabelled member' => [
+                $command('relabelled-0', [$group[0]]),
+                $command('relabelled-1', [$relabelled]),
+                $command('relabelled-2', [$group[2]]),
+            ],
+            'non-contiguous group' => [
+                $command('non-contiguous-0', [$nonContiguous[0]]),
+                [
+                    'type' => 'schedule_activity',
+                    'activity_type' => 'interloper',
+                ],
+                $command('non-contiguous-1', [$nonContiguous[1]]),
+            ],
+        ];
+
+        foreach ($cases as $label => $commands) {
+            $run = $this->createWaitingRun();
+            $task = $this->createLeasedTask($run);
+            $result = $this->bridge->complete($task->id, $commands);
+
+            $this->assertFalse($result['completed'], $label);
+            $this->assertSame('invalid_commands', $result['reason'], $label);
+            $this->assertDatabaseMissing('workflow_history_events', [
+                'workflow_run_id' => $run->id,
+                'event_type' => HistoryEventType::ActivityScheduled->value,
+            ]);
+        }
+    }
+
     public function testCompleteWithNonTerminalAndTerminalCommands(): void
     {
         $run = $this->createWaitingRun();
@@ -11525,6 +11605,308 @@ final class V2WorkflowTaskBridgeTest extends TestCase
                 ? HistoryEventType::ActivityCompleted->value
                 : HistoryEventType::TimerFired->value,
         ]);
+    }
+
+    private function assertSignalResumedMixedGroupSurvivesColdReplay(bool $nested, bool $timerFirst): void
+    {
+        self::stopWorkers();
+        Queue::fake();
+
+        $run = $this->createWaitingRun();
+        $run->forceFill([
+            'workflow_class' => TestSignalResumedParallelWorkflow::class,
+            'workflow_type' => 'test-signal-resumed-parallel-workflow',
+            'payload_codec' => 'avro',
+            'arguments' => Serializer::serializeWithCodec('avro', [$nested]),
+        ])->save();
+        WorkflowInstance::query()
+            ->findOrFail($run->workflow_instance_id)
+            ->forceFill([
+                'workflow_class' => TestSignalResumedParallelWorkflow::class,
+                'workflow_type' => 'test-signal-resumed-parallel-workflow',
+            ])->save();
+
+        $openTask = $this->createLeasedTask($run);
+        $opened = $this->bridge->complete($openTask->id, [
+            [
+                'type' => 'record_side_effect',
+                'result' => Serializer::serializeWithCodec('avro', 'prepared'),
+                'payload_codec' => 'avro',
+            ],
+            [
+                'type' => 'record_side_effect',
+                'result' => Serializer::serializeWithCodec('avro', 'ready'),
+                'payload_codec' => 'avro',
+            ],
+            [
+                'type' => 'open_condition_wait',
+                'condition_key' => 'approval.ready',
+                'condition_definition_fingerprint' => 'condition-fp-signal-parallel',
+                'condition_wait_occurrence_id' => 'php:condition-wait:0',
+                'timeout_seconds' => 60,
+            ],
+        ]);
+
+        $this->assertTrue($opened['completed']);
+        $this->assertSame('waiting', $opened['run_status']);
+        $this->assertSame([1, 2, 3], WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->whereIn('event_type', [
+                HistoryEventType::SideEffectRecorded->value,
+                HistoryEventType::ConditionWaitOpened->value,
+            ])
+            ->orderBy('sequence')
+            ->get()
+            ->map(static fn (WorkflowHistoryEvent $event): mixed => $event->payload['sequence'] ?? null)
+            ->all());
+
+        $run->forceFill([
+            'last_command_sequence' => 9,
+        ])->save();
+        $signal = $this->recordReceivedSignal($run, 'approve', null, [true]);
+        $this->assertSame(10, $signal->command_sequence);
+        WorkflowHistoryEvent::record($run, HistoryEventType::RepairRequested, [
+            'workflow_instance_id' => $run->workflow_instance_id,
+            'workflow_run_id' => $run->id,
+            'liveness_state' => 'waiting',
+            'wait_kind' => 'condition',
+        ]);
+
+        $resumeTask = $this->createLeasedTask($run);
+        $resumeTask->forceFill([
+            'payload' => [
+                'workflow_wait_kind' => 'condition',
+                'open_wait_id' => 'signal-application:' . $signal->id,
+                'resume_source_kind' => 'workflow_signal',
+                'resume_source_id' => $signal->id,
+                'workflow_signal_id' => $signal->id,
+                'signal_name' => $signal->signal_name,
+                'workflow_command_id' => $signal->workflow_command_id,
+            ],
+        ])->save();
+
+        $scheduled = $this->bridge->complete($resumeTask->id, $this->signalResumedParallelCommands($nested));
+
+        $this->assertTrue($scheduled['completed']);
+        $this->assertSame('waiting', $scheduled['run_status']);
+        $this->assertCount(3, $scheduled['created_task_ids']);
+        $this->assertGreaterThan(6, (int) $run->fresh()->last_history_sequence);
+        $this->assertSame([4, 5, 6], WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->whereIn('event_type', [
+                HistoryEventType::ActivityScheduled->value,
+                HistoryEventType::ChildWorkflowScheduled->value,
+                HistoryEventType::TimerScheduled->value,
+            ])
+            ->get()
+            ->filter(static fn (WorkflowHistoryEvent $event): bool =>
+                is_array($event->payload['parallel_group_path'] ?? null))
+            ->sortBy(static fn (WorkflowHistoryEvent $event): int => (int) $event->payload['sequence'])
+            ->map(static fn (WorkflowHistoryEvent $event): int => (int) $event->payload['sequence'])
+            ->values()
+            ->all());
+
+        /** @var ActivityTaskBridge $activityBridge */
+        $activityBridge = $this->app->make(ActivityTaskBridge::class);
+        /** @var ActivityExecution $activity */
+        $activity = ActivityExecution::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('sequence', 4)
+            ->sole();
+        /** @var WorkflowTask $activityTask */
+        $activityTask = WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Activity->value)
+            ->get()
+            ->sole(static fn (WorkflowTask $task): bool =>
+                ($task->payload['activity_execution_id'] ?? null) === $activity->id);
+        $activityClaim = $activityBridge->claim($activityTask->id, 'activity-worker-one');
+        $this->assertNotNull($activityClaim);
+        $activityAttemptId = $activityClaim['activity_attempt_id'];
+        $this->assertIsString($activityAttemptId);
+        $completeActivity = function () use ($activityBridge, $activityAttemptId): void {
+            $completed = $activityBridge->complete($activityAttemptId, 'Hello, Ada!');
+            $this->assertTrue($completed['recorded']);
+            $this->assertNull($completed['next_task_id']);
+
+            $duplicate = $activityBridge->complete($activityAttemptId, 'duplicate');
+            $this->assertFalse($duplicate['recorded']);
+            $this->assertSame('stale_attempt', $duplicate['reason']);
+        };
+
+        /** @var WorkflowTimer $timer */
+        $timer = WorkflowTimer::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('sequence', 6)
+            ->sole();
+        /** @var WorkflowTask $timerTask */
+        $timerTask = WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Timer->value)
+            ->get()
+            ->sole(static fn (WorkflowTask $task): bool => ($task->payload['timer_id'] ?? null) === $timer->id);
+        $fireTimer = function () use ($run, $timerTask): void {
+            $this->app->call([new RunTimerTask($timerTask->id), 'handle']);
+            $this->app->call([new RunTimerTask($timerTask->id), 'handle']);
+            $this->assertSame(1, WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $run->id)
+                ->where('event_type', HistoryEventType::TimerFired->value)
+                ->get()
+                ->filter(static fn (WorkflowHistoryEvent $event): bool => ($event->payload['sequence'] ?? null) === 6)
+                ->count());
+        };
+
+        $timerFirst ? $fireTimer() : $completeActivity();
+        $this->assertSame(0, $this->readyWorkflowTaskCount($run));
+        $timerFirst ? $completeActivity() : $fireTimer();
+        $this->assertSame(0, $this->readyWorkflowTaskCount($run));
+
+        $partialReplay = WorkflowFiberRunner::forClass(
+            TestSignalResumedParallelWorkflow::class,
+            $run->workflow_instance_id,
+            $run->id,
+            [$nested],
+            'avro',
+            $this->coldReplayHistory($run),
+        )->step();
+        $this->assertFalse($partialReplay->completed);
+        $this->assertSame([], $partialReplay->commands);
+
+        /** @var WorkflowLink $childLink */
+        $childLink = WorkflowLink::query()
+            ->where('parent_workflow_run_id', $run->id)
+            ->where('link_type', 'child_workflow')
+            ->where('sequence', 5)
+            ->sole();
+        /** @var WorkflowTask $childTask */
+        $childTask = WorkflowTask::query()
+            ->where('workflow_run_id', $childLink->child_workflow_run_id)
+            ->where('task_type', TaskType::Workflow->value)
+            ->sole();
+        $childClaim = $this->bridge->claimStatus($childTask->id, 'child-worker');
+        $this->assertTrue($childClaim['claimed']);
+        $childCompleted = $this->bridge->complete($childTask->id, [[
+            'type' => 'complete_workflow',
+            'result' => Serializer::serializeWithCodec('avro', [
+                'waited' => true,
+            ]),
+            'payload_codec' => 'avro',
+        ]]);
+        $this->assertTrue($childCompleted['completed']);
+        $this->assertSame(1, $this->readyWorkflowTaskCount($run));
+
+        /** @var WorkflowTask $replacementTask */
+        $replacementTask = WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Workflow->value)
+            ->where('status', TaskStatus::Ready->value)
+            ->sole();
+        $replacementClaim = $this->bridge->claimStatus($replacementTask->id, 'replacement-worker');
+        $this->assertTrue($replacementClaim['claimed']);
+        $replacementHistory = $this->bridge->historyPayload($replacementTask->id);
+        $this->assertNotNull($replacementHistory);
+
+        $coldReplay = WorkflowFiberRunner::forClass(
+            TestSignalResumedParallelWorkflow::class,
+            $run->workflow_instance_id,
+            $run->id,
+            [$nested],
+            'avro',
+            $replacementHistory['history_events'],
+        )->step();
+        $this->assertTrue($coldReplay->completed);
+        $this->assertSame(['complete_workflow'], array_column($coldReplay->commands, 'type'));
+
+        $finished = $this->bridge->complete($replacementTask->id, $coldReplay->commands);
+        $this->assertTrue($finished['completed']);
+        $this->assertSame('completed', $finished['run_status']);
+        $duplicate = $this->bridge->complete($replacementTask->id, $coldReplay->commands);
+        $this->assertFalse($duplicate['completed']);
+        $this->assertSame('task_not_leased', $duplicate['reason']);
+        $this->assertSame(1, WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::WorkflowCompleted->value)
+            ->count());
+        $this->assertSame(1, ActivityExecution::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('sequence', 4)
+            ->count());
+        $this->assertSame(1, WorkflowLink::query()
+            ->where('parent_workflow_run_id', $run->id)
+            ->where('sequence', 5)
+            ->count());
+        $this->assertSame(1, WorkflowTimer::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('sequence', 6)
+            ->count());
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function signalResumedParallelCommands(bool $nested): array
+    {
+        $outer = static fn (int $index): array => [
+            'parallel_group_id' => 'parallel-calls:4:3',
+            'parallel_group_kind' => 'mixed',
+            'parallel_group_base_sequence' => 4,
+            'parallel_group_size' => 3,
+            'parallel_group_index' => $index,
+        ];
+        $inner = static fn (int $index): array => [
+            'parallel_group_id' => 'parallel-calls:5:2',
+            'parallel_group_kind' => 'mixed',
+            'parallel_group_base_sequence' => 5,
+            'parallel_group_size' => 2,
+            'parallel_group_index' => $index,
+        ];
+        $paths = $nested
+            ? [[$outer(0)], [$outer(1), $inner(0)], [$outer(2), $inner(1)]]
+            : [[$outer(0)], [$outer(1)], [$outer(2)]];
+
+        return [
+            [
+                'type' => 'schedule_activity',
+                'activity_type' => TestGreetingActivity::class,
+                'arguments' => Serializer::serializeWithCodec('avro', ['Ada']),
+                'payload_codec' => 'avro',
+                ...$paths[0][array_key_last($paths[0])],
+                'parallel_group_path' => $paths[0],
+            ],
+            [
+                'type' => 'start_child_workflow',
+                'workflow_type' => TestTimerWorkflow::class,
+                'arguments' => Serializer::serializeWithCodec('avro', [0]),
+                'payload_codec' => 'avro',
+                ...$paths[1][array_key_last($paths[1])],
+                'parallel_group_path' => $paths[1],
+            ],
+            [
+                'type' => 'start_timer',
+                'delay_seconds' => 0,
+                ...$paths[2][array_key_last($paths[2])],
+                'parallel_group_path' => $paths[2],
+            ],
+        ];
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function coldReplayHistory(WorkflowRun $run): array
+    {
+        return WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->orderBy('sequence')
+            ->get()
+            ->map(static fn (WorkflowHistoryEvent $event): array => [
+                'id' => $event->id,
+                'sequence' => $event->sequence,
+                'event_type' => $event->event_type->value,
+                'payload' => $event->payload,
+                'recorded_at' => $event->recorded_at?->toJSON(),
+            ])
+            ->all();
     }
 
     private function bindHistoryProjectionSpy()

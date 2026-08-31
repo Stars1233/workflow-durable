@@ -68,6 +68,10 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
                 $this->assertStandaloneParallelChildBarrierFixture($fixture);
             }
 
+            if (($fixture['id'] ?? null) === 'signal-resumed-mixed-group-command-sequence') {
+                $this->assertSignalResumedMixedGroupCommandSequenceFixture($fixture);
+            }
+
             if (($fixture['id'] ?? null) === 'portable-local-activity-attempt-identity-cold-reload') {
                 $this->assertPortableLocalActivityAttemptIdentitySurvivesColdReload($fixture);
             }
@@ -218,6 +222,19 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
         );
 
         $scheduled = $bridge->complete($parentTask->id, $commands);
+        if (! $scheduled['completed'] && $scheduled['reason'] === 'invalid_commands') {
+            foreach ([
+                1 => 'prepared',
+                2 => 'ready',
+            ] as $sequence => $result) {
+                WorkflowHistoryEvent::record($parentRun, HistoryEventType::SideEffectRecorded, [
+                    'sequence' => $sequence,
+                    'result' => Serializer::serializeWithCodec($workflow['payload_codec'], $result),
+                ], $parentTask);
+            }
+
+            $scheduled = $bridge->complete($parentTask->id, $commands);
+        }
         $this->assertTrue($scheduled['completed'], json_encode($scheduled, JSON_THROW_ON_ERROR));
         $this->assertCount(2, $scheduled['created_task_ids']);
 
@@ -286,6 +303,90 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
             ->where('workflow_run_id', $parentRun->id)
             ->where('event_type', HistoryEventType::ChildRunCompleted->value)
             ->count());
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     */
+    private function assertSignalResumedMixedGroupCommandSequenceFixture(array $fixture): void
+    {
+        $this->clearWorkflowState();
+
+        $workflow = $fixture['workflow'];
+        $bridge = $this->app->make(WorkflowTaskBridge::class);
+        $stub = WorkflowStub::make(
+            $workflow['type'],
+            sprintf('regression-corpus-signal-resume-%d', ++$this->workflowNumber),
+        );
+        $stub->start(...$workflow['arguments']);
+
+        /** @var WorkflowRun $run */
+        $run = WorkflowRun::query()->findOrFail($stub->runId());
+        /** @var WorkflowTask $task */
+        $task = WorkflowTask::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('task_type', TaskType::Workflow->value)
+            ->where('status', TaskStatus::Ready->value)
+            ->firstOrFail();
+
+        $claim = $bridge->claimStatus($task->id, 'regression-corpus-signal-resume-worker');
+        $this->assertTrue($claim['claimed']);
+
+        foreach ($fixture['history'] as $event) {
+            if (is_array($event['payload']['parallel_group_path'] ?? null)) {
+                continue;
+            }
+
+            WorkflowHistoryEvent::record(
+                $run,
+                HistoryEventType::from($event['event_type']),
+                $event['payload'],
+                $task,
+            );
+        }
+
+        $parallelKeys = array_flip([
+            'parallel_group_id',
+            'parallel_group_kind',
+            'parallel_group_base_sequence',
+            'parallel_group_size',
+            'parallel_group_index',
+            'parallel_group_path',
+        ]);
+        $commands = [];
+        foreach ($fixture['history'] as $event) {
+            $payload = $event['payload'];
+            $command = match ($event['event_type']) {
+                'ActivityScheduled' => [
+                    'type' => 'schedule_activity',
+                    'activity_type' => $payload['activity_type'],
+                    'arguments' => Serializer::serializeWithCodec($workflow['payload_codec'], ['Ada']),
+                    'payload_codec' => $workflow['payload_codec'],
+                ],
+                'ChildWorkflowScheduled' => [
+                    'type' => 'start_child_workflow',
+                    'workflow_type' => $payload['child_workflow_type'],
+                    'arguments' => Serializer::serializeWithCodec($workflow['payload_codec'], [0]),
+                    'payload_codec' => $workflow['payload_codec'],
+                ],
+                'TimerScheduled' => [
+                    'type' => 'start_timer',
+                    'delay_seconds' => $payload['delay_seconds'],
+                ],
+                default => null,
+            };
+
+            if ($command === null || ! is_array($payload['parallel_group_path'] ?? null)) {
+                continue;
+            }
+
+            $commands[] = [...$command, ...array_intersect_key($payload, $parallelKeys)];
+        }
+
+        $scheduled = $bridge->complete($task->id, $commands);
+
+        $this->assertTrue($scheduled['completed'], json_encode($scheduled, JSON_THROW_ON_ERROR));
+        $this->assertCount(3, $scheduled['created_task_ids']);
     }
 
     /**

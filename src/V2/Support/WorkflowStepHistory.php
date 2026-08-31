@@ -45,6 +45,32 @@ final class WorkflowStepHistory
     public const VERSION_MARKER = 'version marker';
 
     /**
+     * Return the next identity in the workflow's yielded-command sequence.
+     *
+     * History rows and control-plane command snapshots have their own sequence
+     * domains. Only typed workflow-step history is authoritative here; events
+     * such as SignalReceived and RepairRequested must not move this cursor.
+     */
+    public static function nextDurableCommandSequence(WorkflowRun $run): int
+    {
+        $lastSequence = 0;
+
+        foreach (self::historyEventsForRun($run) as $event) {
+            if (! $event instanceof WorkflowHistoryEvent || ! self::isWorkflowStepEvent($event)) {
+                continue;
+            }
+
+            $sequence = self::intValue($event->payload['sequence'] ?? null);
+
+            if ($sequence !== null) {
+                $lastSequence = max($lastSequence, $sequence);
+            }
+        }
+
+        return $lastSequence + 1;
+    }
+
+    /**
      * @param array<string, string|null> $expectedDetails
      */
     public static function assertCompatible(

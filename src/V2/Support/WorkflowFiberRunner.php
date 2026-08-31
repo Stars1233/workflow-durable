@@ -334,7 +334,7 @@ final class WorkflowFiberRunner
             if ($current instanceof AllCall) {
                 $historySequence = $this->historySequenceForCurrentPosition();
                 $baseSequence = $historySequence
-                    ?? ($this->hasReplayHistory ? $this->nextHistoryEventSequence() : $this->sequence);
+                    ?? ($this->hasReplayHistory ? $this->nextDurableCommandSequence() : $this->sequence);
                 $leafDescriptors = $current->leafDescriptors($baseSequence);
                 $groupSize = count($leafDescriptors);
 
@@ -1058,12 +1058,19 @@ final class WorkflowFiberRunner
         return $this->hasReplayHistory ? null : $this->sequence;
     }
 
-    private function nextHistoryEventSequence(): int
+    private function nextDurableCommandSequence(): int
     {
         $lastSequence = 0;
 
         foreach ($this->historyEvents as $event) {
-            $sequence = self::intValue($event['sequence'] ?? null);
+            if (! self::hasWorkflowCommandSequence(self::eventType($event))) {
+                continue;
+            }
+
+            $payload = is_array($event['payload'] ?? null) ? $event['payload'] : [];
+            $sequence = self::intValue($payload['sequence'] ?? null)
+                ?? self::intValue($payload['workflow_sequence'] ?? null);
+
             if ($sequence !== null) {
                 $lastSequence = max($lastSequence, $sequence);
             }
@@ -1460,8 +1467,8 @@ final class WorkflowFiberRunner
     }
 
     /**
-     * Real worker-protocol command sequences are assigned by the bridge from
-     * the run's global history sequence. The runner advances through the
+     * Real worker-protocol command sequences are assigned by the bridge in
+     * the durable workflow-command domain. The runner advances through the
      * workflow's yielded commands locally, so replay has to translate the
      * local position to the persisted command sequence before looking up
      * ActivityCompleted, TimerFired, marker, and other history outcomes.

@@ -919,7 +919,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 ];
             }
 
-            $sequence = ($run->last_history_sequence ?? 0) + 1;
+            $sequence = WorkflowStepHistory::nextDurableCommandSequence($run);
             $createdTaskIds = [];
             $invalidUpdateCommands = $this->validateUpdateCommands($run, $task, $parsed['non_terminal']);
 

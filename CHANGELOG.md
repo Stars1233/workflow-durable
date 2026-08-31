@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Workflow `2.0.0-rc.54` validates service-mode parallel groups in the durable
+  yielded-command sequence domain, so signal-resumed condition waits retain
+  flat and nested mixed-group identity across cold replay and worker replacement.
 - Workflow `2.0.0-rc.53` preserves durable rejection reasons in history-export
   command rows whose request payload is stored externally, matching run-detail
   audit output while keeping accepted-command payload reasons private.
