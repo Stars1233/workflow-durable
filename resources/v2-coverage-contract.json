@@ -3,7 +3,8 @@
     "branch": "v2",
     "measurement": {
         "metric": "line",
-        "test_suite": "unit",
+        "test_suite": "unit+feature-mysql",
+        "coverage_driver": "pcov",
         "source": {
             "root": "src",
             "suffix": ".php",
@@ -11,11 +12,11 @@
         }
     },
     "ratchet": {
-        "accepted_baseline_basis_points": 6000,
+        "accepted_baseline_basis_points": 8530,
         "target_basis_points": 10000
     },
     "provenance": {
-        "observed_at": "2026-08-29",
-        "evidence": "The prior v2 coverage job measured 32,895 of 57,191 executable lines at commit f622bd2d4793790748f5b3ef8539bc51c7557f40. The 60.00% floor requires the branch-bound job to publish exact covered and executable line totals across the complete current source inventory."
+        "observed_at": "2026-09-01",
+        "evidence": "Public full qualification run 33469360974 measured 51,474 of 60,342 executable lines (85.30%) at commit adc71e1b54351274c06ca315a32fb6a8e21135c3 by unioning one unit report with all four MySQL feature-shard reports across the complete production source inventory."
     }
 }
