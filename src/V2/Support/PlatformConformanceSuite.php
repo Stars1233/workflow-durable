@@ -147,8 +147,8 @@ final class PlatformConformanceSuite
         }
 
         $release = is_array($composer) ? ($composer['extra']['durable-workflow']['product-train'] ?? null) : null;
-        if (! is_string($release) || preg_match('/\A2\.0\.0-rc\.[1-9][0-9]*\z/D', $release) !== 1) {
-            throw new RuntimeException('Workflow package metadata must declare one exact 2.0 release candidate.');
+        if (! is_string($release) || preg_match('/\A2\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z/D', $release) !== 1) {
+            throw new RuntimeException('Workflow package metadata must declare one exact stable 2.x release.');
         }
 
         return $release;

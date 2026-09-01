@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 2.0.2 - 2026-09-01
+
+- Workflow `2.0.2` reports its stable package identity through the platform
+  conformance API, allowing published-package verification after the 2.0 launch.
+
 ## 2.0.1 - 2026-09-01
 
 - Workflow `2.0.1` keeps PHP exception traces Avro-portable when argument
